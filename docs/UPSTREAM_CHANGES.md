@@ -41,12 +41,19 @@ dispatcher upstream registered for them.
 permanent — it disables bean-definition collision detection for every bean in the
 application in order to replace one of them.
 
+**Fails closed.** If the override cannot be installed, startup aborts. A deployment in that
+state silently loses every piece of runtime-added content, which is the silent-degradation
+failure this project refuses elsewhere. `skald.dispatcher.require-override=false` downgrades
+it to a warning; `pom.xml` sets exactly that for the test run, because ContainerProxy's own
+test helper legitimately substitutes this bean. That does not weaken the guarantee —
+`LazyProxyDispatcherServiceTest` asserts the installed type directly.
+
 **What this depends on upstream, and how it fails if upstream changes:**
 
 | Assumption | If it breaks |
 |---|---|
 | A bean definition named `proxyDispatcherService` exists | Startup fails with an explicit message |
-| It is defined by class, not by a `@Bean` factory method | Startup logs a loud WARN and the override is skipped |
+| It is defined by class, not by a `@Bean` factory method | **Startup fails**, unless `skald.dispatcher.require-override=false` |
 | `ProxyDispatcherService` is non-final with a non-final `getDispatcher` | Compile error |
 | Its constructor takes `(IProxySpecProvider, IProxySharingStoreFactory, ConfigurableListableBeanFactory, DefaultProxyDispatcher)` | Compile error |
 | `ProxyService` injects the concrete class by type | Silent — covered by `LazyProxyDispatcherServiceTest` |

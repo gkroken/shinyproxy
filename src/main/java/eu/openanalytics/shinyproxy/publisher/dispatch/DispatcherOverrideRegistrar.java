@@ -30,6 +30,8 @@ import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 /**
@@ -50,11 +52,31 @@ import org.springframework.stereotype.Component;
  * resolves it identically.
  */
 @Component
-public class DispatcherOverrideRegistrar implements BeanDefinitionRegistryPostProcessor {
+public class DispatcherOverrideRegistrar implements BeanDefinitionRegistryPostProcessor, EnvironmentAware {
 
     static final String BEAN_NAME = "proxyDispatcherService";
 
+    /**
+     * When true (the default), failing to install the override aborts startup instead of
+     * merely warning. A deployment that cannot install it silently loses all runtime-added
+     * content, which is precisely the silent-degradation failure this project refuses
+     * elsewhere, so production fails closed.
+     *
+     * <p>It is set to {@code false} for the test run in {@code pom.xml}, because
+     * ContainerProxy's own test helper legitimately substitutes this bean. That does not
+     * weaken the guarantee: {@code LazyProxyDispatcherServiceTest} asserts the installed
+     * type directly.
+     */
+    static final String PROP_REQUIRE_OVERRIDE = "skald.dispatcher.require-override";
+
     private final Logger logger = LoggerFactory.getLogger(getClass());
+
+    private Environment environment;
+
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
+    }
 
     @Override
     public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException {
@@ -87,12 +109,25 @@ public class DispatcherOverrideRegistrar implements BeanDefinitionRegistryPostPr
         // deployment in this state silently loses runtime-added content. The regression net
         // is LazyProxyDispatcherServiceTest, which boots without that harness and asserts
         // the installed type.
-        logger.warn("The Skald dispatcher override was NOT installed: bean '{}' is defined by " +
-                "factory method '{}' rather than by class '{}'. Content added at runtime will " +
-                "fail to start (ProxyDispatcherService.getDispatcher returns null for specs " +
-                "that did not exist at startup). This is expected under ContainerProxy's test " +
-                "harness and a bug anywhere else. See docs/DECISIONS.md ADR-0001.",
+        String message = String.format(
+            "The Skald dispatcher override was NOT installed: bean '%s' is defined by factory " +
+                "method '%s' rather than by class '%s'. Content added at runtime will fail to " +
+                "start, because ProxyDispatcherService.getDispatcher returns null for specs that " +
+                "did not exist at startup. This is expected under ContainerProxy's test harness " +
+                "and a bug anywhere else. See docs/DECISIONS.md ADR-0001.",
             BEAN_NAME, definition.getFactoryMethodName(), ProxyDispatcherService.class.getName());
+
+        if (requireOverride()) {
+            throw new IllegalStateException(message + " Set " + PROP_REQUIRE_OVERRIDE +
+                "=false to start anyway, accepting that runtime-added content will not work.");
+        }
+        logger.warn(message);
+    }
+
+    private boolean requireOverride() {
+        // Defaults to true: production fails closed.
+        return environment == null
+            || environment.getProperty(PROP_REQUIRE_OVERRIDE, Boolean.class, true);
     }
 
     @Override

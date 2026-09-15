@@ -300,6 +300,22 @@
                 </configuration>
             </plugin>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- ContainerProxy's own test helper (ShinyProxyInstance.TestConfiguration)
+                             legitimately substitutes the proxyDispatcherService bean through a
+                             @Primary @Bean, which DispatcherOverrideRegistrar cannot retarget.
+                             Production fails closed when the override cannot be installed; the
+                             test run tolerates it. The guarantee is not weakened:
+                             LazyProxyDispatcherServiceTest boots its own context and asserts the
+                             installed type directly. -->
+                        <skald.dispatcher.require-override>false</skald.dispatcher.require-override>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>build-helper-maven-plugin</artifactId>
                 <version>${maven.build-helper-maven.plugin.version}</version>
