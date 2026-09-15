@@ -27,6 +27,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.jdbc.DataSourceBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 
@@ -65,6 +66,16 @@ public class DataSourceConfig {
             .password(password)
             .driverClassName(driverClassName)
             .build();
+    }
+
+    /**
+     * Declared rather than left to {@code JdbcTemplateAutoConfiguration}. That auto-configuration
+     * is ordered after {@code DataSourceAutoConfiguration}, which this application excludes, so
+     * relying on it would be relying on a guess about ordering. One bean is cheaper than that.
+     */
+    @Bean
+    public JdbcTemplate jdbcTemplate(DataSource dataSource) {
+        return new JdbcTemplate(dataSource);
     }
 
 }

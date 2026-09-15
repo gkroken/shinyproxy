@@ -72,3 +72,36 @@ and starts and reaches a real container.
 
 **Offer upstream:** lazy dispatcher creation is a small, generally useful change. Propose it
 to Open Analytics as a PR rather than carrying this forever (ADR-0001).
+
+### 2. `shinyProxySpecProvider` → `MergedSpecProvider`
+
+**Since:** spine #1, 2026-09-15 · **Against:** ShinyProxy 3.2.4 (this repository) · **ADR:** 0001
+
+**This is not a second ContainerProxy override.** ADR-0001's tripwire counts overrides of
+*ContainerProxy*, the released jar we do not control, and `proxyDispatcherService` remains
+the only one. `ShinyProxySpecProvider` is a class in this repository; the override exists
+precisely so the diff against it stays at zero and upstream merges stay clean.
+
+Registry content has to appear in the same spec list as YAML-configured content. The obvious
+approach — a sibling `@Primary IProxySpecProvider` — does not work. ContainerProxy injects
+the interface, but ShinyProxy's `IndexController`, `BaseController` and `Thymeleaf` inject the
+**concrete** `ShinyProxySpecProvider`, and `getMaxInstances()` builds its map by iterating
+that class's own `getSpecs()`. Registry content would be missing from the map, so
+`BaseController.validateMaxInstances` unboxes a null `Integer` and throws when anyone opens
+published content.
+
+**What we do:** `SpecProviderOverrideRegistrar` retargets the `shinyProxySpecProvider` bean
+definition to `MergedSpecProvider`, a subclass overriding only `getSpecs()` and `getSpec()`.
+Swapping the class of the existing definition carries the `@ConfigurationProperties` binding,
+the `@Primary` marker and the `@PostConstruct` callback over untouched. Conditional on
+`spring.datasource.url`: with no database, the fork behaves exactly as upstream does.
+
+**Related upstream sharp edge, worked around rather than changed:** `ProxySpec.getSpecExtension()`
+returns null when the extension is absent, and `getShinyForceFullReload`,
+`getHideNavbarOnMainPageLink` and `getAlwaysShowSwitchInstance` dereference it with no null
+check. Registry specs are therefore always built with an empty `ShinyProxySpecExtension`
+attached.
+
+**Test:** `MergedSpecProviderTest`, against real PostgreSQL via Testcontainers — the schema
+uses `jsonb`, `gen_random_uuid()`, CHECK constraints and a circular foreign key, none of which
+an in-memory stand-in would exercise honestly.

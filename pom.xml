@@ -171,6 +171,20 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Skald: real PostgreSQL for registry tests. MIT licence, version managed by the
+             Spring Boot parent. Needs a Docker socket, which `make test` already provides
+             for upstream's container-backed integration tests. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Transitive dependencies updated for security -->
         <dependency>
             <groupId>org.webjars</groupId>

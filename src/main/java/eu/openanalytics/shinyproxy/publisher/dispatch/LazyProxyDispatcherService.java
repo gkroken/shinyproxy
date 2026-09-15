@@ -26,6 +26,7 @@ import eu.openanalytics.containerproxy.backend.dispatcher.DefaultProxyDispatcher
 import eu.openanalytics.containerproxy.backend.dispatcher.IProxyDispatcher;
 import eu.openanalytics.containerproxy.backend.dispatcher.ProxyDispatcherService;
 import eu.openanalytics.containerproxy.backend.dispatcher.proxysharing.ProxySharingDispatcher;
+import eu.openanalytics.containerproxy.backend.dispatcher.proxysharing.ProxySharingSpecExtension;
 import eu.openanalytics.containerproxy.backend.dispatcher.proxysharing.store.IProxySharingStoreFactory;
 import eu.openanalytics.containerproxy.model.spec.ProxySpec;
 import eu.openanalytics.containerproxy.spec.IProxySpecProvider;
@@ -103,7 +104,17 @@ public class LazyProxyDispatcherService extends ProxyDispatcherService {
      */
     private void rejectIfProxySharing(String specId) {
         ProxySpec spec = proxySpecProvider.getSpec(specId);
-        if (spec != null && ProxySharingDispatcher.supportSpec(spec)) {
+        if (spec == null) {
+            return;
+        }
+        // supportSpec dereferences getSpecExtension(ProxySharingSpecExtension.class) with no
+        // null check, so it NPEs on any spec built without that extension. Checking first
+        // keeps a runtime-added spec from crashing the dispatcher lookup, which sits on the
+        // start, stop, pause, resume and health-check paths.
+        if (spec.getSpecExtension(ProxySharingSpecExtension.class) == null) {
+            return;
+        }
+        if (ProxySharingDispatcher.supportSpec(spec)) {
             throw new IllegalStateException(String.format(
                 "Spec '%s' requests proxy sharing but was not present at startup. " +
                     "Proxy sharing is not supported for runtime-added content; define this " +

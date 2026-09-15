@@ -225,8 +225,59 @@ Visibility projects into a synthesized `AccessControl`:
       licenseSet, so a new migration fails the build demanding the Open Analytics header —
       false attribution on a file we wrote. `**/*.sql` is now excluded there, alongside the
       other config formats.
-- [ ] 4. `DbSpecProvider` + `MergedSpecProvider`, with the write-time collision rejection
-      from decision 3 and the sharing-spec rejection from decision 2.
+- [x] **4. `ContentSpecRepository` + `MergedSpecProvider`.** Registry content becomes a
+      resolvable, listed spec with no restart. 51/51 tests green (45 + 6 new, on real
+      PostgreSQL via Testcontainers — MIT, version-managed by the Spring Boot parent).
+
+      **The design had to change, and the plan's version would not have worked.**
+      `MergedSpecProvider` is a **subclass of `ShinyProxySpecProvider`**, installed by
+      retargeting its bean definition, not a sibling `@Primary IProxySpecProvider` as the
+      Design section assumed. ContainerProxy injects the *interface*, so a sibling would have
+      satisfied it — but ShinyProxy's own `IndexController`, `BaseController` and `Thymeleaf`
+      inject the **concrete** class, and `getMaxInstances()` builds its map by iterating
+      `ShinyProxySpecProvider.getSpecs()`. Registry content would have been absent from that
+      map, so `BaseController.validateMaxInstances` would unbox a null `Integer` and throw on
+      every attempt to open published content. Subclassing gives interface and concrete
+      injection points one merged view, with the diff against upstream still at zero.
+
+      This is **not** a second ContainerProxy override and does not trip ADR-0001's tripwire:
+      `ShinyProxySpecProvider` is a class in this repository. The override exists only to keep
+      our diff against it at zero. `proxyDispatcherService` remains the sole ContainerProxy
+      override.
+
+      Second trap, same family: `ProxySpec.getSpecExtension()` returns null when absent, and
+      `getShinyForceFullReload`, `getHideNavbarOnMainPageLink` and `getAlwaysShowSwitchInstance`
+      all dereference it with no null check. Every registry spec is therefore built with an
+      empty `ShinyProxySpecExtension` attached, so each value falls back to the provider
+      default instead of NPE-ing on render. Covered by a test.
+
+      Access control is **deliberately incomplete and fails closed**: until task 5 projects
+      `content_acl` and the visibility modes, a registry spec is visible to its owner and
+      nobody else. An unfinished ACL layer that defaults to "visible" is how content leaks.
+
+      **Two further traps, both of which broke the live stack and neither documented upstream.**
+      Found by running the dev stack rather than by reading — the unit tests were green while
+      the index page was returning 500.
+      - **A dynamic provider must return stable `ProxySpec` instances.** ShinyProxy keys
+        view-model maps by `ProxySpec` *object*: `IndexController` builds them from one
+        `getUserSpecs()` call while `BaseController.prepareMap` (line 191) calls it *again* and
+        puts those objects in the model as `apps`, so the template looks the first up by the
+        second. `ProxySpec.equals` delegates to `AccessControl`, which defines no `equals` and
+        compares by identity — so rebuilding specs per call renders a null into a boolean
+        ternary and the index 500s. `ContentSpecRepository` now memoizes, rebuilding only when
+        a row's fingerprint changes.
+      - **`ProxySharingDispatcher.supportSpec()` dereferences its extension unguarded too**
+        (line 102), which made `LazyProxyDispatcherService.rejectIfProxySharing` — task 1's own
+        code — NPE on any registry spec. Fixed with a null check. Task 1's test never caught it
+        because it clones a YAML spec, which carries every extension.
+
+      Sharing rejection (decision 2) is structural rather than a check: registry specs are
+      built without a `ProxySharingSpecExtension`, and `ProxySharingDispatcher.supportSpec()`
+      is `minimumSeatsAvailable != null`, so registry content cannot request sharing at all.
+      Slug-collision rejection at write lands with the admin endpoint in task 7;
+      `ContentSpecRepository.slugExists` is there for it, and `getSpecs()` additionally filters
+      and loudly logs a collision that somehow reached the database rather than picking a
+      winner silently.
 - [ ] 5. `AccessControlProjector` — ACL + visibility into a synthesized `AccessControl`,
       including the `anonymous` mapping, verified by deny tests rather than by reading.
 - [ ] 6. Version resolvability (ADR-0008): `getSpec()` resolves superseded versions that
