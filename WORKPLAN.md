@@ -160,8 +160,19 @@ version without disturbing running containers.
 - [ ] CSRF protection for UI mutations; token auth for the API.
 - [ ] CLI (`cli/`) — `deploy`, `list`, `rollback`. **Python**, so the audience can
       `pip install` it (ADR-0005). **Sonnet 5.**
+- [ ] R package (`r/`) — `skald::deploy()`, `skald::rollback()`, calling the HTTP API
+      **directly** via httr2 (never shelling out to the Python CLI). Owns `renv`
+      dependency discovery and manifest generation, which is why it is v1 and not later:
+      a bundle with no dependency manifest deploys and then fails to run
+      (ADR-0005 amended, ADR-0010). **Opus 5** for the renv/manifest path, **Sonnet 5**
+      for the API wrapper.
+- [ ] **Build progress and logs must be streamable over the API.** Both clients tail them;
+      `skald deploy` sitting silent for minutes is the failure mode (ADR-0010). No
+      group-listing or slug pre-validation endpoints are needed — there is no picker
+      dialog to serve; ordinary write-time validation with clear errors is enough.
 
-**Done when:** `skald deploy ./myapp` publishes a Shiny app end to end, and rollback works.
+**Done when:** `skald deploy ./myapp` publishes a Shiny app end to end, `skald::deploy()`
+does the same from an R console with dependencies resolved, and rollback works.
 
 ---
 
@@ -205,7 +216,14 @@ output. Deferred: email notification (ADR-0006).
 ### #7 — APIs · Opus 5
 
 - [ ] `plumber` / `fastapi`: long-running shared containers, reusing ContainerProxy's
-      existing seat/pre-initialization mechanism.
+      existing seat/pre-initialization mechanism. **Costed in #1's workplan, not free:**
+      spine #1 refuses proxy sharing for runtime-added specs (a hard error, never a silent
+      fallback), so this track must extend `LazyProxyDispatcherService` to build sharing
+      dispatchers lazily — carrying its own `storeFactory` and `beanFactory`, handling
+      concurrent first-requests for one spec, and solving the `@PreDestroy` cleanup that
+      `beanFactory.registerSingleton` bypasses. Without it every API caller gets their own
+      container, which is wrong for an API. This extends the *same* override, so it does
+      not trip ADR-0001's tripwire.
 - [ ] Stable URL at `/content/<slug>/`, no iframe, via `ProxyMappingManager.dispatchAsync`.
 - [ ] Session cookie **or** `Authorization: Key <api_key>`; ACLs apply either way.
 - [ ] Authenticated identity passed to the container in headers — **after stripping any
@@ -266,13 +284,20 @@ Full rationale in `docs/DECISIONS.md`. Summary:
 - **Email delivery deferred** past v1. (ADR-0006)
 - **Git-backed deployment moved out of #2** to an optional track after #3. It is an input
   method, not an irreversible decision, and it competes with things that are.
+- **Skald is a Connect alternative for a stated profile, never a "Connect replacement".**
+  What a migrating user loses on day one is written down. (ADR-0009)
+- **Two publishing clients over one HTTP API — Python CLI and an R package — and no IDE
+  integration.** The R package owns `renv` dependency discovery, which is what makes
+  migrated R content actually run. (ADR-0010, ADR-0005 amended)
 
 ---
 
 ## 6. Non-goals
 
 - Connect / rsconnect API compatibility (pending legal review).
-- Push-button publishing from IDEs — possible later via the CLI/API.
+- Push-button publishing from IDEs (RStudio Addin, VS Code/Positron extension). Decided,
+  not merely deferred: ADR-0010 ships a CLI and an R package over one HTTP API instead.
+  Revisit only if those prove to be the adoption barrier — a thing to measure, not assume.
 - Multi-tenant SaaS hosting.
 - Proprietary database drivers.
 - Content-type breadth (`streamlit`, `dash`, …) before a user asks for it.

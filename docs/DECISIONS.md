@@ -30,6 +30,20 @@ with bean-definition overriding enabled, replaces it outright.
 ContainerProxy. To make that switch cheap, the fork is checked out and buildable from
 spine #0 onward.
 
+**Amended 2026-09-15 — the override mechanism.** This ADR originally specified a
+`@Bean(name="proxyDispatcherService")` with `spring.main.allow-bean-definition-overriding`
+enabled. That flag is **global**: it disables bean-definition collision detection for every
+bean in the application, permanently, to solve one bean. Instead we use a
+`BeanDefinitionRegistryPostProcessor` that retargets that single definition's bean class
+before any bean is instantiated. Same decision — one contained override, no fork — with a
+blast radius of exactly one bean, and a loud startup failure if upstream ever renames or
+re-registers it.
+
+Note that `ProxyService.java:104` injects the **concrete class** `ProxyDispatcherService`,
+not an interface, so the replacement must be a subclass. All of `ProxyDispatcherService`'s
+fields are private, so the subclass takes the same constructor arguments, calls `super(...)`
+and keeps its own reference to `DefaultProxyDispatcher`.
+
 **Also:** lazy dispatcher creation is a small, genuinely useful upstream change. Offer it
 to Open Analytics as a PR rather than carrying it forever.
 
@@ -105,8 +119,19 @@ The audience is R and Python data scientists. A Go binary is nicer to distribute
 `pip install` is already in the Python half of that audience's muscle memory, and the
 CLI is thin glue over an HTTP API — not a place where Go's strengths pay off.
 
-**Decision:** Python. An R publishing package is wanted eventually but is not v1; the
-HTTP API is the real contract, and both wrap it.
+**Decision:** Python. The HTTP API is the real contract, and every client wraps it.
+
+**Amended 2026-09-15 — the R package moves into v1 (spine #3).** The original "not v1"
+underestimated one thing: the R package is the only place `renv` dependency discovery can
+happen. A Python CLI cannot sensibly introspect an R project's lockfile, and a bundle
+published without a dependency manifest deploys and then fails to run. Since R content is
+the primary audience, that puts the R package on the critical path to content that actually
+works, not on a nice-to-have list.
+
+The R package calls the HTTP API **directly** (httr2/curl). It does not shell out to the
+Python CLI — that would make every R user maintain a working Python install and a resolving
+PATH, which is a miserable dependency chain for exactly the audience least equipped to
+debug it. See ADR-0010.
 
 ---
 
@@ -148,3 +173,71 @@ version N unresolvable, every container still running on N breaks at shutdown.
 **Decision:** the spec provider resolves any version that still has live containers, not
 only the active one. Rollback and activation never invalidate a spec id in use. Tested in
 spine #1 with a container held alive across a version switch.
+
+---
+
+## ADR-0009 — What Skald is, and who it is not for
+
+**Date:** 2026-09-15 · **Status:** accepted
+
+Skald is frequently described as "a free alternative to Posit Connect". That is true about
+*cost* and misleading about *scope*, and the gap is large enough to strand someone
+mid-migration if it is not written down.
+
+**Skald v1 is for** a team whose content is mostly Shiny, Quarto and Plumber, that is
+comfortable publishing from a CLI or an R console, that does not depend on emailed reports,
+and for whom licence cost is the binding constraint. For that team the trade is strong:
+no per-seat maths, self-hosted, no vendor lock-in, and mature inherited auth (LDAP, OIDC,
+SAML, Kerberos) and container orchestration rather than newly written equivalents.
+
+**Skald v1 is not a drop-in Connect replacement.** Named honestly, what a migrating user
+loses on day one:
+
+| Connect habit | Skald v1 |
+|---|---|
+| Click Publish in the IDE | `skald deploy` / `skald::deploy()` (ADR-0010) |
+| Report arrives by email | Scheduled re-render, viewed in the UI (ADR-0006) |
+| `pins::board_connect()` in existing code | Rewrite — pins compatibility is refused (ADR-0003) |
+| Streamlit / Dash / Jupyter / Bokeh | Not in v1 — depth over breadth |
+| Off-host execution on Kubernetes | Single-host Docker (ADR-0004) |
+
+The two that most often decide whether a team *can* move are email delivery and the
+absence of an `rsconnect`-compatible path — the latter meaning there is no gradual
+migration, only a cutover plus retraining.
+
+**Decision:** describe Skald as a Connect *alternative for a stated profile*, never as a
+Connect replacement, in the README, the docs and any public material. Revisit this ADR
+when email delivery (ADR-0006) and the dependency/lockfile story ship, which are the two
+changes that would most move it toward genuine replacement.
+
+---
+
+## ADR-0010 — Publishing clients: a CLI and an R package, and no IDE integration
+
+**Date:** 2026-09-15 · **Status:** accepted
+
+"Easy to publish" is a requirement. "Press the Publish button in RStudio" is one
+implementation of it, and the most expensive one available.
+
+RStudio's native publish icon is wired to the `rsconnect` package, which speaks Connect's
+API — foreclosed by ADR-0003. The next option, an RStudio Addin shipped as an R package,
+carries no such problem and gives a real button, but it is an additional client with a
+Shiny gadget UI, and it covers only RStudio: Positron and VS Code are a separate extension
+in a separate language.
+
+**Decision:** v1 ships **two clients over one HTTP API** and no IDE integration:
+
+- `skald` — the Python CLI (ADR-0005), for Python content and for anyone who prefers a
+  terminal.
+- the `skald` R package — `skald::deploy()`, calling the API directly, and owning `renv`
+  dependency discovery and manifest generation. Not a thin wrapper.
+
+**Consequence for spine #3's API design.** With no picker dialog to serve, the API does not
+need group-listing or slug pre-validation endpoints; ordinary validation with clear errors
+on write is sufficient. One requirement does survive and is *stronger* for a CLI than it
+would be for a GUI: **build progress and logs must be streamable**, so that `skald deploy`
+does not sit silent for minutes. Spine #2 already writes build logs to object storage;
+both clients tail them.
+
+**Rejected:** an RStudio Addin and a VS Code/Positron extension in v1. Revisit if the CLI
+and R package prove to be the adoption barrier — which is a thing to measure, not assume.
