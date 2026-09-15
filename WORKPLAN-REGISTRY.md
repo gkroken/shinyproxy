@@ -184,13 +184,23 @@ Visibility projects into a synthesized `AccessControl`:
 
 ## Tasks
 
-- [ ] **1. The dispatcher fix — first commit, before any schema work.**
-      `LazyProxyDispatcherService` + `DispatcherOverrideRegistrar`. Proven by a test that
-      boots a `ShinyProxyInstance`, adds a spec **after** startup through a test-only
-      mutable spec provider, and starts it through `POST /api/proxy/<spec>` — asserting it
-      reaches `Up` and serves. The test must fail without the override (verify by
-      reverting it), or it is not evidence.
-      **If this does not hold, stop and escalate: ADR-0001 changes shape.**
+- [x] **1. The dispatcher fix — first commit, before any schema work.**
+      `LazyProxyDispatcherService` + `DispatcherOverrideRegistrar`. **ADR-0001 holds.**
+      45/45 tests green (44 upstream + 1 new), and the new test was verified to fail with
+      the override disabled — first on the installed-type guard, then, with the guards
+      removed, on the real thing: `NullPointerException` at `ProxyService.java:494`
+      (`getDispatcher(...).addRuntimeValuesBeforeSpel`) and again at `stopProxy`. Recorded
+      in `docs/UPSTREAM_CHANGES.md`.
+
+      Two things turned up that the plan did not predict:
+      - `ShinyProxyInstance.TestConfiguration` — ContainerProxy's own test helper —
+        substitutes `proxyDispatcherService` with a `@Primary @Bean`, a factory-method
+        definition with no bean class. The registrar cannot retarget that, and replacing it
+        would break upstream's proxy-sharing tests. It therefore steps aside with a loud
+        WARN, and the new test boots its own context instead of using the helper. Booting
+        through the helper would have tested the harness, not the product.
+      - `ShinyProxySpecProvider.setSpecs()` updates `specs` but not `specsMap`, so
+        `getSpec(id)` keeps returning null. Task 4's provider must keep both consistent.
 - [ ] 2. Explicit `DataSource` + Flyway wired into the dev stack's PostgreSQL.
 - [ ] 3. `V1__content_registry.sql` — the five tables above.
 - [ ] 4. `DbSpecProvider` + `MergedSpecProvider`, with the write-time collision rejection

@@ -1,0 +1,28 @@
+# Config for LazyProxyDispatcherServiceTest.
+#
+# Deliberately minimal, and deliberately contains exactly one spec. The test adds a second
+# spec AFTER startup and starts it; if this file listed that spec, upstream's
+# @PostConstruct would have registered a dispatcher for it and the test would prove nothing.
+
+spring:
+  session:
+    store-type: none
+  data:
+    redis:
+      repositories:
+        enabled: false
+
+proxy:
+  authentication: simple
+  container-backend: docker
+  heartbeat-timeout: -1
+  default-stop-proxy-on-logout: false
+
+  users:
+    - name: demo
+      password: demo
+
+  specs:
+    - id: boot-spec
+      display-name: Present at startup
+      container-image: openanalytics/shinyproxy-integration-test-app:latest
