@@ -1,0 +1,73 @@
+{
+  "realm": "skald",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginTheme": "keycloak",
+  "accessTokenLifespan": 1800,
+  "groups": [
+    { "name": "publishers" },
+    { "name": "viewers" },
+    { "name": "platform-admins" }
+  ],
+  "clients": [
+    {
+      "clientId": "skald",
+      "name": "Skald (dev)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "skald-dev-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@example.test",
+      "firstName": "Alice",
+      "lastName": "Publisher",
+      "credentials": [
+        { "type": "password", "value": "alice", "temporary": false }
+      ],
+      "groups": ["/publishers", "/platform-admins"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@example.test",
+      "firstName": "Bob",
+      "lastName": "Viewer",
+      "credentials": [
+        { "type": "password", "value": "bob", "temporary": false }
+      ],
+      "groups": ["/viewers"]
+    }
+  ]
+}

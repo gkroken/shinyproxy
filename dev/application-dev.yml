@@ -1,0 +1,63 @@
+# Skald dev configuration. Mounted at /opt/skald/application.yml by docker-compose.dev.yml.
+#
+# Deliberately NOT named application.yml at the repo root: upstream's .gitignore ignores
+# /application.yml, so this file is version-controlled while a personal override is not.
+#
+# NOTE on the split Keycloak URLs below. auth-url and logout-url are followed by the
+# BROWSER, so they must be localhost. token-url, jwks-url and userinfo-url are fetched by
+# the platform from inside the Docker network, so they use the service name. This works
+# because ContainerProxy builds its ClientRegistration without an issuerUri
+# (oidc/OpenIDConfiguration.java:82-96), so no issuer-match check fires on the mixed pair.
+# The userinfo endpoint is the one place this trick does NOT work — see below.
+
+proxy:
+  title: Skald (dev)
+  port: 8080
+  landing-page: /
+
+  authentication: openid
+  openid:
+    auth-url: http://localhost:8081/realms/skald/protocol/openid-connect/auth
+    token-url: http://keycloak:8081/realms/skald/protocol/openid-connect/token
+    jwks-url: http://keycloak:8081/realms/skald/protocol/openid-connect/certs
+    # No userinfo-url on purpose. The access token is issued for localhost:8081 (the
+    # browser's view of Keycloak); calling userinfo at keycloak:8081 makes Keycloak see a
+    # different issuer and answer 401. Every claim we need — preferred_username and
+    # groups — is already in the ID token, so Spring skips userinfo entirely when this is
+    # unset. Do not "helpfully" add it back.
+    logout-url: http://localhost:8081/realms/skald/protocol/openid-connect/logout?client_id=skald&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F
+    client-id: skald
+    client-secret: skald-dev-secret
+    username-attribute: preferred_username
+    roles-claim: groups
+
+  admin-groups:
+    - platform-admins
+
+  container-backend: docker
+  docker:
+    # The platform runs in a container on the same network as the apps it starts, so it
+    # reaches them by container IP on the container's own port. Nothing is published to
+    # the host. See WORKPLAN-DEVSTACK.md decision 2.
+    internal-networking: true
+    default-container-network: skald-dev
+
+  # Two specs, deliberately: one everybody sees, one gated on a group. Spine #0's
+  # acceptance test is that bob does NOT see the second one. Every later access-control
+  # change is regression-tested against this same pair.
+  specs:
+    - id: hello
+      display-name: Demo app (all users)
+      description: Visible to every authenticated user.
+      container-image: openanalytics/shinyproxy-demo
+
+    - id: publishers-only
+      display-name: Demo app (publishers only)
+      description: Visible only to members of the publishers group.
+      container-image: openanalytics/shinyproxy-demo
+      access-groups:
+        - publishers
+
+logging:
+  level:
+    eu.openanalytics: DEBUG

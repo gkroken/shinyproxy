@@ -268,11 +268,28 @@
                                 <exclude>JenkinsfileSCM</exclude>
                                 <exclude>LICENSE</exclude>
                                 <exclude>LICENSE_HEADER</exclude>
+                                <exclude>Makefile</exclude>
+                                <exclude>dev/LICENSE_HEADER_SKALD</exclude>
                                 <exclude>README.md</exclude>
                                 <exclude>docs/**</exclude>
                                 <exclude>src/main/resources/configs/**</exclude>
                                 <exclude>src/test/resources/**</exclude>
+                                <!-- Skald: our own code carries our own copyright,
+                                     asserted by the second licenseSet below. -->
+                                <exclude>src/main/java/eu/openanalytics/shinyproxy/publisher/**</exclude>
+                                <exclude>src/test/java/eu/openanalytics/shinyproxy/publisher/**</exclude>
                             </excludes>
+                        </licenseSet>
+                        <!-- Skald: code written for this fork. Applying upstream's header
+                             here would assert Open Analytics copyright over code they did
+                             not write; dropping the check entirely would lose the guarantee
+                             on upstream files. Two sets keep both statements true. -->
+                        <licenseSet>
+                            <header>dev/LICENSE_HEADER_SKALD</header>
+                            <includes>
+                                <include>src/main/java/eu/openanalytics/shinyproxy/publisher/**</include>
+                                <include>src/test/java/eu/openanalytics/shinyproxy/publisher/**</include>
+                            </includes>
                         </licenseSet>
                     </licenseSets>
                     <aggregate>true</aggregate>

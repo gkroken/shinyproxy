@@ -1,0 +1,116 @@
+# Skald dev stack. Brought up by `make dev`.
+#
+# Host ports avoid what is already running on this machine (PostgreSQL on 5432,
+# something on 8000) — see WORKPLAN-DEVSTACK.md decision 3. 8080 is fixed.
+
+name: skald-dev
+
+networks:
+  skald-dev:
+    name: skald-dev
+
+volumes:
+  postgres-data:
+  minio-data:
+  registry-data:
+
+services:
+  skald:
+    build:
+      context: .
+      dockerfile: dev/Dockerfile
+    networks: [skald-dev]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dev/application-dev.yml:/opt/skald/application.yml:ro
+      # The PLATFORM gets the daemon socket. Content and build containers never do.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm", "--http-port=8081"]
+    networks: [skald-dev]
+    ports:
+      - "8081:8081"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./dev/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The management port serves health regardless of --http-port.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q UP"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    networks: [skald-dev]
+    ports:
+      - "55432:5432"
+    environment:
+      POSTGRES_USER: skald
+      POSTGRES_PASSWORD: skald
+      POSTGRES_DB: skald
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skald -d skald"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    networks: [skald-dev]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: skald
+      MINIO_ROOT_PASSWORD: skaldskald
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: quay.io/minio/mc
+    networks: [skald-dev]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 skald skaldskald &&
+      mc mb --ignore-existing local/skald-bundles &&
+      mc mb --ignore-existing local/skald-output &&
+      mc mb --ignore-existing local/skald-logs &&
+      echo 'buckets ready'
+      "
+    restart: "no"
+
+  registry:
+    image: registry:2
+    networks: [skald-dev]
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    restart: unless-stopped

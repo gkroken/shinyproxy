@@ -19,32 +19,38 @@ work items), the locked scope decisions, and the model assignment for each step.
 There is **no local JDK or Maven** on the dev machine. Build through Docker:
 
 ```bash
-docker run --rm -u $(id -u):$(id -g) -e HOME=/m2home \
-  -v "$PWD":/ws -v "$PWD/.m2":/m2 -v "$PWD/.m2home":/m2home -w /ws \
-  maven:3.9-eclipse-temurin-21 \
-  mvn -B -Dmaven.repo.local=/m2 -DskipTests package
+make build       # or `make dev` to build and bring the stack up
 ```
 
 Produces `target/shinyproxy-<version>-exec.jar` (~152 MB, Spring Boot executable).
-The `Makefile` wraps this — prefer `make build`.
+
+Two traps the Makefile already handles, which bite anyone running `docker run` by hand:
+the Maven cache lives at `~/.cache/skald/m2` **outside the repo**, because
+`license-maven-plugin` runs with `<aggregate>true</aggregate>` and will otherwise scan
+every downloaded `.pom`; and the cache directories must exist and be owned by you before
+the container starts, or Docker creates them root-owned and Maven dies with
+`AccessDeniedException: /m2/org`. `HOME=/m2home` is also required — without it the image
+fails on `mkdir /root`.
 
 The dev stack (`docker-compose.dev.yml`: app + PostgreSQL + Keycloak + MinIO + registry)
-comes up with `make dev`.
+comes up with `make dev`. `bash dev/smoke.sh` then drives the real OIDC flow for two users
+in different groups and asserts both allow and deny — 15 checks, and the deny cases are
+the ones that matter. Run it after any change to access control.
 
 ## Tests
 
 ```bash
-make test        # mvn test through the same Docker image
+make test        # 44 tests, all green as of 2026-09-15
 ```
 
-Upstream's integration tests need two things CI sets up explicitly
-(`.github/workflows/workflows.yaml`):
+Upstream's tests start real containers and then talk to them on published ports. CI runs
+Maven **on the host**, so it never had to think about this; we run Maven in a container,
+so `make test` adds `--network host` (making `localhost:<port>` the host's localhost) plus
+the Docker socket and its group. It also pulls
+`openanalytics/shinyproxy-integration-test-app` first. Without all of that, 13 of the 44
+tests fail in ways that look like product bugs.
 
-- `docker pull openanalytics/shinyproxy-integration-test-app`
-- a **TCP** Docker socket on 2375 — CI runs
-  `socat TCP-LISTEN:2375,reuseaddr,fork UNIX-CONNECT:/var/run/docker.sock`
-
-Without both, the Docker-backend tests fail in ways that look like product bugs.
+`make build` deliberately does **not** get Docker access — only `make test` needs it.
 
 **Keep upstream's tests green at all times.** They are the regression net for the fork.
 
