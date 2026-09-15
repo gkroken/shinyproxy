@@ -11,6 +11,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 `make dev` brings the stack up; `dev/smoke.sh` is 15/15 including a real container start;
 upstream tests 44/44. **NEXT = #1**, starting with the lazy-dispatcher fix.
 
+Re-verified at the start of #1 on a torn-down-and-rebuilt stack. `dev/smoke.sh` was
+**14/15**, not 15/15, and its stop check could never fail — two real bugs in the script,
+now fixed and mutation-tested (`WORKPLAN-DEVSTACK.md` finding 5). Re-verify rather than
+trusting a recorded green: this machine's container state drifts between sessions.
+
 ---
 
 ## 1. Definition of Done

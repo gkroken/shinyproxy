@@ -86,12 +86,13 @@ personal override stays ignored.
 - [x] 8. `docs/ARCHITECTURE.md` — request flow, extension points, blockers.
 - [x] 9. Verify: `dev/smoke.sh` drives the real OIDC flow for both users and asserts
       allow **and** deny — **15/15 green**, including starting the demo container and
-      serving it through the proxy.
+      serving it through the proxy. (Corrected at the start of spine #1: this was 14/15
+      with one check that could not fail. See finding 5.)
 - [x] 10. Record findings in memory; commit per unit of work.
 
 ## Findings
 
-Four things cost real time and are worth not rediscovering:
+Five things cost real time and are worth not rediscovering:
 
 1. **Maven cache must live outside the repo.** `license-maven-plugin` runs with
    `<aggregate>true</aggregate>` and happily scans every downloaded `.pom` under the
@@ -109,6 +110,23 @@ Four things cost real time and are worth not rediscovering:
    on the first match, curl takes a SIGPIPE, and the pipeline reports failure — so every
    "user sees X" assertion read `no` and every "user does NOT see X" assertion passed for
    the wrong reason. The smoke script captures bodies into variables instead.
+5. **The container-start section was wrong in two ways, found re-verifying at the start of
+   spine #1.** This track was recorded as 15/15; it was actually **14/15**, and the 15th
+   check could never fail. Both bugs are fixed and the fix is mutation-tested.
+   - `DELETE /api/proxy/<id>` **is not mapped** — the server answers 405 with
+     `Allow: POST,GET,HEAD,OPTIONS`. The stop verb is `PUT /api/proxy/<id>/status` with
+     `{"status":"Stopping"}`. The old call silently did nothing *and its result was never
+     asserted* (`ok "app 'hello' stopped"` was unconditional), so every run leaked a live
+     container — the same "a check that cannot fail" class as finding 4.
+   - Serving was fetched from `/app_direct/hello/`, which is **get-or-start** keyed on
+     `(user, app, instance "_")` (`BaseController.java:149`). A proxy started through
+     `POST /api/proxy/<spec>` carries no `SHINYPROXY_APP_INSTANCE` runtime value, so it
+     never matches; `app_direct` then tries to start a **second** instance and trips
+     `proxy.default-max-instances`, whose default is `"1"`
+     (`ShinyProxySpecProvider.java:117`). The result is a deterministic 500 that reads
+     like a container-networking fault and is not one. The script now fetches through
+     `/api/route/<proxyId>/`, which is the mapping `ProxyMappingManager` actually serves —
+     and is the same seam spine #7 builds on.
 
 ## Done when
 

@@ -120,10 +120,33 @@ if [ -n "$pid" ]; then
   done
   check "app 'hello' reaches status Up" "$status" Up
   # Reached only through the container network: no app port is published to the host.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$ALICE" -c "$ALICE" "$BASE/app_direct/hello/")
+  #
+  # Fetch through /api/route/<proxyId>/ -- the mapping ProxyMappingManager serves for a
+  # running proxy. NOT /app_direct/hello/: that path is get-or-start keyed on
+  # (user, app, instance "_"), and an API-started proxy carries no SHINYPROXY_APP_INSTANCE
+  # runtime value, so it never matches (BaseController.java:149). app_direct then tries to
+  # start a SECOND instance and trips proxy.default-max-instances -- default "1",
+  # ShinyProxySpecProvider.java:117 -- a deterministic 500 that reads like a networking
+  # fault but is not one.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$ALICE" -c "$ALICE" "$BASE/api/route/$pid/")
   check "app 'hello' serves through the proxy" "$code" 200
-  curl -s -o /dev/null -X DELETE -b "$ALICE" -c "$ALICE" "$BASE/api/proxy/$pid"
-  ok "app 'hello' stopped"
+
+  # Stop it, and ASSERT that it stopped. DELETE /api/proxy/<id> is not mapped -- the
+  # server answers 405 with `Allow: POST,GET,HEAD,OPTIONS`; the stop verb is PUT on
+  # .../status. The previous DELETE silently did nothing and its result was never
+  # checked, so every run leaked a live container and the next run tripped max-instances.
+  # An unconditional `ok` is a check that cannot fail: the same class of bug as the
+  # `grep -q` pipeline above.
+  curl -s -o /dev/null -X PUT -H 'Content-Type: application/json' \
+    -d '{"status":"Stopping"}' -b "$ALICE" -c "$ALICE" "$BASE/api/proxy/$pid/status"
+  stopped=no
+  for _ in $(seq 1 15); do
+    still=$(curl -s -b "$ALICE" -c "$ALICE" "$BASE/api/proxy" \
+      | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["data"] if p["id"]==sys.argv[1]))' "$pid")
+    if [ "$still" = 0 ]; then stopped=yes; break; fi
+    sleep 2
+  done
+  check "app 'hello' stopped" "$stopped" yes
 else
   bad "app 'hello' did not start"
 fi
