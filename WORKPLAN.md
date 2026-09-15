@@ -7,8 +7,9 @@ and what this plan builds — is the **publishing and automation layer**.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Current status (2026-09-15):** planning complete. Build verified green through the
-Docker Maven image. Spine #0 not started.
+**Current status (2026-09-15):** **spine #0 DONE** on branch `skald` (commit `ead6352`).
+`make dev` brings the stack up; `dev/smoke.sh` is 15/15 including a real container start;
+upstream tests 44/44. **NEXT = #1**, starting with the lazy-dispatcher fix.
 
 ---
 
@@ -88,17 +89,19 @@ silently is the failure mode this rule exists to prevent.
 
 ### #0 — Dev stack + orientation · Sonnet 5
 
-- [ ] `docker-compose.dev.yml`: app + PostgreSQL + Keycloak + MinIO + local registry.
-- [ ] `Makefile` wrapping the Docker Maven build (`make build` / `make test` / `make dev`).
-- [ ] Keycloak realm fixture with two users in **different groups** — this is the fixture
+- [x] `docker-compose.dev.yml`: app + PostgreSQL + Keycloak + MinIO + local registry.
+- [x] `Makefile` wrapping the Docker Maven build (`make build` / `make test` / `make dev`).
+- [x] Keycloak realm fixture with two users in **different groups** — this is the fixture
       every later access test depends on, so it is built now, not in #1.
-- [ ] Second `licenseSet` in `pom.xml` so our packages carry our copyright and upstream
+- [x] Second `licenseSet` in `pom.xml` so our packages carry our copyright and upstream
       files keep theirs (see CLAUDE.md — `strictCheck` will otherwise force false attribution).
-- [ ] `docs/ARCHITECTURE.md` — request-flow diagram + extension-point map. **Opus 5.**
-- [ ] Document the integration-test prerequisites (test-app image, TCP docker socket on 2375).
+- [x] `docs/ARCHITECTURE.md` — request-flow diagram + extension-point map. **Opus 5.**
+- [x] Document the integration-test prerequisites (test-app image, TCP docker socket on 2375).
 
-**Done when:** one command brings up the stack and you log in via Keycloak with group
-claims visible, and `make test` is green.
+**Done:** `make dev` brings the stack up; `bash dev/smoke.sh` drives the real OIDC flow
+for alice and bob and asserts allow **and** deny (15/15, including starting the demo
+container and serving it through the proxy); `make test` is 44/44. Findings and the traps
+that cost time are in `WORKPLAN-DEVSTACK.md`.
 
 ---
 
