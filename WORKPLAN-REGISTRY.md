@@ -280,6 +280,12 @@ Visibility projects into a synthesized `AccessControl`:
       winner silently.
 - [ ] 5. `AccessControlProjector` — ACL + visibility into a synthesized `AccessControl`,
       including the `anonymous` mapping, verified by deny tests rather than by reading.
+      Replaces the fail-closed owner-only placeholder task 4 ships. Per the standing rule in
+      `WORKPLAN.md` this diff gets an **Opus 5 review before merge** regardless of who writes
+      it, because it touches ACL evaluation.
+
+      **Do the `maxInstancesCache` work here too** (risk 4). The two interact: both are about
+      a session holding a stale view — one of what the user may see, one of which specs exist.
 - [ ] 6. Version resolvability (ADR-0008): `getSpec()` resolves superseded versions that
       still have live containers. Tested with a container held alive **across** an
       activate and a rollback, asserting it still stops cleanly.
@@ -299,11 +305,21 @@ Visibility projects into a synthesized `AccessControl`:
    extension of the *same* override, so it does not trip ADR-0001's tripwire, but it is
    materially harder than the fallback and should be costed into #7 now rather than
    discovered there.
-2. **The `<slug>@<version>` id format is irreversible** — it is persisted in `Proxy` rows
-   and in live containers. Worth one deliberate look before task 4, not after.
+2. ~~The `<slug>@<version>` id format is irreversible.~~ **Settled in task 4.** The format
+   is `<slug>--v<n>`: `@` is invalid in a Kubernetes label value and would have worked on
+   Docker while quietly foreclosing ADR-0004. Slugs are capped at 50 characters so
+   `<slug>--v<n>` stays inside the 63-character limit.
 3. **`Micrometer` still registers per-spec metrics at startup only** (blocker 2). Every
    piece of runtime-added content in #1 will have no metrics, silently. That is accepted
    and deferred to #9, but it becomes true the moment this track lands.
+4. **`ShinyProxySpecProvider.maxInstancesCache` is per-session with a 60-minute TTL**, built
+   on the comment "this never changes during the lifetime of a session"
+   (`ShinyProxySpecProvider.java:99-105`). Publishing breaks that assumption: content created
+   after a user's session started is absent from that session's cached map, so
+   `getMaxInstancesForSpec` returns null for it. It did not bite in task 4 because the
+   fallback path held, but the user-visible shape is "my new app doesn't appear until I log
+   out" — which gets reported as flakiness, not as a cache. Pulled into task 5 rather than
+   left to hardening.
 
 ## Done when
 
