@@ -58,6 +58,24 @@ proxy:
       access-groups:
         - publishers
 
+# The content registry. ContainerProxyApplication excludes DataSourceAutoConfiguration
+# (line 93), so these properties are inert until DataSourceConfig builds the DataSource
+# bean from them -- do not waste time debugging why spring.datasource.* "does nothing".
+# Spring Boot's Flyway auto-configuration is NOT excluded, so once that bean exists it
+# picks it up and applies src/main/resources/db/migration on startup.
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/skald
+    username: skald
+    password: skald
+  flyway:
+    # Everything lives in a dedicated schema so Skald cannot collide with ContainerProxy's
+    # usage-statistics tables if both ever point at one database.
+    schemas:
+      - skald
+    default-schema: skald
+
 logging:
   level:
     eu.openanalytics: DEBUG
+    org.flywaydb: INFO

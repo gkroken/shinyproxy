@@ -139,6 +139,21 @@
             <artifactId>commons-lang3</artifactId>
             <version>${commons-lang.version}</version>
         </dependency>
+
+        <!-- Skald: content registry schema management. Versions are managed by
+             spring-boot-starter-parent. Both are Apache License 2.0.
+             flyway-database-postgresql is a separate module since Flyway 10, which split
+             per-database support out of flyway-core.
+             The PostgreSQL driver, spring-boot-starter-jdbc and HikariCP are already on the
+             compile classpath transitively through containerproxy. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -257,6 +272,12 @@
                                 <exclude>**/*.properties</exclude>
                                 <exclude>**/*.raml</exclude>
                                 <exclude>**/*.sh</exclude>
+                                <!-- Flyway migrations are data, not source, and are ours:
+                                     upstream's header would assert Open Analytics copyright
+                                     over them. Excluded here like the other config formats
+                                     above; each migration carries its own explanatory
+                                     comment block instead. -->
+                                <exclude>**/*.sql</exclude>
                                 <exclude>**/*.txt</exclude>
                                 <exclude>**/*.xml</exclude>
                                 <exclude>**/*.yaml</exclude>

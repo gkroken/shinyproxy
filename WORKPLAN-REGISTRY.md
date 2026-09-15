@@ -201,8 +201,30 @@ Visibility projects into a synthesized `AccessControl`:
         through the helper would have tested the harness, not the product.
       - `ShinyProxySpecProvider.setSpecs()` updates `specs` but not `specsMap`, so
         `getSpec(id)` keeps returning null. Task 4's provider must keep both consistent.
-- [ ] 2. Explicit `DataSource` + Flyway wired into the dev stack's PostgreSQL.
-- [ ] 3. `V1__content_registry.sql` — the five tables above.
+- [x] **2 + 3. Explicit `DataSource` + Flyway, and `V1__content_registry.sql`.**
+      Done as one commit rather than two: Flyway wiring cannot be verified without a
+      migration to apply, so splitting them would have meant committing an unprovable step.
+      The `DataSource` bean is `@ConditionalOnProperty("spring.datasource.url")`, so without
+      a database the fork boots exactly as upstream does and Spring Boot's Flyway
+      auto-configuration (conditional on a `DataSource` bean) stays dormant — which is what
+      keeps upstream's suite untouched. New dependencies: `flyway-core` and
+      `flyway-database-postgresql`, both Apache 2.0, both version-managed by the Spring Boot
+      parent. The PostgreSQL driver, `spring-boot-starter-jdbc` and HikariCP were already on
+      the classpath via ContainerProxy, and `JDBCCollector` builds its stats pool directly
+      rather than as a bean, so there is no collision.
+
+      Everything lives in a dedicated `skald` schema so that pointing Skald and
+      ContainerProxy's usage-statistics collector at one database cannot collide.
+
+      Verified against the live dev-stack PostgreSQL 16: Flyway created the history table and
+      applied v1; all five tables exist; the slug-format and type CHECK constraints reject
+      bad input; and a full content -> version -> activate -> ACL round-trip resolves to spec
+      id `my-app--v1`, exercising the circular `active_version_id` foreign key.
+
+      Trap worth recording: `license-maven-plugin` checks `.sql` under the **upstream**
+      licenseSet, so a new migration fails the build demanding the Open Analytics header —
+      false attribution on a file we wrote. `**/*.sql` is now excluded there, alongside the
+      other config formats.
 - [ ] 4. `DbSpecProvider` + `MergedSpecProvider`, with the write-time collision rejection
       from decision 3 and the sharing-spec rejection from decision 2.
 - [ ] 5. `AccessControlProjector` — ACL + visibility into a synthesized `AccessControl`,
