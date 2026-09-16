@@ -321,6 +321,17 @@ denied without a valid key or ACL.
 
 - [ ] Audit log covers every mutating action. **Opus 5.**
 - [ ] Per-content resource limits, build quotas, bundle size limits.
+- [ ] **Deployment guidance for reverse proxies, specifically `Host` handling.** Every
+      absolute URL ShinyProxy and ContainerProxy build — login redirects, `auth-success`,
+      app URLs, and Skald's `/c/<path>` redirects — is reconstructed from the request and
+      therefore follows the `Host` header: a request carrying `Host: caller-chosen.invalid`
+      is answered with that host in the `Location`. Demonstrated against the live stack in
+      review. No victim-facing open redirect follows from it, because a browser sets `Host`
+      from the authority it is visiting — but it does mean Skald inherits whatever host
+      validation the proxy performs, and a shared cache in front of the application is the
+      realistic exposure. Document host allow-listing at the proxy and
+      `server.forward-headers-strategy`. Not introduced by this fork; inherited and, until
+      now, undocumented.
 - [ ] Metrics for builds, renders and API calls — **including closing the dynamic-spec
       metrics gap from #1** (`Micrometer` registers per-spec metrics at startup only).
 - [ ] Backup/restore docs for PostgreSQL + object storage. **Haiku 4.5.**

@@ -214,14 +214,28 @@ stays at zero, and the behaviour is pinned by
 `ContentServingTest.aSignedOutVisitorIsSentToLoginAndTheDestinationIsRemembered` plus a live
 `dev/smoke.sh` check that drives the whole Keycloak round trip.
 
-**Do not describe `AuthController`'s check as an origin check.** An earlier version of this
-section did. It is `sRedirectUrl.startsWith(<this application's base URL>)` — a string prefix
-test, not a parsed-origin comparison, so `https://localhost:8080.example.com/` would satisfy it
-against a base of `https://localhost:8080`. Nothing reaches it today: the only writers of that
-attribute are upstream's success handler and `ContentController`, and ours builds the value
-from `getRequestURL()`, which the servlet container composes — no part of it is chosen by the
-caller. But it is not the guard it looks like, and anything that later stores a caller-supplied
-value there has to validate it itself. Flagged by review.
+**Do not describe `AuthController`'s check as an origin check, and do not describe
+`getRequestURL()` as caller-independent.** Earlier versions of this section did both, and both
+were wrong. Each was corrected only because a review went and measured it.
+
+The check is `sRedirectUrl.startsWith(<this application's base URL>)` — a string prefix test,
+so a base of `https://localhost:8080` is satisfied by `https://localhost:8080.example.com/`.
+
+And the base, like the value stored against it, is **reconstructed from the request**, so both
+follow the `Host` header. Demonstrated: a signed-out `GET /c/<path>/` carrying
+`Host: caller-chosen.invalid` is answered `Location: http://caller-chosen.invalid/login`, and
+the destination remembered for after sign-in carries the same host. Servlet URL reconstruction
+is not validation.
+
+**The actual trust assumption**, which is Skald-wide rather than specific to `/c/`: every
+absolute URL ContainerProxy and ShinyProxy build — login redirects, `auth-success`, app URLs —
+comes from `ServletUriComponentsBuilder`, hence from `Host`. Skald therefore assumes whatever
+host validation the deployment's reverse proxy performs. A browser sets `Host` from the
+authority it is visiting, so this is not a way to choose another user's redirect, and no
+victim-facing open redirect has been demonstrated; the realistic exposures are a proxy that
+forwards an unvalidated `Host` and a shared cache in front of the application. Host
+allow-listing belongs at the proxy, and `server.forward-headers-strategy` governs how
+`X-Forwarded-*` is honoured. Deployment guidance is a spine #9 item.
 
 ### D. Forwarding to `/error` does not set the response status, and it cannot express 410
 

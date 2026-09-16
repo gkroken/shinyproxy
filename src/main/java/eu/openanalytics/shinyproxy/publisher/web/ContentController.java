@@ -222,12 +222,24 @@ public class ContentController extends BaseController {
      * (upstream #30648, #28624). Verified against the dev stack — a deep link to {@code /admin}
      * or to {@code /c/...} lands on the index after signing in, while {@code /app/hello} does
      * not. Rather than widen that rule, which would mean a diff against an upstream file, we
-     * set the same session attribute it sets. {@code AuthController} then checks the stored
-     * value {@code startsWith} this application's base URL before using it — a string prefix
-     * test, <em>not</em> a parsed-origin comparison, so it is weaker than it looks and is not
-     * something to lean on. What actually makes this safe is that the value is built here from
-     * {@code getRequestURL()}, which the container composes; nothing a caller sends chooses
-     * it.
+     * set the same session attribute it sets.
+     *
+     * <p><b>What guards it, stated accurately.</b> {@code AuthController} checks the stored
+     * value {@code startsWith} this application's base URL — a string prefix test, not a
+     * parsed-origin comparison. Both that base and the value stored here are reconstructed
+     * from the request, so both reflect the {@code Host} header: sending
+     * {@code Host: caller-chosen.invalid} puts that host in the redirect, demonstrated against
+     * the live stack. URL reconstruction is not validation, and an earlier version of this
+     * comment claimed it was.
+     *
+     * <p>What actually holds is narrower. A browser sets {@code Host} from the authority of
+     * the URL it is visiting, so an attacker cannot choose it for someone else's request; and
+     * because {@code AuthController} derives its comparison base from the same request, a
+     * value stored under one host does not survive a check made under another. Neither is a
+     * property of this method, and neither survives a reverse proxy that forwards an
+     * unvalidated {@code Host} — which is the deployment assumption Skald inherits from every
+     * absolute URL ContainerProxy builds, not one this route introduces. Host allow-listing
+     * belongs at the proxy; see spine #9.
      */
     private void redirectToLogin(HttpServletRequest request, HttpServletResponse response)
         throws IOException {

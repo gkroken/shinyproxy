@@ -638,7 +638,19 @@ fixed and mutation-tested; each mutation is named in the follow-up commit.
 | C3 | **Both redirects discarded the query string.** `/c/report?tab=2` lost `?tab=2` | No test sent one |
 | C4 | **The post-login destination doubled the context path.** With `/skald` configured, signing in restored `/skald/skald/c/...` and 404ed | Nothing in the project runs under a context path. Now `ContentContextPathTest` does |
 
-Two claims of ours were also overstated and are corrected: `AuthController`'s check on the
+**A re-review of the fixes found no new runtime defect, and one more false claim of ours.**
+The correction to C's safety note asserted that `getRequestURL()` is composed by the container
+and that nothing a caller sends chooses it. It is reconstructed from the `Host` header:
+`Host: caller-chosen.invalid` comes back as `Location: http://caller-chosen.invalid/login`.
+That is inherited Skald-wide rather than introduced here — every absolute URL upstream builds
+works the same way — and no victim-facing open redirect follows, because a browser sets `Host`
+from the authority it is visiting. But the stated reason for safety was false twice running,
+in a correction written *because* the first version was wrong. The real trust assumption is
+now written down (`docs/UPSTREAM_CHANGES.md` C) and proxy host allow-listing is a spine #9
+item. Worth noticing as a pattern: both times, the error was reasoning about a mechanism
+instead of sending a request to it.
+
+Two further claims of ours were also overstated and are corrected: `AuthController`'s check on the
 stored destination is a string `startsWith`, **not** an origin comparison (harmless today
 because nothing caller-supplied reaches it, and now written down as such in
 `docs/UPSTREAM_CHANGES.md` C); and the 600-second wait is not a request deadline, because
