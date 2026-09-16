@@ -43,7 +43,9 @@ import org.springframework.stereotype.Repository;
 import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -316,7 +318,18 @@ public class ContentSpecRepository {
      * page render. That test is how the Kubernetes and ECS entries below were found.
      */
     private void addDefaultSpecExtensions(ProxySpec spec, String specId) {
-        addSpecExtension(spec, specId, ShinyProxySpecExtension.builder().build());
+        // NOT ShinyProxySpecExtension.builder().build(). Lombok's @Builder ignores a field
+        // initialiser unless @Builder.Default is present, and only `maxInstances` has it -- so
+        // a built extension leaves `customAppDetails` and `templateProperties` NULL where a
+        // YAML-configured spec gets empty collections. `getRuntimeValues` then does
+        // `new CustomAppDetails(null)` -> `new ArrayList<>(null)` -> NPE, which took down
+        // every start through AppController and AppDirectController, not only /c/<path>.
+        // Setting them explicitly is what actually delivers "the same default a YAML spec with
+        // nothing configured would get"; the builder alone only looked like it did.
+        addSpecExtension(spec, specId, ShinyProxySpecExtension.builder()
+            .customAppDetails(new ArrayList<>())
+            .templateProperties(new HashMap<>())
+            .build());
         addSpecExtension(spec, specId, ExternalAppSpecExtension.builder().build());
         addSpecExtension(spec, specId, ProxySharingSpecExtension.builder().build());
 
@@ -331,6 +344,39 @@ public class ContentSpecRepository {
     private void addSpecExtension(ProxySpec spec, String specId, ISpecExtension extension) {
         extension.setId(specId);
         spec.addSpecExtension(extension);
+    }
+
+    /**
+     * This content's live path, as the publisher capitalised it, or empty if it has none.
+     *
+     * <p>A singleton list rather than a nullable string because the caller's next move is a
+     * redirect it must not attempt when there is nothing to redirect to. Exactly one row can
+     * qualify: {@code content_path_one_current} is a unique index over {@code content_id}
+     * filtered on {@code is_current}.
+     */
+    public List<String> findCurrentPath(UUID contentId) {
+        return jdbc.queryForList("""
+            SELECT path FROM skald.content_path
+            WHERE content_id = ? AND is_current
+            """, String.class, contentId);
+    }
+
+    /**
+     * The spec id of this content's active version, or null if it has none yet.
+     *
+     * <p>Resolved per request rather than cached. That is what makes a publisher's URL
+     * version-independent: activating a new version or rolling back moves
+     * {@code active_version_id}, and the next request through {@code /c/<path>} picks it up
+     * with nothing to invalidate. Content created but never versioned answers null, which the
+     * serving layer reports as 404 — the path is claimed, but there is nothing to serve.
+     */
+    public String findActiveSpecId(UUID contentId) {
+        List<String> found = jdbc.query("""
+            SELECT v.version FROM skald.content c
+            JOIN skald.content_version v ON v.id = c.active_version_id
+            WHERE c.id = ?
+            """, (rs, rowNum) -> specId(contentId, rs.getInt("version")), contentId);
+        return found.isEmpty() ? null : found.get(0);
     }
 
     /**

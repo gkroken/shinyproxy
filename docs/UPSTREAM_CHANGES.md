@@ -112,10 +112,12 @@ an in-memory stand-in would exercise honestly.
 
 ## Upstream behaviour we depend on but have not changed
 
-Neither of these is an override. They are ContainerProxy behaviours that Skald's design now
-rests on, recorded because both are load-bearing, both are invisible in a passing test
-suite, and changing either would require a second ContainerProxy override and therefore an
-ADR-0001 decision. Found in spine #1 task 5, against ContainerProxy 1.2.4.
+None of these is an override. They are upstream behaviours that Skald's design now rests on,
+recorded because each is load-bearing and each is invisible in a passing test suite. A and B
+are ContainerProxy, so changing either would mean a second ContainerProxy override and
+therefore an ADR-0001 decision; C, D and E are in this repository, where the cost of changing
+them is a permanent merge conflict instead. A and B were found in spine #1 task 5; C, D and E
+in commit C, every one of them by measuring rather than by reading.
 
 ### A. Anonymous principals are rejected before access control is evaluated
 
@@ -192,3 +194,58 @@ asked, which is why a smoke test that logs in fresh cannot see the hole.
 **Note for whoever writes the deny tests in task 8.** Unit tests do not hit this cache:
 `canAccess` bypasses it entirely when there is no request context. A deny test written the
 obvious way will pass while the hole is open.
+
+
+### C. The post-login destination is only restored for `/app*` URLs
+
+`UISecurityConfig` (this repository) replaces the success handler's redirect strategy with one
+that stores a destination **only** when `AppRequestInfo.fromURI(url)` parses it — which means
+`/app`, `/app_i`, `/app_direct` and `/app_direct_i`, and nothing else. The comment cites
+upstream #30648 and #28624, so the narrowness is deliberate.
+
+**Consequence.** A signed-out visitor following any other shared link lands on the index after
+signing in. Measured on the dev stack rather than inferred: `/app/hello` comes back to
+`/app/hello`, while `/admin` and `/c/...` both come back to `/`.
+
+**What we do instead of widening it.** `ContentController` sets
+`AUTH_SUCCESS_URL_SESSION_ATTR` itself before redirecting to `/login` — the same attribute
+that handler sets, read by the same `AuthController`, which checks the value is on this origin
+before using it. So the open-redirect guard remains upstream's, the diff against
+`UISecurityConfig` stays at zero, and the behaviour is pinned by
+`ContentServingTest.aSignedOutVisitorIsSentToLoginAndTheDestinationIsRemembered` plus a live
+`dev/smoke.sh` check that drives the whole Keycloak round trip.
+
+### D. Forwarding to `/error` does not set the response status, and it cannot express 410
+
+Upstream's app controllers set `RequestDispatcher.ERROR_STATUS_CODE` and forward to `/error`.
+That selects the error *page*; it does not change the response status. It is invisible upstream
+because `/app_direct/{specId}/**` is refused by a security matcher before its controller runs,
+so the forward is never what produces the 403.
+
+Measured before `ContentController` stopped relying on it: `/c/nope` answered **404** to a
+wildcard `Accept` and **200** to `Accept: text/html` — a browser shown "not found" with a
+success status.
+
+`ErrorController`'s JSON branch also understands only 400, 401, 403, 404 and 405, falling
+through to `ApiResponse.error("unrecoverable error")` with a **500**. So a deleted path
+reported itself as a server fault. `ContentController` sets the status itself, reuses the HTML
+error page only (which renders whatever status it is given), and writes the JSON shape for
+everything else. Changing either would mean a diff against an upstream file for presentation,
+which is not worth it.
+
+### E. A spec extension built with its Lombok builder is not the same as a configured one
+
+`@Builder` ignores field initialisers unless `@Builder.Default` is present. On
+`ShinyProxySpecExtension` only `maxInstances` has it, so
+`ShinyProxySpecExtension.builder().build()` leaves `customAppDetails` and `templateProperties`
+**null**, where a YAML-configured spec gets empty collections.
+`ShinyProxySpecProvider.getRuntimeValues` then evaluates `new CustomAppDetails(null)`, i.e.
+`new ArrayList<>(null)`, and throws.
+
+This broke every container start that goes through `AppController`, `AppDirectController` or
+`/c/<path>` for registry content — not only the new route. It stayed hidden because the test
+suite starts proxies through the API, which does not build runtime values this way.
+`ContentSpecRepository` now sets both explicitly, and
+`MergedSpecProviderTest.registrySpecExtensionsHaveNoNullCollectionsWhereAConfiguredSpecHasEmptyOnes`
+sweeps every extension reflectively, so a field added upstream with an initialiser and no
+`@Builder.Default` fails the build rather than a container start.

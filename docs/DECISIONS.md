@@ -347,6 +347,16 @@ spine #4. It removes the id-reuse path into it.
    history row must survive its content row, so the foreign key is `ON DELETE SET NULL` and
    **not** a cascade; a cascade would delete the reservation along with the content and the
    path would quietly become available again.
+
+   **The redirect carries the sub-path, and a retired path therefore reserves its whole
+   subtree** (added when commit C implemented this; the original wording said only that the
+   path redirects). `/c/old/chapter2.html` must land on `/c/new/chapter2.html`, not on
+   `/c/new/` — a page of a Quarto site or a route inside a Shiny app is exactly the kind of
+   link people paste, and dropping the tail turns "your link still works" into "your link
+   goes to the front page". That is only possible if nobody else can claim `old/chapter2`
+   in the meantime, so the reservation covers the subtree, not just the key. A review of
+   commit B reported the subtree reservation as a defect ("a rename burns a whole branch of
+   the namespace"); it is the mechanism, and the report was withdrawn.
 4. ASCII only, matched case-insensitively with the publisher's capitalisation preserved.
    Uniqueness is enforced on a normalised key across live paths *and* history. The
    normalisation is pinned to ASCII in the application and the column is `COLLATE "C"`,
@@ -357,6 +367,23 @@ spine #4. It removes the id-reuse path into it.
    works after signing in. Authenticated but not permitted returns **404, not 403**: it is
    non-leaking and consistent with the index, which already hides content a user may not
    see. Path resolution ends in the same `canAccess` the `/app` route uses.
+
+   **Neither half is free, and commit C found out by measuring rather than by reading.**
+   Spring's saved request does not restore a `/c/` destination: `UISecurityConfig` installs a
+   redirect strategy that only keeps a destination `AppRequestInfo.fromURI` can parse, which
+   means `/app*` and nothing else (upstream #30648, #28624). Verified on the dev stack — a
+   signed-out visit to `/admin` or `/c/...` lands on the index after signing in, while
+   `/app/hello` does not. `ContentController` therefore sets the same session attribute
+   upstream's own handler sets, `AUTH_SUCCESS_URL_SESSION_ATTR`, so the open-redirect check in
+   `AuthController` stays the one guarding it and no upstream file is modified.
+
+   And the refusal status has to be set explicitly. Forwarding to `/error` with
+   `ERROR_STATUS_CODE` set — what upstream's app controllers do — does **not** change the
+   response status: measured at 404 for a wildcard `Accept` and **200** for `text/html`, so a
+   browser was being shown "not found" with a success status. Upstream is not bitten because
+   its app routes are refused by a security matcher before the controller runs. 410 cannot go
+   through `/error` at all: `ErrorController` understands 400, 401, 403, 404 and 405 and falls
+   through to a 500 for anything else.
 
 **Deferred, not decided: whether a reserved path can ever be reclaimed.** "Never
 reassignable" is the v1 default, not a principle, and it should not be written into this

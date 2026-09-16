@@ -579,6 +579,59 @@ re-reviewing a fix rather than only the thing it fixed.
 B1 mattered on timing rather than likelihood: the ambiguous rows are creatable today, and
 commit C's path resolution inherits whatever is in the table.
 
+### Commit C — the `/c/<path>` serving layer
+
+Published content is now reachable at the address its publisher chose. 133/133 tests,
+`dev/smoke.sh` 47/47, `make build` clean.
+
+The route resolves longest-prefix (content owns its subtree), then hands off to
+`ProxyMappingManager.dispatchAsync` — no upstream change, no iframe, and the publisher's URL
+stays in the address bar for the whole session. That last part is the point rather than a
+nicety: `/app/<specId>` carries the version, so anything a viewer copies from the address bar
+there dies at the next publish, Shiny's own bookmark URLs included. Spine #5's static documents
+have no `/app` page at all, and spine #7's `curl .../c/my-api/predict` cannot contain a version
+either, so in-place serving is the only shape that serves all three.
+
+**Three upstream behaviours were found by driving it, and all three had been assumed away.**
+Each is now in `docs/UPSTREAM_CHANGES.md` (C, D, E) rather than only in a commit message.
+
+1. *The post-login destination is only restored for `/app*` URLs.* `UISecurityConfig` keeps a
+   destination only when `AppRequestInfo.fromURI` parses it — deliberately, citing upstream
+   #30648 and #28624. So a signed-out visitor following a shared `/c/` link landed on the
+   index. Measured, not inferred: `/app/hello` returns to itself, `/admin` and `/c/...` return
+   to `/`. Fixed by setting the same session attribute upstream's handler sets, which keeps the
+   open-redirect check upstream's and the diff at zero.
+2. *Forwarding to `/error` does not set the response status.* `/c/nope` answered 404 to `curl`
+   and **200** to a browser. Upstream is not bitten because its app routes are refused by a
+   security matcher before the controller runs. And 410 cannot go through `/error` at all —
+   `ErrorController` knows 400/401/403/404/405 and falls through to a 500 — so a deleted
+   address was reporting itself as a server fault.
+3. *A spec extension built with its Lombok builder is not a configured one.* `@Builder` ignores
+   field initialisers without `@Builder.Default`, which only `maxInstances` has, so
+   `customAppDetails` and `templateProperties` were **null** on every registry spec and
+   `getRuntimeValues` threw. This broke starts through `AppController` and `AppDirectController`
+   too — it was never specific to the new route — and the suite missed it because its own proxy
+   starts go through the API, which does not build runtime values that way. Task 4's claim that
+   the empty builder gives "the same default a YAML spec with nothing configured would get" was
+   simply false for two fields.
+
+**One more that only a second request reveals.** `UserAndAppNameAndInstanceNameProxyIndex`
+matches a running proxy on its `AppInstanceKey` runtime value, so a proxy started without one is
+never found again: the first request served, the second tried to start another container and
+died on `max-instances`. Any test that asks once passes.
+
+**Withdrawn from the B-round review:** B2 (“a retired path burns its whole subtree”). The subtree
+reservation is the mechanism, not a defect — `/c/old/chapter2.html` can only redirect to
+`/c/new/chapter2.html` if nobody else may claim `old/chapter2` meanwhile. ADR-0011 rule 3 now
+says so explicitly. Only the error message was wrong.
+
+**Left for spine #4:** `/c/etl/` is a 404 when `etl/fetchFromA` and `etl/fetchFromB` are
+published. Nothing can live at `etl` itself — a document there would own `etl/fetchFromA` as one
+of its own pages — so the intermediate level wants a *generated* index of what the viewer may
+see, which is publisher-facing UI and belongs with the rest of it. Pinned by
+`anIntermediateLevelIsNotFoundRatherThanAnEmptyPage` so the decision is visible rather than
+implied.
+
 **What spine #2 inherits, none of it in the original plan:**
 
 1. **The ACL cache decision is now unavoidable.** Task 7 shipped without ACL or visibility

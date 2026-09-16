@@ -23,6 +23,7 @@
 package eu.openanalytics.shinyproxy.publisher.registry;
 
 import eu.openanalytics.containerproxy.ContainerProxyApplication;
+import eu.openanalytics.containerproxy.model.spec.ISpecExtension;
 import eu.openanalytics.containerproxy.model.spec.ProxySpec;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
 import org.junit.jupiter.api.AfterAll;
@@ -40,6 +41,7 @@ import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -164,6 +166,51 @@ public class MergedSpecProviderTest {
             "registry specs are missing spec extensions that configured specs have: "
                 + configured.getSpecExtensions().keySet().stream()
                     .filter(k -> !fromRegistry.getSpecExtensions().containsKey(k)).toList());
+    }
+
+    /**
+     * Carrying the extension is not the same as carrying its defaults, and the difference is a
+     * production NPE.
+     *
+     * <p>Lombok's {@code @Builder} ignores a field initialiser unless {@code @Builder.Default}
+     * is present. On {@code ShinyProxySpecExtension} only {@code maxInstances} has it, so
+     * {@code builder().build()} leaves {@code customAppDetails} and {@code templateProperties}
+     * null where a YAML-configured spec gets empty collections — and
+     * {@code ShinyProxySpecProvider.getRuntimeValues} does {@code new CustomAppDetails(null)},
+     * which is {@code new ArrayList<>(null)}. That took down every start through
+     * {@code AppController}, {@code AppDirectController} and {@code /c/<path>}, and the suite
+     * never saw it because its own proxy starts go through the API, which does not build
+     * runtime values this way.
+     *
+     * <p>Asserted by reflection rather than field by field so that an extension field added
+     * upstream with an initialiser and no {@code @Builder.Default} fails here rather than in a
+     * container start.
+     */
+    @Test
+    public void registrySpecExtensionsHaveNoNullCollectionsWhereAConfiguredSpecHasEmptyOnes()
+        throws IllegalAccessException {
+
+        publish("my-app", "alice", 1, "registry:5000/my-app:1");
+        ProxySpec fromRegistry = specProvider.getSpec(spec("my-app", 1));
+
+        for (ISpecExtension extension : fromRegistry.getSpecExtensions().values()) {
+            for (java.lang.reflect.Field field : extension.getClass().getDeclaredFields()) {
+                if (!Collection.class.isAssignableFrom(field.getType())
+                    && !Map.class.isAssignableFrom(field.getType())) {
+                    continue;
+                }
+                field.setAccessible(true);
+                Assertions.assertNotNull(field.get(extension),
+                    extension.getClass().getSimpleName() + "." + field.getName()
+                        + " is null on a registry spec. A YAML spec gets an empty collection "
+                        + "there, so something will dereference it: add @Builder.Default "
+                        + "upstream or set it explicitly in ContentSpecRepository.");
+            }
+        }
+
+        // The one that actually blew up, exercised rather than merely inspected.
+        Assertions.assertDoesNotThrow(() -> specProvider.getRuntimeValues(fromRegistry),
+            "getRuntimeValues is what every container start calls");
     }
 
     /**

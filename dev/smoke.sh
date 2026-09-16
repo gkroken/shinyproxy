@@ -202,6 +202,68 @@ check "bob does NOT see alice's new app"    "$(lists_spec "$BOB" "$SPEC")"   no
 check "bob is denied alice's new app"       "$(opens_spec "$BOB" "$SPEC")"   403
 check "bob cannot reach the admin API"      "$(jstatus -b "$BOB" -c "$BOB" "$BASE/admin/content")" 403
 
+# ---------------------------------------------------------------------------
+# The publisher's own URL (commit C). This is the address a viewer is actually
+# given, so it is checked here rather than only in a unit test -- and the
+# post-login hand-off cannot be checked anywhere else at all, because it runs
+# through Keycloak and a rendered page.
+# ---------------------------------------------------------------------------
+serves() { curl -s -o /dev/null -w '%{http_code}' -b "$1" -c "$1" "$BASE/c/$2"; }
+redirect_to() { curl -s -o /dev/null -D- -b "$1" -c "$1" "$BASE/c/$2" \
+  | grep -i '^location:' | sed 's/.*: //' | tr -d '\r'; }
+
+check "alice opens the content at its own URL" "$(serves "$ALICE" "$PATHNAME/")" 200
+check "a second request reuses the container, it does not start another" \
+  "$(serves "$ALICE" "$PATHNAME/")" 200
+check "bob gets 404, NOT 403 -- a stranger is not told the address is in use" \
+  "$(serves "$BOB" "$PATHNAME/")" 404
+check "the intermediate level is a dead end for now (spine #4 makes it an index)" \
+  "$(serves "$ALICE" "smoke/")" 404
+check "a browser gets the refusal status too, not a 200 error page" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' -b "$BOB" -c "$BOB" "$BASE/c/$PATHNAME/")" 404
+
+# A shared link opened while signed out has to survive signing in, or "share this
+# URL" is a broken promise. Upstream only restores /app* destinations, so this is
+# the one that would silently regress.
+GUEST=$(mktemp)
+first=$(curl -s -o /dev/null -w '%{http_code}' -c "$GUEST" -b "$GUEST" "$BASE/c/$PATHNAME/?tab=2")
+check "a signed-out visitor following a shared link is sent to log in" "$first" 302
+login_page=$(curl -sL -c "$GUEST" -b "$GUEST" "$BASE/login")
+action=$(printf '%s' "$login_page" | grep -o 'action="[^"]*"' | head -1 \
+  | sed 's/action="//; s/"$//' | sed 's/&amp;/\&/g')
+curl -sL -c "$GUEST" -b "$GUEST" -d "username=alice" -d "password=alice" -d "credentialId=" \
+  "$action" -o "$GUEST.html"
+# auth-success writes the destination into a JS string literal, so its slashes arrive
+# escaped as \/ -- strip backslashes before matching rather than matching the escaping.
+case "$(tr -d '\\' < "$GUEST.html")" in
+  *"/c/$PATHNAME/?tab=2"*) landed=yes ;;
+  *) landed=no ;;
+esac
+check "and lands back on the content afterwards, query string intact" "$landed" yes
+rm -f "$GUEST" "$GUEST.html"
+
+# Opening the URL started a real container, and the delete further down is refused
+# while one is running -- deliberately, so that deleting content cannot strand a
+# proxy whose spec then stops resolving. Stop it and assert that it stopped, rather
+# than assuming: an unstopped container makes the later checks fail for a reason
+# that has nothing to do with what they test.
+cspec=$(curl -s -b "$ALICE" -c "$ALICE" "$BASE/api/proxy" \
+  | python3 -c 'import json,sys
+d=json.load(sys.stdin)["data"]
+print(next((p["id"] for p in d if p["specId"]==sys.argv[1]), ""))' "$SPEC")
+if [ -n "$cspec" ]; then
+  curl -s -o /dev/null -X PUT -H 'Content-Type: application/json' \
+    -d '{"status":"Stopping"}' -b "$ALICE" -c "$ALICE" "$BASE/api/proxy/$cspec/status"
+fi
+gone=no
+for _ in $(seq 1 15); do
+  still=$(curl -s -b "$ALICE" -c "$ALICE" "$BASE/api/proxy" \
+    | python3 -c 'import json,sys; print(sum(1 for p in json.load(sys.stdin)["data"] if p["specId"]==sys.argv[1]))' "$SPEC")
+  if [ "$still" = 0 ]; then gone=yes; break; fi
+  sleep 2
+done
+check "the container started through /c stops cleanly" "$gone" yes
+
 # A rename keeps every link working and does not disturb the running spec id.
 code=$(jstatus -b "$ALICE" -c "$ALICE" -X PUT -H 'Content-Type: application/json' \
   -d "{\"path\":\"smoke/renamed-$RUN_ID\"}" "$BASE/admin/content/$CID/path")
@@ -236,6 +298,10 @@ check "alice deletes the content"                  "$(jstatus -b "$ALICE" -c "$A
 check "the deleted app is gone from the index"     "$(lists_spec "$ALICE" "$SPEC2")" no
 check "its path is GONE, not free to reuse" \
   "$(jstatus -b "$ALICE" -c "$ALICE" "$BASE/admin/content/by-path?path=smoke/renamed-$RUN_ID")" 410
+check "and the URL itself answers 410, not 404" \
+  "$(serves "$ALICE" "smoke/renamed-$RUN_ID/")" 410
+check "the pre-rename URL answers 410 too, never a redirect to someone else" \
+  "$(serves "$ALICE" "$PATHNAME/")" 410
 
 rm -f "$ALICE" "$BOB"
 echo
