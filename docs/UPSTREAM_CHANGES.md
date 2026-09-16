@@ -139,8 +139,17 @@ starts failing, anonymous content became implementable through projection alone.
 are keyed by user id and `proxy.default-max-instances` is 1, so anonymous visitors to a
 container-backed app would share one container — one visitor's Shiny session state visible
 to the next — or be refused. Anonymous access is therefore natural for spine #5's static
-documents, which are served from object storage with no container per viewer, and needs a
-per-visitor identity answer before it can mean anything for `shiny` / `plumber` / `fastapi`.
+documents, which are served from object storage with no container per viewer.
+
+**There is a route to it that needs no ContainerProxy change**, so this section is a
+constraint, not a dead end. An `ICustomSecurityConfig` filter can mint a per-session *guest*
+identity that is not an `AnonymousAuthenticationToken`, which sidesteps the short-circuit
+entirely; upstream's own `NoAuthenticationBackend.Filter`
+(`auth/impl/NoAuthenticationBackend.java:91-134`) is the model for the per-session part. The
+cost is blast radius — a synthetic authenticated principal satisfies
+`anyRequest().fullyAuthenticated()` across the whole application — so it needs the guest
+token scoped to anonymous-content routes and deny tests for everything else. Designed as a
+spine #5 item in `WORKPLAN.md`.
 
 ### B. Authorization decisions are cached per session, with no way to invalidate them
 

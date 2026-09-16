@@ -189,13 +189,60 @@ the content.
 
 ---
 
-### #5 — Static documents · Sonnet 5 (Opus 5 reviews path handling)
+### #5 — Static documents · Sonnet 5 (Opus 5 reviews path handling and anonymous access)
 
 - [ ] `quarto_static` / `rmarkdown_static`: render once at publish time in a build
       container, or accept pre-rendered output.
 - [ ] Serve from MinIO through the platform under the same ACLs. **No container per viewer.**
+- [ ] **Anonymous access / public links.** **Opus 5** — this is an authentication-boundary
+      change and gets deny tests plus a security review regardless of who writes it.
 
-**Done when:** a multi-page Quarto site with assets is served behind auth.
+**Done when:** a multi-page Quarto site with assets is served behind auth, and a document
+published with `visibility = anonymous` opens in a logged-out browser while everything else
+stays denied.
+
+#### Anonymous access — why it lands here and not in #1
+
+`content.visibility = 'anonymous'` exists in the schema from spine #1 but is **refused** —
+it projects to deny-everyone and the admin endpoint rejects it on write. Task 5 established
+why, by experiment rather than by reading (`docs/UPSTREAM_CHANGES.md` section A):
+
+`AccessControlEvaluationService.checkAccess:56-61` rejects an `AnonymousAuthenticationToken`
+whenever the auth backend has authorization, **before** users, groups or the expression are
+consulted. No projected `AccessControl` can grant an unauthenticated visitor. Routes are not
+the obstacle — `UISecurityConfig` registers `/app/{specId}/**` before `WebSecurityConfig`
+adds `anyRequest().fullyAuthenticated()`.
+
+**The approach, which needs no ContainerProxy change and so does not touch ADR-0001's
+tripwire.** An `ICustomSecurityConfig` filter — the same advertised seam `UISecurityConfig`
+already uses — mints a **per-session guest identity** for requests to anonymous-visibility
+content. Two parts, and upstream supplies the harder one:
+
+1. *Per-session identity.* `NoAuthenticationBackend.Filter`
+   (`containerproxy/auth/impl/NoAuthenticationBackend.java:91-134`) already does exactly
+   this: an `AnonymousAuthenticationFilter` subclass that stores a UUID on the session and
+   uses it as the principal name. Model the guest filter on it. Without this, every visitor
+   is the principal `anonymousUser`, so they would share one container and one
+   `max-instances` budget — one visitor's session state visible to the next.
+2. *Getting past the short-circuit.* The guest token must **not** be an
+   `AnonymousAuthenticationToken`, or `checkAccess` bails before reading anything. Mint an
+   ordinary `Authentication` carrying a `guest` authority, and let the projection grant it.
+
+**The risk that decides the design, and the reason this is Opus 5.** A synthetic
+authenticated principal satisfies `anyRequest().fullyAuthenticated()` across the *whole*
+application, not just the one public page. The containment argument is that the index lists
+only specs `canAccess` permits, `/admin` is gated on admin groups, and `/api/**` proxy routes
+are per-spec — but that is an argument, not evidence. **Scope the guest token to the routes
+that serve anonymous content and prove the rest with deny tests**: a guest must be refused
+the index listing of non-anonymous content, `/admin`, `/api/**`, and any spec whose
+visibility is not `anonymous`.
+
+**Why #5 and not #7 or #1.** Static documents are served from object storage with no
+container per viewer, so the DoS surface — unauthenticated traffic that can start containers
+— mostly evaporates, and a public link is worth most for a document. Extending anonymous
+access to `shiny` / `plumber` / `fastapi` is a separate decision that must answer container
+cost and rate limiting first; until it does, the admin endpoint keeps rejecting `anonymous`
+for those types.
 
 ---
 

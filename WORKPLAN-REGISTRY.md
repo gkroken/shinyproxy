@@ -119,9 +119,13 @@ Superseded versions carry the **same ACL as the content item**, not a snapshot.
 > invalidation path and an `expireAfterAccess` expiry, so a session that keeps using the app
 > refreshes the cached answer indefinitely and the revocation never reaches it. Task 7 must
 > decide this before it ships an ACL write path; `docs/UPSTREAM_CHANGES.md` section B has
-> the detail. `V1__content_registry.sql` carries the same over-claim in a comment and is
-> **deliberately left alone**: it has been applied, and Flyway checksums migration files, so
-> editing even a comment fails validation on every existing database.
+> the detail. `V1__content_registry.sql` carried the same over-claim in a comment and was
+> **corrected in place** while that was still free: the only database that had ever applied
+> it was the dev stack. Verified the hard way first — rebuilding with the comment edited and
+> the old schema in place fails the whole application at boot with
+> `Migration checksum mismatch for migration version 1`, not a warning. The dev schema was
+> dropped and Flyway reapplied v1 cleanly. **After spine #1 merges this stops being free**:
+> correcting a migration then means `flyway repair` on every database that has applied it.
 
 **5. Flyway owns the schema, and the `DataSource` is declared explicitly.**
 `DataSourceAutoConfiguration` is excluded upstream, so `spring.datasource.*` does nothing
@@ -307,7 +311,8 @@ Visibility projects into a synthesized `AccessControl`:
       every anonymous visitor is the principal `"anonymousUser"`, so on container-backed
       content they would share one container and one max-instances budget. Anonymous access
       belongs with spine #5's static documents, which have no container per viewer. Full
-      reasoning in `docs/UPSTREAM_CHANGES.md` section A.
+      reasoning in `docs/UPSTREAM_CHANGES.md` section A; the design and its risks are
+      written up as a spine #5 item in `WORKPLAN.md`.
 
       **The projection's real hazard is the empty object, not the exception.** An
       `AccessControl` with no users, no groups and no expression means *unrestricted* —

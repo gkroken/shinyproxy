@@ -53,10 +53,17 @@ ALTER TABLE skald.content
     ADD CONSTRAINT content_active_version_fk
     FOREIGN KEY (active_version_id) REFERENCES skald.content_version (id) ON DELETE SET NULL;
 
--- ACLs are projected into a synthesized ContainerProxy AccessControl at request time, so
--- authorization needs no upstream change. Superseded versions carry the content item's
--- current ACL, not a snapshot -- a revoked grant takes effect immediately, including for
--- someone holding a container started on an older version.
+-- ACLs are projected into a synthesized ContainerProxy AccessControl at request time
+-- (AccessControlProjector), so the projection itself needs no upstream change. Superseded
+-- versions carry the content item's CURRENT ACL, not a snapshot, including for someone
+-- holding a container started on an older version.
+--
+-- That is a statement about what is stored and read, NOT about when a change is observed.
+-- ContainerProxy's ProxyAccessControlService memoises each authorization decision per
+-- (sessionId, specId) with no invalidation path, and because the expiry is
+-- expireAfterAccess rather than expireAfterWrite, a session that keeps using an app keeps
+-- refreshing it -- so a revoked grant does not reach that session at all. See
+-- docs/UPSTREAM_CHANGES.md section B. Whoever builds the ACL write path owns that problem.
 CREATE TABLE skald.content_acl (
     id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     content_id      uuid        NOT NULL REFERENCES skald.content (id) ON DELETE CASCADE,
