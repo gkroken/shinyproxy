@@ -568,6 +568,17 @@ The review also confirmed, independently, the things worth confirming: the ADR-0
 right, the deny assertions are not vacuous, `hasLiveProxy`'s startup ordering holds, and the
 CSRF defence covers all three form-capable content types.
 
+**The rework was then reviewed in turn**, which found one more — and this is the argument for
+re-reviewing a fix rather than only the thing it fixed.
+
+| # | Finding | Outcome |
+|---|---|---|
+| B1 | The nesting rule did not survive concurrency. Four parallel creates of `race`, `race/a`, `race/b` and `race/a/deep` **all** returned 201 and all four rows survived — the F3 check-then-insert shape, reintroduced in the code written to fix F3 | **Fixed** — `claimPath` takes a transaction-scoped advisory lock on the path's first segment, the smallest lock covering every pair that can nest. Verified live and mutation-tested |
+| B2 | *Withdrawn.* Reported as "a retired path burns its whole subtree, permanently, and rename triggers it too" | **Not a defect.** A retired path *must* keep its subtree, or a deep link — `/c/team/chapter2.html`, any page of a Quarto site — stops resolving across a rename, which is what rule 3's redirect exists to prevent. Only the error message was wrong: it said "content owns its whole subtree" when the clashing row was retired and no content owned it. Message fixed |
+
+B1 mattered on timing rather than likelihood: the ambiguous rows are creatable today, and
+commit C's path resolution inherits whatever is in the table.
+
 **What spine #2 inherits, none of it in the original plan:**
 
 1. **The ACL cache decision is now unavoidable.** Task 7 shipped without ACL or visibility

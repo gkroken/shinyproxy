@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.admin;
 import eu.openanalytics.containerproxy.ContainerProxyApplication;
 import eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
+import eu.openanalytics.shinyproxy.publisher.registry.ContentPath;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -43,6 +44,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
@@ -582,12 +584,59 @@ public class ContentAdminControllerTest {
             "every success must have allocated a distinct version");
     }
 
+    /**
+     * B1: nesting is a relationship between two rows, so no constraint expresses it and the
+     * check that enforces it is read-then-write. Before {@code claimPath} took an advisory lock
+     * on the path's first segment, four parallel creates of {@code race}, {@code race/a},
+     * {@code race/b} and {@code race/a/deep} <em>all</em> returned 201 and all four rows
+     * survived — which is exactly the state {@code /c/<path>} resolution has no basis to
+     * answer. Found by driving the live stack, not by this suite.
+     *
+     * <p>The assertion is on the invariant, not on a count: siblings like {@code race/a} and
+     * {@code race/b} may legitimately both win, so several outcomes are correct and the only
+     * thing that must hold is that no two surviving paths nest.
+     */
+    @Test
+    public void concurrentlyClaimedPathsNeverNestInsideOneAnother() throws Exception {
+        List<String> wanted = List.of("race", "race/a", "race/b", "race/a/deep");
+
+        List<Integer> codes = inParallel(wanted.stream().map(path -> (Callable<Integer>) () -> {
+            try (Response r = post(admin, "/admin/content",
+                "{\"path\":\"" + path + "\",\"title\":\"x\",\"owner\":\"adminuser\","
+                    + "\"type\":\"shiny\"}")) {
+                return r.code();
+            }
+        }).toList());
+
+        Assertions.assertTrue(codes.stream().allMatch(c -> c == 201 || c == 409),
+            "claiming a path produced something other than 201/409: " + codes);
+
+        List<String> stored = paths().stream()
+            .filter(p -> p.equals("race") || p.startsWith("race/"))
+            .toList();
+        Assertions.assertFalse(stored.isEmpty(), "at least one caller should have won");
+        Assertions.assertEquals(codes.stream().filter(c -> c == 201).count(), stored.size(),
+            "every 201 should have left exactly one row, got " + stored + " for " + codes);
+
+        for (String a : stored) {
+            for (String b : stored) {
+                Assertions.assertFalse(ContentPath.conflicts(a, b),
+                    "'" + a + "' and '" + b + "' nest inside one another, so a request below "
+                        + "the shorter one is satisfiable two ways: " + stored);
+            }
+        }
+    }
+
     private static List<Integer> inParallel(int callers, Callable<Integer> call) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        return inParallel(Collections.nCopies(callers, call));
+    }
+
+    private static List<Integer> inParallel(List<Callable<Integer>> calls) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(calls.size());
         try {
             CountDownLatch go = new CountDownLatch(1);
             List<Future<Integer>> futures = new ArrayList<>();
-            for (int i = 0; i < callers; i++) {
+            for (Callable<Integer> call : calls) {
                 futures.add(pool.submit(() -> {
                     go.await();
                     return call.call();

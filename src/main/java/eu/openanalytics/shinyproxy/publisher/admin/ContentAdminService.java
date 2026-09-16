@@ -311,32 +311,72 @@ public class ContentAdminService {
      * Reserves a path for this content, refusing anything already taken or nested.
      *
      * <p>The uniqueness check spans retired paths as well as live ones. The nesting check has to
-     * be a query rather than a constraint, because it is a relationship between rows.
+     * be a query rather than a constraint, because it is a relationship between rows — which is
+     * exactly why {@link #lockPathRoot} has to come first.
      */
     private void claimPath(UUID contentId, String path, String key) {
-        List<String> clashes = jdbc.queryForList("""
-            SELECT path_key FROM skald.content_path
-            WHERE path_key = ? OR path_key LIKE ? || '/%' OR ? LIKE path_key || '/%'
-            """, String.class, key, key, key);
+        lockPathRoot(key);
 
-        for (String other : clashes) {
+        List<Map<String, Object>> clashes = jdbc.queryForList("""
+            SELECT path_key, is_current FROM skald.content_path
+            WHERE path_key = ? OR path_key LIKE ? || '/%' OR ? LIKE path_key || '/%'
+            ORDER BY (path_key = ?) DESC
+            """, key, key, key, key);
+
+        for (Map<String, Object> clash : clashes) {
+            String other = (String) clash.get("path_key");
             if (other.equals(key)) {
                 throw conflict("path '" + path + "' is already in use, or was used by content "
                     + "that has since been deleted; retired paths stay reserved so that they can "
                     + "never point at different content");
             }
-            throw conflict("path '" + path + "' conflicts with '" + other
-                + "': content owns its whole subtree, so one path cannot sit inside another");
+            // A retired path still owns its subtree: it is the source of a 301, and a deep link
+            // below it has to keep resolving to the same content after a rename. Saying "content
+            // owns its subtree" for a retired row sends the reader looking for content that is
+            // not there.
+            throw conflict("path '" + path + "' conflicts with '" + other + "': "
+                + (Boolean.TRUE.equals(clash.get("is_current"))
+                ? "content owns its whole subtree, so one path cannot sit inside another"
+                : "'" + other + "' is a retired path, and a retired path keeps its subtree "
+                    + "reserved so that links below it still resolve"));
         }
 
         try {
             jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) "
                 + "VALUES (?, ?, ?)", path, key, contentId);
         } catch (DataIntegrityViolationException e) {
-            // The check above is advisory; the unique index decides. Mapping the violation here
-            // is what makes a conflict the documented answer for whoever loses a race.
+            // Belt to the lock's braces, and the only guard left if the lock is ever removed
+            // from an exact-key collision. Mapping the violation here is what makes a conflict
+            // the documented answer for whoever loses a race.
             throw conflict("path '" + path + "' is already in use");
         }
+    }
+
+    /**
+     * Serialises every path claim that could possibly conflict with this one.
+     *
+     * <p>Uniqueness of the exact key is backed by a unique index, so the insert above decides it
+     * whatever happens concurrently. <b>Nesting is not.</b> It is a relationship between two
+     * rows, so no constraint expresses it, and the check above is therefore read-then-write:
+     * concurrent claims of {@code team} and {@code team/reports} both find nothing and both
+     * insert. Reproduced before this lock existed — four parallel creates of {@code race},
+     * {@code race/a}, {@code race/b} and {@code race/a/deep} all returned 201 and all four rows
+     * survived, which is precisely the ambiguous state {@code /c/<path>} resolution cannot
+     * answer. Pinned by {@code concurrentlyClaimedPathsNeverNestInsideOneAnother}.
+     *
+     * <p>Two paths can only nest if one is a prefix of the other, which requires them to share a
+     * first segment. Locking on that segment is therefore the smallest lock that covers every
+     * conflicting pair, and it lets unrelated publishers claim paths in parallel. The lock is
+     * transaction-scoped, so the commit or rollback releases it and there is no unlock path to
+     * get wrong.
+     *
+     * <p>{@code hashtext} collisions are harmless: two unrelated roots that hash alike merely
+     * serialise against each other.
+     */
+    private void lockPathRoot(String key) {
+        String root = key.split("/", 2)[0];
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> {
+        }, root);
     }
 
     private String normaliseOrBad(String path) {
