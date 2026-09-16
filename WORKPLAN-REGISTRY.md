@@ -28,9 +28,13 @@ the first commit and it is proven by a test before any schema work happens.
 
 Three further constraints, all verified, shape the rest:
 
-- `ProxyService.java:536` re-resolves `getSpec(proxy.getSpecId())` when **stopping** a
-  proxy, and `Proxy` persists only `specId`. Superseded versions must stay resolvable or
-  rollback breaks containers that are still running (ADR-0008).
+- `Proxy` persists only `specId`, so superseded versions must stay resolvable or rollback
+  breaks containers that are still running (ADR-0008). **Corrected in task 6:** this said
+  `ProxyService.java:536` re-resolves the spec when *stopping* a proxy. It does not. Line
+  536 is `startOrResumeProxy`; `stopProxy` (`:346`) needs only `getDispatcher(specId)`. The one
+  reachable dependant is **`getUserProxies` (`:231`, through `canAccess`)**, so losing
+  resolvability is a *silent* failure — the owner stops seeing their own running app — not a
+  loud one at shutdown.
 - `ContainerProxyApplication` excludes `DataSourceAutoConfiguration`
   (`ContainerProxyApplication.java:93`), so `spring.datasource.*` is inert until we define
   a `DataSource` bean ourselves.
@@ -353,9 +357,40 @@ Visibility projects into a synthesized `AccessControl`:
       `AccessControl` fails nine tests; making `anonymous` downgrade to `acl_only` fails two;
       dropping the ACL from the fingerprint fails five. A deny test that has never been seen
       to fail is not evidence.
-- [ ] 6. Version resolvability (ADR-0008): `getSpec()` resolves superseded versions that
-      still have live containers. Tested with a container held alive **across** an
-      activate and a rollback, asserting it still stops cleanly.
+- [x] **6. Version resolvability (ADR-0008).** 81/81 tests green (79 + 2 new).
+
+      **The capability was already there** — `ContentSpecRepository.findSpec` has resolved any
+      version since task 4, because `SELECT_ONE` joins `content_version` on `content_id` rather
+      than on `active_version_id`. What task 6 adds is the proof the plan asked for and a
+      correction to why it matters. `VersionResolvabilityTest` holds a **real container** alive
+      across an activate *and* a rollback and asserts it stays listed, stays reachable through
+      the proxy, and then stops cleanly. Mutation-tested: pointing `SELECT_ONE` at
+      `active_version_id` fails it, and `MergedSpecProviderTest` with it.
+
+      **The recorded reason for ADR-0008 was wrong, in four documents.** All of them said
+      `ProxyService.java:536` re-resolves `getSpec(proxy.getSpecId())` "when stopping a proxy".
+      Line 536 is in `startOrResumeProxy`. `ProxyService.stopProxy` (`:346`) never calls
+      `getSpec` at all — it needs only `getDispatcher(specId)`, which
+      `LazyProxyDispatcherService` answers for any id. Verified both ways in
+      `stopNeedsOnlyTheDispatcherButTheUsersProxyListNeedsTheSpec`, which deletes the content
+      row out from under a running container and then stops it successfully.
+
+      What actually depends on resolvability is **a user's own proxy list** (`:231`, which
+      filters through `canAccess` and therefore resolves the spec). A first pass at this
+      correction also listed *resume* (`:536`); that was itself an over-claim, and checking
+      rather than reading settled it — `IContainerBackend.supportsPause()` defaults to false,
+      no backend overrides it, and `ProxySharingDispatcher` returns false explicitly, so the
+      resume branch is dead code in 1.2.4. App recovery does not resolve specs either.
+
+      The narrower basis is still sufficient, and still makes the requirement *more*
+      important than recorded rather than less: losing resolvability is a **silent** failure
+      — the owner stops seeing their own running app — not a loud one at shutdown. Corrected table in ADR-0008; CLAUDE.md,
+      WORKPLAN.md and the constraint above are amended to match.
+
+      **Constraint this hands to task 7:** `content_version` is `ON DELETE CASCADE` from
+      `content`, so deleting a content item takes its versions with it and orphans any live
+      proxy. The write path must refuse to delete a content item or version that still has
+      live proxies.
 - [ ] 7. Admin-only endpoint to insert/activate/roll back content. No publisher API, no UI.
 - [ ] 8. Deny-case tests: wrong group, revoked ACL, anonymous against `acl_only`, and a
       publisher attempting to shadow a YAML spec.

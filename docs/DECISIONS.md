@@ -170,6 +170,40 @@ fallback path to maintain.
 `getSpec(proxy.getSpecId())` when stopping a proxy. If activating version N+1 makes
 version N unresolvable, every container still running on N breaks at shutdown.
 
+**Correction, 2026-09-16 (spine #1 task 6). The decision stands; this paragraph's mechanism
+was wrong.** Line 536 is in `startOrResumeProxy`, not a stop path. `ProxyService.stopProxy`
+(line 346) never calls `getSpec` at all — it needs only
+`proxyDispatcherService.getDispatcher(specId)`, which `LazyProxyDispatcherService` already
+answers for any id. So containers do **not** break at shutdown when a version becomes
+unresolvable. What actually depends on resolvability, verified by
+`VersionResolvabilityTest`:
+
+| Operation | Needs | Survives an unresolvable spec? |
+|---|---|---|
+| Stop (`:346`, `:376`) | `getDispatcher` only | **Yes** — demonstrated |
+| Stop-all on shutdown (`:140`) | `getDispatcher` only | Yes |
+| Pause support checks (`:397`, `:431`) | `getDispatcher` | Yes |
+| Health check (`:455`, `:457`) | `getDispatcher` | Yes |
+| **A user's own proxy list** (`:231`) | `getSpec` via `canAccess` | **No** — demonstrated: the proxy silently vanishes from its owner's list |
+| Resume a paused proxy (`:536`) | `getSpec` | Latent only — see below |
+
+Two caveats on that last row, because the first version of this correction over-claimed it.
+`startOrResumeProxy` is reached on **start** as well as resume, but a start resolves the id
+being started, which is normally the active version. And the **resume branch is unreachable
+in 1.2.4**: `IContainerBackend.supportsPause()` defaults to `false`, no backend overrides
+it, and `ProxySharingDispatcher.supportsPause()` explicitly returns `false`. So it is a
+dependency in the code, not one that can fire today. App recovery does not resolve specs
+either — it scans existing containers through the backend.
+
+So the requirement stands on a narrower but entirely sufficient basis: the one reachable,
+user-visible consequence is that **the owner stops seeing their own running app**. That is a
+*silent* failure, which is worse to diagnose than the loud shutdown failure this ADR
+originally imagined, not better.
+
+**Consequence for spine #1 task 7.** `content_version` is `ON DELETE CASCADE` from
+`content`, so deleting a content item takes its versions with it. The write path must refuse
+to delete a content item or version that still has live proxies.
+
 **Decision:** the spec provider resolves any version that still has live containers, not
 only the active one. Rollback and activation never invalidate a spec id in use. Tested in
 spine #1 with a container held alive across a version switch.

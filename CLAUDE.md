@@ -82,9 +82,15 @@ So: most of what we need to extend lives in a dependency, not in this repo.
    spec provider alone will NPE on runtime-added content. Fixed in spine #1.
 2. `Micrometer` (`stat/impl/Micrometer.java:134`) registers per-spec metrics at startup
    only. Dynamic content silently gets no metrics — degradation, not a crash.
-3. `Proxy` persists only `specId`, not the spec. `ProxyService.java:536` re-resolves
-   `getSpec(proxy.getSpecId())` at stop time. **Superseded content versions must stay
+3. `Proxy` persists only `specId`, not the spec. **Superseded content versions must stay
    resolvable while their containers live**, or rolling back breaks running apps.
+   *Corrected in task 6:* this used to say `ProxyService.java:536` re-resolves the spec "at
+   stop time". It does not — line 536 is `startOrResumeProxy`, and `stopProxy` needs only
+   `getDispatcher(specId)`. The one reachable dependant is **a user's own proxy
+   list** (`:231`, via `canAccess`) — so the failure is *silent*: the owner stops seeing
+   their own running app. (`:536` also resolves the spec, but its resume branch is dead code
+   in 1.2.4 — no backend supports pause.) Table in ADR-0008, proven by
+   `VersionResolvabilityTest`.
 
 ## Working conventions
 

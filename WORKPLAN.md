@@ -357,6 +357,6 @@ Full rationale in `docs/DECISIONS.md`. Summary:
 |---|---|
 | ContainerProxy's startup-bound dispatcher blocks dynamic content | Fixed as the **first commit of #1**, before any schema work, so it fails early and cheap. |
 | A second upstream override forces a ContainerProxy fork mid-plan | Keep the fork checked out and buildable from #0 so switching is a day, not a week. |
-| Rollback breaks running apps (specs re-resolved at stop time) | Explicit requirement in #1; tested with a container alive across a version switch. |
+| Rollback breaks running apps (superseded specs must stay resolvable) | **Closed in #1 task 6**, tested with a real container held alive across an activate *and* a rollback (`VersionResolvabilityTest`). Note the mechanism was misrecorded as "re-resolved at stop time"; stop needs only the dispatcher. See the corrected table in ADR-0008. |
 | Bundle extraction or build escape | Untrusted-input boundary, Opus 5 + mandatory security review; no Docker socket anywhere near user content. |
 | Upstream drift makes merges painful | New packages only; upstream diffs logged in `docs/UPSTREAM_CHANGES.md`; upstream tests stay green. |
