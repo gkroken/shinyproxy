@@ -209,11 +209,19 @@ signing in. Measured on the dev stack rather than inferred: `/app/hello` comes b
 
 **What we do instead of widening it.** `ContentController` sets
 `AUTH_SUCCESS_URL_SESSION_ATTR` itself before redirecting to `/login` — the same attribute
-that handler sets, read by the same `AuthController`, which checks the value is on this origin
-before using it. So the open-redirect guard remains upstream's, the diff against
-`UISecurityConfig` stays at zero, and the behaviour is pinned by
+that handler sets, read by the same `AuthController`. The diff against `UISecurityConfig`
+stays at zero, and the behaviour is pinned by
 `ContentServingTest.aSignedOutVisitorIsSentToLoginAndTheDestinationIsRemembered` plus a live
 `dev/smoke.sh` check that drives the whole Keycloak round trip.
+
+**Do not describe `AuthController`'s check as an origin check.** An earlier version of this
+section did. It is `sRedirectUrl.startsWith(<this application's base URL>)` — a string prefix
+test, not a parsed-origin comparison, so `https://localhost:8080.example.com/` would satisfy it
+against a base of `https://localhost:8080`. Nothing reaches it today: the only writers of that
+attribute are upstream's success handler and `ContentController`, and ours builds the value
+from `getRequestURL()`, which the servlet container composes — no part of it is chosen by the
+caller. But it is not the guard it looks like, and anything that later stores a caller-supplied
+value there has to validate it itself. Flagged by review.
 
 ### D. Forwarding to `/error` does not set the response status, and it cannot express 410
 

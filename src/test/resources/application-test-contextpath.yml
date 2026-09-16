@@ -1,0 +1,37 @@
+# Config for ContentContextPathTest -- identical to application-test-admin.yml except for the
+# servlet context path. The dev stack has no context path, so a bug that doubles it is
+# invisible there and was: signing in from /skald/c/... restored /skald/skald/c/... and 404ed.
+server:
+  servlet:
+    context-path: /skald
+
+
+spring:
+  session:
+    store-type: none
+  data:
+    redis:
+      repositories:
+        enabled: false
+
+proxy:
+  authentication: simple
+  container-backend: docker
+  heartbeat-timeout: -1
+  default-stop-proxy-on-logout: false
+
+  admin-groups:
+    - admins
+
+  users:
+    - name: adminuser
+      password: adminuser
+      groups: [admins]
+    - name: plainuser
+      password: plainuser
+      groups: [users]
+
+  specs:
+    - id: boot-spec
+      display-name: Present at startup
+      container-image: openanalytics/shinyproxy-integration-test-app:latest

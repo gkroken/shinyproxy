@@ -625,6 +625,30 @@ reservation is the mechanism, not a defect — `/c/old/chapter2.html` can only r
 `/c/new/chapter2.html` if nobody else may claim `old/chapter2` meanwhile. ADR-0011 rule 3 now
 says so explicitly. Only the error message was wrong.
 
+**Commit C was then reviewed independently, and that was the right call.** It had been
+designed and written by the session that reviewed the two rounds above, so the standing rule's
+independence was missing for it specifically. An outside review found **four** defects that
+133 tests, `dev/smoke.sh` 47/47 and `dev/acl-live.sh` 18/18 all passed over. Every one is
+fixed and mutation-tested; each mutation is named in the follow-up commit.
+
+| # | Finding | Why the suite missed it |
+|---|---|---|
+| C1 | **The retired-address redirect ran before any authorization.** A stranger who correctly got 404 at the current address was handed it by the old one, and so was a signed-out caller. Not a content leak, but exactly the existence disclosure rule 5 exists to prevent | Every rename test used the owner, who is allowed to know |
+| C2 | **The sub-path was decoded in transit.** `URI.create(uri).getPath()` turned `chapter%20one.html` into a real space, `a%23b` into a fragment delimiter and `a%3Fb` into a real `?`, so everything after it became a query string. The javadoc directly above claimed the opposite of what the code did | No test used a sub-path that needed encoding |
+| C3 | **Both redirects discarded the query string.** `/c/report?tab=2` lost `?tab=2` | No test sent one |
+| C4 | **The post-login destination doubled the context path.** With `/skald` configured, signing in restored `/skald/skald/c/...` and 404ed | Nothing in the project runs under a context path. Now `ContentContextPathTest` does |
+
+Two claims of ours were also overstated and are corrected: `AuthController`'s check on the
+stored destination is a string `startsWith`, **not** an origin comparison (harmless today
+because nothing caller-supplied reaches it, and now written down as such in
+`docs/UPSTREAM_CHANGES.md` C); and the 600-second wait is not a request deadline, because
+`startProxy(...).run()` is synchronous before the loop is reached.
+
+The pattern is worth naming, because it is now three for three: every round of review found
+something, and every finding was invisible to a green suite. C2 and C3 are ordinary gaps — no
+test sent an awkward URL. C1 and C4 are the interesting ones: both were cases the tests could
+not reach because the *fixture* was always the happy one — the owner, and the root context.
+
 **Left for spine #4:** `/c/etl/` is a 404 when `etl/fetchFromA` and `etl/fetchFromB` are
 published. Nothing can live at `etl` itself — a document there would own `etl/fetchFromA` as one
 of its own pages — so the intermediate level wants a *generated* index of what the viewer may

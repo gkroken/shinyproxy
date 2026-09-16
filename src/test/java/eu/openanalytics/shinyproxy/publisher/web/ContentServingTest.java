@@ -278,6 +278,81 @@ public class ContentServingTest {
         }
     }
 
+    /**
+     * The retired address must not answer to someone the content is not shared with.
+     *
+     * <p>Found by an independent review after this class was already green. The rename
+     * redirect ran before any authorization, so a stranger who correctly got 404 at the
+     * current address was handed that address by the old one — and so was a signed-out
+     * caller. It never exposed the content body, but it is precisely the existence
+     * disclosure rule 5 exists to prevent, and a redirect is a statement about content the
+     * caller may not know exists.
+     */
+    @Test
+    public void aRetiredAddressIsAuthorizedBeforeItRedirects() throws IOException {
+        String id = publish("owner-only");
+        rename(id, "owner-only-moved");
+
+        assertStatus(404, stranger, "/c/owner-only-moved/");
+        try (Response r = getWithoutFollowing("plainuser", "/c/owner-only/")) {
+            Assertions.assertEquals(404, r.code(),
+                "the retired address told a stranger where the content went; Location was "
+                    + r.header("Location"));
+        }
+
+        Request anonymous = new Request.Builder().get().url(baseUrl + "/c/owner-only/").build();
+        try (Response r = signedOut.newCall(anonymous).execute()) {
+            Assertions.assertTrue(r.header("Location") == null
+                    || !r.header("Location").contains("owner-only-moved"),
+                "a signed-out caller was told the new address: " + r.header("Location"));
+        }
+
+        // Still works for someone who may actually see it.
+        try (Response r = getWithoutFollowing("adminuser", "/c/owner-only/")) {
+            Assertions.assertEquals(301, r.code(), "the owner lost their redirect");
+        }
+    }
+
+    /**
+     * The sub-path belongs to the content, so it has to arrive exactly as it was sent.
+     * {@code URI.create(uri).getPath()} decoded it: {@code chapter%20one.html} became a real
+     * space, {@code a%23b} a fragment delimiter, and {@code a%3Fb} a real {@code ?} — so
+     * everything after it was silently reinterpreted as a query string. Asserted on the
+     * redirect, where the outgoing value is directly observable.
+     */
+    @Test
+    public void anEncodedSubPathIsNotDecodedOnTheWayThrough() throws IOException {
+        String id = publish("encoded");
+        rename(id, "encoded-moved");
+
+        for (String encoded : new String[]{"chapter%20one.html", "a%3Fb", "a%23b", "caf%C3%A9.png"}) {
+            try (Response r = getWithoutFollowing("adminuser", "/c/encoded/" + encoded)) {
+                Assertions.assertEquals(301, r.code(), encoded);
+                Assertions.assertEquals(baseUrl + "/c/encoded-moved/" + encoded, r.header("Location"),
+                    "the sub-path was re-encoded or decoded in transit");
+            }
+        }
+    }
+
+    /** A shared link with state in it is the main thing these URLs are for. */
+    @Test
+    public void redirectsKeepTheQueryString() throws IOException {
+        String id = publish("querykeeper");
+
+        try (Response r = getWithoutFollowing("adminuser", "/c/querykeeper?tab=2&x=1")) {
+            Assertions.assertTrue(r.isRedirect(), "expected the add-a-slash redirect");
+            Assertions.assertEquals(baseUrl + "/c/querykeeper/?tab=2&x=1", r.header("Location"),
+                "the trailing-slash redirect dropped the query");
+        }
+
+        rename(id, "querykeeper-moved");
+        try (Response r = getWithoutFollowing("adminuser", "/c/querykeeper/?tab=2")) {
+            Assertions.assertEquals(301, r.code());
+            Assertions.assertEquals(baseUrl + "/c/querykeeper-moved/?tab=2", r.header("Location"),
+                "the rename redirect dropped the query");
+        }
+    }
+
     // ------------------------------------------------------------------ signing in
 
     /**

@@ -48,7 +48,6 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import javax.inject.Inject;
 import java.io.IOException;
-import java.net.URI;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -133,11 +132,6 @@ public class ContentController extends BaseController {
             return;
         }
 
-        if (!resolution.current()) {
-            redirectToCurrentPath(resolution, request, response);
-            return;
-        }
-
         if (!isSignedIn()) {
             redirectToLogin(request, response);
             return;
@@ -158,10 +152,22 @@ public class ContentController extends BaseController {
             return;
         }
 
+        // Only now. Redirecting a retired path BEFORE this point answered 301 with the new
+        // address to anyone who asked -- including a signed-out caller and a signed-in one the
+        // content is not shared with, who correctly got 404 at the current address and were
+        // then handed it by the old one. The redirect is a statement about content the caller
+        // may not know exists, so it has to be authorized like any other.
+        if (!resolution.current()) {
+            redirectToCurrentPath(resolution, request, response);
+            return;
+        }
+
         if (resolution.remainder().isEmpty() && !request.getRequestURI().endsWith("/")) {
             // Without the trailing slash the app's own relative links resolve one level too
             // high. Upstream's app routes do the same thing for the same reason.
-            response.sendRedirect(request.getRequestURI() + "/");
+            // The query has to come along: /c/report?tab=2 losing ?tab=2 breaks exactly the
+            // shared links with state in them that this URL exists to keep working.
+            response.sendRedirect(withQuery(request.getRequestURI() + "/", request));
             return;
         }
 
@@ -190,13 +196,21 @@ public class ContentController extends BaseController {
             error(request, response, HttpStatus.NOT_FOUND);
             return;
         }
-        String target = PREFIX + current.get(0)
+        // Assembled as a string rather than through UriComponentsBuilder.path(): the remainder
+        // is already percent-encoded, and the builder would encode it a second time, turning a
+        // link to `a%23b` into one to `a%2523b`.
+        String target = ServletUriComponentsBuilder.fromCurrentContextPath().build().toUriString()
+            + PREFIX + current.get(0)
             + (retired.remainder().isEmpty() ? "/" : "/" + retired.remainder());
 
-        String query = request.getQueryString();
         response.setStatus(HttpStatus.MOVED_PERMANENTLY.value());
-        response.setHeader("Location", ServletUriComponentsBuilder.fromCurrentContextPath()
-            .path(target).query(query).build().toUriString());
+        response.setHeader("Location", withQuery(target, request));
+    }
+
+    /** Appends the request's query string, untouched, when there is one. */
+    private static String withQuery(String url, HttpServletRequest request) {
+        String query = request.getQueryString();
+        return (query == null || query.isEmpty()) ? url : url + "?" + query;
     }
 
     /**
@@ -208,14 +222,21 @@ public class ContentController extends BaseController {
      * (upstream #30648, #28624). Verified against the dev stack — a deep link to {@code /admin}
      * or to {@code /c/...} lands on the index after signing in, while {@code /app/hello} does
      * not. Rather than widen that rule, which would mean a diff against an upstream file, we
-     * set the same session attribute it sets. {@code AuthController} checks the value is on
-     * this origin before using it, so the open-redirect guard is upstream's, not ours.
+     * set the same session attribute it sets. {@code AuthController} then checks the stored
+     * value {@code startsWith} this application's base URL before using it — a string prefix
+     * test, <em>not</em> a parsed-origin comparison, so it is weaker than it looks and is not
+     * something to lean on. What actually makes this safe is that the value is built here from
+     * {@code getRequestURL()}, which the container composes; nothing a caller sends chooses
+     * it.
      */
     private void redirectToLogin(HttpServletRequest request, HttpServletResponse response)
         throws IOException {
 
-        String destination = ServletUriComponentsBuilder.fromCurrentContextPath()
-            .path(request.getRequestURI()).query(request.getQueryString()).build().toUriString();
+        // getRequestURL() already carries scheme, host, port AND the context path, exactly once.
+        // Feeding getRequestURI() into fromCurrentContextPath() added the context path a second
+        // time, so with a context of /skald a visitor was sent back to /skald/skald/c/... and
+        // got a 404 after signing in. Invisible on the dev stack, which has no context path.
+        String destination = withQuery(request.getRequestURL().toString(), request);
         request.getSession(true).setAttribute(AUTH_SUCCESS_URL_SESSION_ATTR, destination);
 
         response.sendRedirect(ServletUriComponentsBuilder.fromCurrentContextPath()
@@ -273,11 +294,20 @@ public class ContentController extends BaseController {
     /**
      * The part of the request after {@code /c/}, undecoded segments included.
      *
-     * <p>Taken from the URI rather than a {@code @PathVariable} so that the sub-path keeps its
-     * exact shape on the way to the container.
+     * <p><b>Undecoded, deliberately.</b> {@code getRequestURI()} is raw per the servlet spec,
+     * and it is passed on raw — the sub-path belongs to the content, not to us, and decoding it
+     * changes what the container is asked for. This used to run it through
+     * {@code URI.create(...).getPath()}, which decodes: {@code chapter%20one.html} arrived as
+     * {@code chapter one.html}, {@code a%23b} as a fragment delimiter, and {@code a%3Fb} as a
+     * real {@code ?}, so everything after it was silently reinterpreted as a query string. The
+     * javadoc claimed the opposite of what the code did. Upstream's {@code AppRequestInfo}
+     * splits the raw URI for the same reason.
+     *
+     * <p>A percent-encoded <em>content</em> segment simply fails to match, because stored path
+     * keys are plain lower-case ASCII — which is a 404 rather than a way in.
      */
     private String pathAfterPrefix(HttpServletRequest request) {
-        String uri = URI.create(request.getRequestURI()).getPath();
+        String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
         if (!contextPath.isEmpty() && uri.startsWith(contextPath)) {
             uri = uri.substring(contextPath.length());
@@ -357,7 +387,13 @@ public class ContentController extends BaseController {
     /** Matches upstream's default instance name for a single-instance app. */
     private static final String DEFAULT_INSTANCE = "_";
 
-    /** Upstream waits ten minutes for a container; no reason to be less patient here. */
+    /**
+     * How long to keep polling a proxy that is still {@code New}, matching upstream's patience.
+     *
+     * <p>Not a request deadline: {@code startProxy(...).run()} above is synchronous, so a slow
+     * image pull is already over by the time this loop is reached. It covers a proxy started
+     * elsewhere and not yet up.
+     */
     private static final int STARTUP_WAIT_SECONDS = 600;
 
 }
