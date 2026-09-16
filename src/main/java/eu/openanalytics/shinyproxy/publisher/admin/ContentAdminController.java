@@ -33,10 +33,14 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Admin-only content registry endpoints (spine #1 task 7). No publisher API and no UI: this
@@ -88,24 +92,46 @@ public class ContentAdminController {
         return ApiResponse.success(service.list());
     }
 
+    /**
+     * Looks content up by its path, following renames.
+     *
+     * <p>Mutating endpoints take the content id, because that is what does not move. This is how
+     * a caller that only knows a name gets to one — and it resolves retired paths too, so a
+     * rename does not silently break a script the way it would break a bookmark without a 301.
+     * A path belonging to deleted content answers 410, never 404: the reservation is a promise
+     * that nothing else will ever answer there.
+     */
+    @GetMapping(value = "/by-path", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ApiResponse<PathResolution>> byPath(@RequestParam String path) {
+        return ApiResponse.success(service.resolveByPath(path));
+    }
+
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<ApiResponse<ContentSummary>> create(@RequestBody CreateContentRequest request) {
         return ApiResponse.created(service.create(request));
     }
 
-    @PostMapping(value = "/{slug}/versions",
+    @PostMapping(value = "/{id}/versions",
         consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ApiResponse<ContentSummary>> addVersion(@PathVariable String slug,
+    public ResponseEntity<ApiResponse<ContentSummary>> addVersion(@PathVariable UUID id,
                                                                  @RequestBody AddVersionRequest request) {
-        return ApiResponse.created(service.addVersion(slug, request));
+        return ApiResponse.created(service.addVersion(id, request));
     }
 
     /** Activation and rollback are the same operation; rollback names an older version. */
-    @PutMapping(value = "/{slug}/active-version",
+    @PutMapping(value = "/{id}/active-version",
         consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ApiResponse<ContentSummary>> activate(@PathVariable String slug,
+    public ResponseEntity<ApiResponse<ContentSummary>> activate(@PathVariable UUID id,
                                                                @RequestBody ActivateRequest request) {
-        return ApiResponse.success(service.activate(slug, request));
+        return ApiResponse.success(service.activate(id, request));
+    }
+
+    /** Moves content to a new path. The old one stays reserved and redirects here. */
+    @PutMapping(value = "/{id}/path",
+        consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ApiResponse<ContentSummary>> rename(@PathVariable UUID id,
+                                                             @RequestBody RenameRequest request) {
+        return ApiResponse.success(service.rename(id, request));
     }
 
     /**
@@ -113,10 +139,18 @@ public class ContentAdminController {
      * need to be: {@code DELETE} is not a method an HTML form can issue, so it is not reachable
      * by the form-based cross-site POST that the rule above exists to stop.
      */
-    @DeleteMapping(value = "/{slug}", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable String slug) {
-        service.delete(slug);
+    @DeleteMapping(value = "/{id}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
+        service.delete(id);
         return ApiResponse.success();
+    }
+
+    /** A malformed UUID in the path is a bad request, not an unrecoverable error. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiResponse<Object>> handle(MethodArgumentTypeMismatchException e) {
+        return ResponseEntity.badRequest().body(ApiResponse.errorBody(
+            "'" + e.getValue() + "' is not a content id; mutating endpoints take the id from "
+                + "GET /admin/content or GET /admin/content/by-path?path=..."));
     }
 
     /**

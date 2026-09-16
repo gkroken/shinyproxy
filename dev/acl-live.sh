@@ -67,21 +67,35 @@ opens_spec() {
   curl -s -o /dev/null -w '%{http_code}' -b "$1" -c "$1" "$BASE/app/$2"
 }
 
-publish() { # slug owner visibility
-  sql "INSERT INTO skald.content (slug, owner, type, visibility) VALUES ('$1','$2','shiny','$3');"
+publish() { # path owner visibility
+  sql "INSERT INTO skald.content (title, owner, type, visibility) VALUES ('$1','$2','shiny','$3');"
+  sql "INSERT INTO skald.content_path (path, path_key, content_id)
+       SELECT '$1','$1', id FROM skald.content WHERE title='$1';"
   sql "INSERT INTO skald.content_version (content_id, version, image, created_by)
-       SELECT id, 1, 'openanalytics/shinyproxy-demo', '$2' FROM skald.content WHERE slug='$1';"
+       SELECT id, 1, 'openanalytics/shinyproxy-demo', '$2' FROM skald.content WHERE title='$1';"
   sql "UPDATE skald.content c SET active_version_id = v.id FROM skald.content_version v
-       WHERE v.content_id = c.id AND v.version = 1 AND c.slug='$1';"
+       WHERE v.content_id = c.id AND v.version = 1 AND c.title='$1';"
 }
 
-grant() { # slug type principal
+grant() { # path type principal
   sql "INSERT INTO skald.content_acl (content_id, principal_type, principal)
-       SELECT id, '$2', '$3' FROM skald.content WHERE slug='$1';"
+       SELECT id, '$2', '$3' FROM skald.content WHERE title='$1';"
+}
+
+# The spec id is derived from the content UUID, never from the path, so it has to be read back
+# rather than constructed from a name.
+spec_id() { # path
+  $COMPOSE exec -T postgres psql -U skald -d skald -t -A -c \
+    "SELECT 'c' || replace(c.id::text,'-','') || '--v' || v.version
+     FROM skald.content c JOIN skald.content_version v ON v.id = c.active_version_id
+     WHERE c.title='$1';" | tr -d '\r'
 }
 
 echo "== reset registry =="
 sql "DELETE FROM skald.content;"
+# content_path rows deliberately outlive their content -- that reservation is what stops a
+# retired URL later pointing at different content. Clearing it is a world-reset, not a delete.
+sql "DELETE FROM skald.content_path;"
 check "registry is empty at the start" \
   "$($COMPOSE exec -T postgres psql -U skald -d skald -t -A -c 'SELECT count(*) FROM skald.content;')" 0
 
@@ -101,25 +115,25 @@ login bob   "$BOB"   || exit 1
 
 echo
 echo "== alice (owner; publishers, platform-admins) =="
-check "alice sees her own 'alice-only'"     "$(lists_spec "$ALICE" alice-only--v1)"   yes
-check "alice may open 'alice-only'"          "$(opens_spec "$ALICE" alice-only--v1)"   200
-check "alice sees 'open-to-all'"             "$(lists_spec "$ALICE" open-to-all--v1)"  yes
+check "alice sees her own 'alice-only'"     "$(lists_spec "$ALICE" "$(spec_id alice-only)")"   yes
+check "alice may open 'alice-only'"          "$(opens_spec "$ALICE" "$(spec_id alice-only)")"   200
+check "alice sees 'open-to-all'"             "$(lists_spec "$ALICE" "$(spec_id open-to-all)")"  yes
 
 echo
 echo "== bob (viewers) =="
-check "bob does NOT see 'alice-only'"        "$(lists_spec "$BOB" alice-only--v1)"     no
-check "bob is DENIED 'alice-only'"           "$(opens_spec "$BOB" alice-only--v1)"     403
-check "bob sees 'shared-user' (user grant)"  "$(lists_spec "$BOB" shared-user--v1)"    yes
-check "bob may open 'shared-user'"           "$(opens_spec "$BOB" shared-user--v1)"    200
-check "bob sees 'shared-group' (group grant)" "$(lists_spec "$BOB" shared-group--v1)"  yes
-check "bob sees 'open-to-all'"               "$(lists_spec "$BOB" open-to-all--v1)"    yes
+check "bob does NOT see 'alice-only'"        "$(lists_spec "$BOB" "$(spec_id alice-only)")"     no
+check "bob is DENIED 'alice-only'"           "$(opens_spec "$BOB" "$(spec_id alice-only)")"     403
+check "bob sees 'shared-user' (user grant)"  "$(lists_spec "$BOB" "$(spec_id shared-user)")"    yes
+check "bob may open 'shared-user'"           "$(opens_spec "$BOB" "$(spec_id shared-user)")"    200
+check "bob sees 'shared-group' (group grant)" "$(lists_spec "$BOB" "$(spec_id shared-group)")"  yes
+check "bob sees 'open-to-all'"               "$(lists_spec "$BOB" "$(spec_id open-to-all)")"    yes
 
 echo
 echo "== anonymous visibility is refused, not downgraded =="
-check "alice does NOT see 'public-thing'"    "$(lists_spec "$ALICE" public-thing--v1)" no
-check "alice is DENIED 'public-thing'"       "$(opens_spec "$ALICE" public-thing--v1)" 403
-check "bob does NOT see 'public-thing'"      "$(lists_spec "$BOB" public-thing--v1)"   no
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/app/public-thing--v1")
+check "alice does NOT see 'public-thing'"    "$(lists_spec "$ALICE" "$(spec_id public-thing)")" no
+check "alice is DENIED 'public-thing'"       "$(opens_spec "$ALICE" "$(spec_id public-thing)")" 403
+check "bob does NOT see 'public-thing'"      "$(lists_spec "$BOB" "$(spec_id public-thing)")"   no
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/app/$(spec_id public-thing)")
 check "unauthenticated is not served 'public-thing'" "$([ "$code" = 200 ] && echo served || echo refused)" refused
 
 echo
@@ -129,17 +143,17 @@ echo "== published MID-SESSION: no restart, and risk 4 (maxInstancesCache) =="
 # BaseController.validateMaxInstances threw on unboxing it.
 publish late-arrival alice acl_only
 grant   late-arrival user  bob
-check "bob sees 'late-arrival' in his EXISTING session"  "$(lists_spec "$BOB" late-arrival--v1)" yes
+check "bob sees 'late-arrival' in his EXISTING session"  "$(lists_spec "$BOB" "$(spec_id late-arrival)")" yes
 check "bob may OPEN 'late-arrival' in his EXISTING session (risk 4)" \
-      "$(opens_spec "$BOB" late-arrival--v1)" 200
+      "$(opens_spec "$BOB" "$(spec_id late-arrival)")" 200
 
 echo
 echo "== ACL revoked mid-session (ProxyAccessControlService cache, UPSTREAM_CHANGES.md B) =="
 sql "DELETE FROM skald.content_acl a USING skald.content c
-     WHERE a.content_id = c.id AND c.slug='shared-user' AND a.principal='bob';"
-warm=$(opens_spec "$BOB" shared-user--v1)
+     WHERE a.content_id = c.id AND c.title='shared-user' AND a.principal='bob';"
+warm=$(opens_spec "$BOB" "$(spec_id shared-user)")
 FRESH=$(mktemp); login bob "$FRESH" || exit 1
-fresh=$(opens_spec "$FRESH" shared-user--v1)
+fresh=$(opens_spec "$FRESH" "$(spec_id shared-user)")
 check "a FRESH session is denied the revoked content" "$fresh" 403
 # An observation, not an assertion: both outcomes are worth knowing and neither is a failure,
 # so it is reported with note() and does NOT count towards the total.

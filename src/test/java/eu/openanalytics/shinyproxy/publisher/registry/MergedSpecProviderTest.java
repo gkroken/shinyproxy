@@ -43,6 +43,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 
 /**
  * Proves that content in the registry becomes a startable spec without a restart, and that
@@ -96,7 +97,12 @@ public class MergedSpecProviderTest {
 
     @BeforeEach
     public void beforeEach() {
+        // content_path rows deliberately SURVIVE a content delete -- that is the reservation
+        // that stops a retired URL pointing at different content later. A test resetting the
+        // world has to clear them explicitly; a test that means to exercise the reservation
+        // must not.
         jdbc.update("DELETE FROM skald.content");
+        jdbc.update("DELETE FROM skald.content_path");
     }
 
     @Test
@@ -115,12 +121,12 @@ public class MergedSpecProviderTest {
 
     @Test
     public void contentAddedToTheRegistryBecomesASpecWithNoRestart() {
-        Assertions.assertNull(specProvider.getSpec("my-app--v1"),
-            "precondition: the spec must not exist before the row does");
+        Assertions.assertTrue(specProvider.getSpecs().stream().noneMatch(x -> x.getId().startsWith("c")),
+            "precondition: no registry spec exists before the row does");
 
         publish("my-app", "alice", 1, "registry:5000/my-app:1");
 
-        ProxySpec spec = specProvider.getSpec("my-app--v1");
+        ProxySpec spec = specProvider.getSpec(spec("my-app", 1));
         Assertions.assertNotNull(spec, "registry content did not become a resolvable spec");
         // getOriginalValue, not getValueOrNull: a SpelField only has a resolved value after
         // ProxyService runs firstResolve/finalResolve at proxy-start time, and reading it
@@ -129,7 +135,7 @@ public class MergedSpecProviderTest {
             spec.getContainerSpecs().get(0).getImage().getOriginalValue());
 
         // It must also be listed, which is what drives the index and getUserSpecs().
-        Assertions.assertTrue(idsOf(specProvider.getSpecs()).contains("my-app--v1"));
+        Assertions.assertTrue(idsOf(specProvider.getSpecs()).contains(spec("my-app", 1)));
 
         // The spec extension ShinyProxy dereferences without a null check must be present,
         // or every page rendering this spec NPEs.
@@ -151,7 +157,7 @@ public class MergedSpecProviderTest {
         publish("my-app", "alice", 1, "registry:5000/my-app:1");
 
         ProxySpec configured = specProvider.getSpec("boot-spec");
-        ProxySpec fromRegistry = specProvider.getSpec("my-app--v1");
+        ProxySpec fromRegistry = specProvider.getSpec(spec("my-app", 1));
 
         Assertions.assertTrue(
             fromRegistry.getSpecExtensions().keySet().containsAll(configured.getSpecExtensions().keySet()),
@@ -173,16 +179,16 @@ public class MergedSpecProviderTest {
     public void repeatedLookupsReturnTheSameInstanceUntilTheContentChanges() {
         publish("my-app", "alice", 1, "registry:5000/my-app:1");
 
-        ProxySpec first = specProvider.getSpec("my-app--v1");
-        Assertions.assertSame(first, specProvider.getSpec("my-app--v1"),
+        ProxySpec first = specProvider.getSpec(spec("my-app", 1));
+        Assertions.assertSame(first, specProvider.getSpec(spec("my-app", 1)),
             "unchanged content must resolve to the same ProxySpec instance");
         Assertions.assertSame(first,
-            specProvider.getSpecs().stream().filter(s -> s.getId().equals("my-app--v1")).findFirst().orElseThrow(),
+            specProvider.getSpecs().stream().filter(s -> s.getId().equals(spec("my-app", 1))).findFirst().orElseThrow(),
             "getSpecs() and getSpec() must agree on the instance");
 
         // ...but a change to the row must produce a new one, or edits would never take effect.
-        jdbc.update("UPDATE skald.content SET visibility = 'all_authenticated' WHERE slug = 'my-app'");
-        Assertions.assertNotSame(first, specProvider.getSpec("my-app--v1"),
+        jdbc.update("UPDATE skald.content SET visibility = 'all_authenticated' WHERE id = ?", contentId("my-app"));
+        Assertions.assertNotSame(first, specProvider.getSpec(spec("my-app", 1)),
             "changed content must be rebuilt");
     }
 
@@ -202,12 +208,12 @@ public class MergedSpecProviderTest {
         publish("rollme", "alice", 2, "registry:5000/rollme:2");
 
         List<String> listed = idsOf(specProvider.getSpecs());
-        Assertions.assertTrue(listed.contains("rollme--v2"), "the active version should be listed");
-        Assertions.assertFalse(listed.contains("rollme--v1"), "a superseded version must not be listed");
+        Assertions.assertTrue(listed.contains(spec("rollme", 2)), "the active version should be listed");
+        Assertions.assertFalse(listed.contains(spec("rollme", 1)), "a superseded version must not be listed");
 
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v2"),
+        Assertions.assertNotNull(specProvider.getSpec(spec("rollme", 2)),
             "the active version must resolve");
-        Assertions.assertNull(specProvider.getSpec("rollme--v1"),
+        Assertions.assertNull(specProvider.getSpec(spec("rollme", 1)),
             "a superseded version with no running container must not resolve, or activation "
                 + "would never retire anything");
 
@@ -215,24 +221,43 @@ public class MergedSpecProviderTest {
         jdbc.update("""
             UPDATE skald.content c SET active_version_id = v.id
             FROM skald.content_version v
-            WHERE v.content_id = c.id AND v.version = 1 AND c.slug = 'rollme'
-            """);
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v1"));
-        Assertions.assertNull(specProvider.getSpec("rollme--v2"));
+            WHERE v.content_id = c.id AND v.version = 1 AND c.id = ?
+            """, contentId("rollme"));
+        Assertions.assertNotNull(specProvider.getSpec(spec("rollme", 1)));
+        Assertions.assertNull(specProvider.getSpec(spec("rollme", 2)));
     }
 
+    /**
+     * Configured specs are authoritative, and registry content can no longer even express a
+     * claim on one.
+     *
+     * <p>Decision 3 used to be enforced by comparing a publisher-chosen slug against the
+     * configured spec ids, and review finding F4 showed that check was incomplete: it compared
+     * the bare slug, so publishing {@code probe} produced the spec id {@code probe--v1} and
+     * captured an admin's configured {@code probe--v1} — two success responses followed by
+     * content that never resolved, and a per-request error in the log.
+     *
+     * <p>Spec ids now derive from the content UUID, so the namespaces are disjoint by
+     * construction rather than by a check that has to be kept complete. This asserts the
+     * structural property, which is the thing worth defending.
+     */
     @Test
-    public void configuredSpecsAreAuthoritativeOverTheRegistry() {
-        // boot-spec is defined in application-test-registry.yml.
-        Assertions.assertNotNull(specProvider.getSpec("boot-spec"));
+    public void registrySpecIdsCannotCollideWithConfiguredOnes() {
+        publish("boot-spec", "mallory", 1, "registry:5000/evil:1");
 
-        // A row that collides is ignored rather than allowed to take over the id, and the
-        // configured spec is still the one returned.
-        jdbc.update("INSERT INTO skald.content (slug, owner, type) VALUES ('boot-spec', 'mallory', 'shiny')");
-        Assertions.assertEquals(1,
-            idsOf(specProvider.getSpecs()).stream().filter("boot-spec"::equals).count(),
-            "a colliding registry row must not produce a duplicate spec id");
-        Assertions.assertNull(specProvider.getSpec("boot-spec--v1"));
+        // A publisher naming their content after a configured spec changes nothing: the id is
+        // not derived from the name.
+        Assertions.assertNotNull(specProvider.getSpec("boot-spec"),
+            "the configured spec must still be the one at its own id");
+        Assertions.assertEquals("Present at startup",
+            specProvider.getSpec("boot-spec").getDisplayName(),
+            "the configured spec was shadowed by registry content");
+
+        Assertions.assertTrue(
+            idsOf(specProvider.getSpecs()).stream().filter(id -> !id.equals("boot-spec"))
+                .allMatch(id -> id.matches("^c[0-9a-f]{32}--v[0-9]+$")),
+            "every registry spec id must be UUID-derived, so that no publisher-supplied text "
+                + "can ever produce a configured spec's id");
     }
 
     @Test
@@ -240,8 +265,8 @@ public class MergedSpecProviderTest {
         publish("my-app", "alice", 1, "registry:5000/my-app:1");
 
         Assertions.assertNull(specProvider.getSpec("my-app"));
-        Assertions.assertNull(specProvider.getSpec("my-app--v2"));
-        Assertions.assertNull(specProvider.getSpec("my-app--v0"));
+        Assertions.assertNull(specProvider.getSpec(spec("my-app", 2)));
+        Assertions.assertNull(specProvider.getSpec("c" + "0".repeat(32) + "--v0"));
         Assertions.assertNull(specProvider.getSpec("nope--v1"));
         Assertions.assertNull(specProvider.getSpec("' OR 1=1 --v1"));
         Assertions.assertNull(specProvider.getSpec(null));
@@ -273,12 +298,12 @@ public class MergedSpecProviderTest {
             Map<String, Integer> beforePublishing = specProvider.getMaxInstances();
             Assertions.assertTrue(beforePublishing.containsKey("boot-spec"),
                 "precondition: the configured spec is in the cached map");
-            Assertions.assertFalse(beforePublishing.containsKey("late--v1"),
+            Assertions.assertFalse(beforePublishing.keySet().stream().anyMatch(k -> k.startsWith("c")),
                 "precondition: the content does not exist yet");
 
             publish("late", "alice", 1, "registry:5000/late:1");
 
-            ProxySpec spec = specProvider.getSpec("late--v1");
+            ProxySpec spec = specProvider.getSpec(spec("late", 1));
             Assertions.assertNotNull(spec, "precondition: the content became a spec");
 
             Assertions.assertNotNull(specProvider.getMaxInstancesForSpec(spec),
@@ -296,21 +321,44 @@ public class MergedSpecProviderTest {
         }
     }
 
-    /** Creates content (if needed), adds a version, and makes it the active one. */
-    private static void publish(String slug, String owner, int version, String image) {
-        jdbc.update("""
-            INSERT INTO skald.content (slug, owner, type) VALUES (?, ?, 'shiny')
-            ON CONFLICT (slug) DO NOTHING
-            """, slug, owner);
+    /**
+     * Creates content (if needed), adds a version, and makes it the active one.
+     *
+     * <p>Keyed by path, but the spec id comes from the generated content UUID, so tests ask
+     * {@link #spec} for it rather than spelling one out. That is the point of the identity
+     * split: nothing derivable from a name is durable.
+     */
+    private static UUID publish(String path, String owner, int version, String image) {
+        UUID existing = contentId(path);
+        UUID id = (existing != null) ? existing : UUID.randomUUID();
+        if (existing == null) {
+            jdbc.update("INSERT INTO skald.content (id, title, owner, type) VALUES (?, ?, ?, 'shiny')",
+                id, path, owner);
+            jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) VALUES (?, ?, ?)",
+                path, path, id);
+        }
         jdbc.update("""
             INSERT INTO skald.content_version (content_id, version, image, created_by)
-            SELECT id, ?, ?, ? FROM skald.content WHERE slug = ?
-            """, version, image, owner, slug);
+            VALUES (?, ?, ?, ?)
+            """, id, version, image, owner);
         jdbc.update("""
             UPDATE skald.content c SET active_version_id = v.id
             FROM skald.content_version v
-            WHERE v.content_id = c.id AND v.version = ? AND c.slug = ?
-            """, version, slug);
+            WHERE v.content_id = c.id AND v.version = ? AND c.id = ?
+            """, version, id);
+        return id;
+    }
+
+    private static UUID contentId(String path) {
+        List<UUID> found = jdbc.query(
+            "SELECT content_id FROM skald.content_path WHERE path_key = ?",
+            (rs, i) -> (UUID) rs.getObject("content_id"), path);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /** The spec id of a version of the content published at this path. */
+    private static String spec(String path, int version) {
+        return ContentSpecRepository.specId(contentId(path), version);
     }
 
     private static List<String> idsOf(List<ProxySpec> specs) {

@@ -23,12 +23,9 @@
 package eu.openanalytics.shinyproxy.publisher.admin;
 
 /**
- * Body of {@code POST /admin/content}.
+ * Body of {@code PUT /admin/content/{id}/path}.
  *
- * <p>{@code path} is the publisher-settable address and can be renamed later; it is not an
- * identifier. {@code title} is what the index displays. {@code visibility} defaults to
- * {@code acl_only}.
+ * <p>The old path stays reserved and redirects here, so a rename never strands a link.
  */
-public record CreateContentRequest(String path, String title, String owner, String type,
-                                   String visibility) {
+public record RenameRequest(String path) {
 }

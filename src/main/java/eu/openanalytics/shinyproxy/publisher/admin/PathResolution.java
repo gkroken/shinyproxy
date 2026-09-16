@@ -23,12 +23,12 @@
 package eu.openanalytics.shinyproxy.publisher.admin;
 
 /**
- * Body of {@code POST /admin/content}.
+ * The answer to "what is at this path?".
  *
- * <p>{@code path} is the publisher-settable address and can be renamed later; it is not an
- * identifier. {@code title} is what the index displays. {@code visibility} defaults to
- * {@code acl_only}.
+ * <p>{@code pathIsCurrent} is false when the caller asked by a path that has since been
+ * renamed away. The content is still returned — the API follows renames for the same reason a
+ * browser gets a 301, so that a rename does not silently break existing scripts — but a client
+ * that notices can update what it stored.
  */
-public record CreateContentRequest(String path, String title, String owner, String type,
-                                   String visibility) {
+public record PathResolution(ContentSummary content, boolean pathIsCurrent) {
 }

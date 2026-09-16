@@ -46,6 +46,7 @@ import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -65,10 +66,17 @@ import java.util.regex.Pattern;
 public class ContentSpecRepository {
 
     /**
-     * The inverse of {@code <slug>--v<n>}. Anchored, and the version is bounded, so a spec id
-     * that merely contains "--v" cannot be coerced into a lookup.
+     * The inverse of {@code c<content.id as 32 hex>--v<n>}. Anchored, and the version is
+     * bounded, so a spec id that merely contains "--v" cannot be coerced into a lookup.
+     *
+     * <p>The id is derived from the content UUID, not from anything a publisher can set. That
+     * is what makes it unique over time: deleting content and re-creating it at the same path
+     * produces a different UUID and therefore a different spec id, so the new content cannot
+     * inherit anything keyed on the old one — including ContainerProxy's per-session
+     * authorization cache, which has no invalidation path and previously handed a revoked user
+     * access to whatever next occupied the id.
      */
-    private static final Pattern SPEC_ID = Pattern.compile("^([a-z0-9][a-z0-9-]{0,49})--v([1-9][0-9]{0,8})$");
+    private static final Pattern SPEC_ID = Pattern.compile("^c([0-9a-f]{32})--v([1-9][0-9]{0,8})$");
 
     private static final int DEFAULT_PORT = 3838;
 
@@ -95,7 +103,7 @@ public class ContentSpecRepository {
         """;
 
     private static final String SELECT_COLUMNS =
-        "SELECT c.slug, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json, " +
+        "SELECT c.id, c.title, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json, " +
             "acl.acl_users, acl.acl_groups, (v.id = c.active_version_id) AS is_active ";
 
     private static final String SELECT_ACTIVE = SELECT_COLUMNS + """
@@ -107,7 +115,7 @@ public class ContentSpecRepository {
         FROM skald.content c
         JOIN skald.content_version v ON v.content_id = c.id
         """ + ACL_JOIN + """
-        WHERE c.slug = ? AND v.version = ?
+        WHERE c.id = ? AND v.version = ?
         """;
 
     private final JdbcTemplate jdbc;
@@ -172,7 +180,7 @@ public class ContentSpecRepository {
         }
         List<ResolvedSpec> found = jdbc.query(SELECT_ONE,
             (ResultSet rs, int rowNum) -> new ResolvedSpec(rs.getBoolean("is_active"), toProxySpec(rs)),
-            matcher.group(1), Integer.parseInt(matcher.group(2)));
+            uuidOf(matcher.group(1)), Integer.parseInt(matcher.group(2)));
 
         if (found.isEmpty()) {
             return null;
@@ -209,21 +217,15 @@ public class ContentSpecRepository {
         }
     }
 
-    /** True when a content item with this slug exists, used to reject slug collisions on write. */
-    public boolean slugExists(String slug) {
-        Integer count = jdbc.queryForObject(
-            "SELECT count(*) FROM skald.content WHERE slug = ?", Integer.class, slug);
-        return count != null && count > 0;
-    }
-
     private RowMapper<ProxySpec> specRowMapper() {
         return (ResultSet rs, int rowNum) -> toProxySpec(rs);
     }
 
     private ProxySpec toProxySpec(ResultSet rs) throws SQLException {
-        String slug = rs.getString("slug");
+        UUID contentId = (UUID) rs.getObject("id");
+        String title = rs.getString("title");
         int version = rs.getInt("version");
-        String specId = specId(slug, version);
+        String specId = specId(contentId, version);
 
         String[] aclUsers = principals(rs, "acl_users");
         String[] aclGroups = principals(rs, "acl_groups");
@@ -232,8 +234,8 @@ public class ContentSpecRepository {
         // NEW ProxySpec instance, or the memoised one below would keep serving the old
         // AccessControl and a revocation would never reach the evaluator at all.
         String fingerprint = String.join("\u0000",
-            slug, rs.getString("owner"), rs.getString("type"), rs.getString("visibility"),
-            String.valueOf(version), rs.getString("image"),
+            contentId.toString(), title, rs.getString("owner"), rs.getString("type"),
+            rs.getString("visibility"), String.valueOf(version), rs.getString("image"),
             String.join(",", aclUsers), String.join(",", aclGroups));
 
         CachedSpec cached = specCache.get(specId);
@@ -249,9 +251,11 @@ public class ContentSpecRepository {
 
         ProxySpec spec = ProxySpec.builder()
             .id(specId)
-            .displayName(slug)
+            // The publisher's title, not the path: the index lists display names, and showing
+            // a URL fragment where an app name belongs reads as a bug.
+            .displayName(title)
             .accessControl(AccessControlProjector.project(
-                slug, rs.getString("visibility"), rs.getString("owner"), aclUsers, aclGroups))
+                title, rs.getString("visibility"), rs.getString("owner"), aclUsers, aclGroups))
             .containerSpecs(Collections.singletonList(containerSpec))
             .build();
 
@@ -329,8 +333,26 @@ public class ContentSpecRepository {
         spec.addSpecExtension(extension);
     }
 
-    public static String specId(String slug, int version) {
-        return slug + "--v" + version;
+    /**
+     * {@code c<32 hex>--v<n>}. 45 characters at most, inside the 63-character Kubernetes label
+     * limit, and starting with a letter so it is a valid label value on every backend.
+     */
+    public static String specId(UUID contentId, int version) {
+        return "c" + contentId.toString().replace("-", "") + "--v" + version;
+    }
+
+    /** The inverse, for callers that hold a spec id and need the content it belongs to. */
+    public static UUID contentIdOf(String specId) {
+        Matcher matcher = SPEC_ID.matcher(specId == null ? "" : specId);
+        if (!matcher.matches()) {
+            return null;
+        }
+        return uuidOf(matcher.group(1));
+    }
+
+    private static UUID uuidOf(String hex32) {
+        return UUID.fromString(hex32.substring(0, 8) + "-" + hex32.substring(8, 12) + "-"
+            + hex32.substring(12, 16) + "-" + hex32.substring(16, 20) + "-" + hex32.substring(20));
     }
 
 }

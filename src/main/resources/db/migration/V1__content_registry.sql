@@ -4,18 +4,35 @@
 -- Skald and ContainerProxy's usage-statistics collector (which creates its own tables via
 -- proxy.usage-stats-url) at one database cannot collide.
 --
--- Spec ids are `<slug>--v<n>` (WORKPLAN-REGISTRY.md decision 4). That string is persisted
--- in ContainerProxy's `Proxy` rows and in running containers' runtime values, so it is
--- effectively immutable once content exists. Kubernetes label values allow only
--- [a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])? and cap at 63 characters, which is why the slug
--- is constrained to 50: `<slug>--v<n>` must stay inside that budget even at high version
--- numbers.
+-- IDENTITY AND ADDRESS ARE SEPARATE, and that separation is the whole point of this schema.
+--
+--   ProxySpec.id     c<content.id as 32 hex>--v<n>   opaque, immutable, never reused
+--   content_path     publisher-settable, renameable, its own rules
+--
+-- The first version of this schema derived the spec id from a user-visible slug. That was
+-- wrong twice over. It made the id REUSABLE -- deleting content and re-creating the same
+-- slug handed the new content the old spec id, and ContainerProxy memoises authorization
+-- per (sessionId, specId) with no way to invalidate it, so a user who had access to the old
+-- content silently kept it on the new one (reproduced live: a revoked user opened the app
+-- and started a container). And it made the URL IMMUTABLE, because ContainerProxy's Proxy
+-- rows persist only the spec id, so renaming would have orphaned every running container --
+-- the ADR-0008 failure.
+--
+-- A spec id also travels further than a cache key: it is a Micrometer tag (`spec.id`), a
+-- Docker label value and the SHINYPROXY_SPEC_ID environment variable inside every container.
+-- Reusing one conflates two unrelated apps in metrics and history no matter what the cache
+-- does, so uniqueness over time is correct on its own merits.
+--
+-- Kubernetes label values allow [a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])? up to 63
+-- characters. "c" + 32 hex + "--v" + up to 9 digits = 45. ADR-0008 and WORKPLAN-REGISTRY
+-- decision 4 are amended to record the format change; the `--v<n>` suffix convention and
+-- the reason for it are unchanged.
 
 CREATE SCHEMA IF NOT EXISTS skald;
 
 CREATE TABLE skald.content (
     id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    slug               text        NOT NULL UNIQUE,
+    title              text        NOT NULL,
     owner              text        NOT NULL,
     type               text        NOT NULL,
     visibility         text        NOT NULL DEFAULT 'acl_only',
@@ -23,12 +40,58 @@ CREATE TABLE skald.content (
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now(),
 
-    CONSTRAINT content_slug_format CHECK (slug ~ '^[a-z0-9][a-z0-9-]{0,49}$'),
+    CONSTRAINT content_title_present CHECK (length(btrim(title)) > 0),
     CONSTRAINT content_type_known  CHECK (type IN (
         'shiny', 'quarto_static', 'rmarkdown_static', 'plumber', 'fastapi', 'data')),
     CONSTRAINT content_visibility_known CHECK (visibility IN (
         'acl_only', 'all_authenticated', 'anonymous'))
 );
+
+-- Every path this installation has ever served, current and retired, in one table so that
+-- uniqueness can be enforced across both at once. A retired path must never become
+-- available to different content: whoever inherited it would inherit its audience, and
+-- every stale bookmark and link would land on them.
+--
+-- `content_id` is ON DELETE SET NULL and NOT cascade, deliberately. Cascading would delete
+-- the reservation along with the content, and the retired path would silently become
+-- available again -- which is the same inheritance bug this table exists to prevent, moved
+-- from the spec id to the URL. A row with a NULL content_id is a reserved path with no
+-- target: it answers 410 Gone, never 404 and never a redirect.
+--
+-- `path_key` is the normalised form and the uniqueness key. It is computed by the
+-- application as an ASCII lower-casing and stored, rather than expressed as lower(path) in
+-- an index: lower() is collation-dependent (in a Turkish collation 'I' lower-cases to a
+-- dotless i), so a lower(path) unique index means different things on different installs.
+-- The column is COLLATE "C" so comparison is byte-wise everywhere, and the CHECK below
+-- refuses anything that is not already normalised.
+CREATE TABLE skald.content_path (
+    id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    path        text        NOT NULL,
+    path_key    text        COLLATE "C" NOT NULL UNIQUE,
+    content_id  uuid        REFERENCES skald.content (id) ON DELETE SET NULL,
+    is_current  boolean     NOT NULL DEFAULT true,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    retired_at  timestamptz,
+
+    -- Up to three segments, each one slug-shaped, ASCII only. The segment cap bounds how
+    -- much of the URL space one content item can own and keeps resolution cheap.
+    CONSTRAINT content_path_format CHECK (
+        path_key ~ '^[a-z0-9][a-z0-9-]{0,49}(/[a-z0-9][a-z0-9-]{0,49}){0,2}$'),
+    -- COLLATE "C" on the argument, not a bare lower(): a bare lower() would make this
+    -- constraint itself collation-dependent, which is the problem it exists to avoid.
+    -- Byte-wise ASCII lowering also means `path` can only differ from `path_key` in case.
+    CONSTRAINT content_path_display_matches CHECK (lower(path COLLATE "C") = path_key),
+    CONSTRAINT content_path_ascii CHECK (path ~ '^[A-Za-z0-9/-]+$'),
+    CONSTRAINT content_path_retired_has_no_content CHECK (
+        is_current OR content_id IS NULL OR retired_at IS NOT NULL)
+);
+
+-- Exactly one live path per content item. A rename retires the old row and inserts a new
+-- one; it never mutates a path in place, because the old value is the 301 source.
+CREATE UNIQUE INDEX content_path_one_current ON skald.content_path (content_id)
+    WHERE is_current AND content_id IS NOT NULL;
+
+CREATE INDEX content_path_content_idx ON skald.content_path (content_id);
 
 -- Superseded versions stay resolvable while their containers live (ADR-0008), so versions
 -- are never deleted when a new one is activated -- only pointed away from.
@@ -80,6 +143,9 @@ CREATE TABLE skald.content_acl (
 -- Secrets are encrypted at rest with a key from the environment, never stored here and
 -- never logged. `value_encrypted` is ciphertext even when is_secret is false, so there is
 -- exactly one read path and no plaintext column to leak into a log or a dump.
+--
+-- NOTE: this migration creates the TABLE only. There is no encryption code yet and nothing
+-- writes to it -- whoever first does builds that path (CLAUDE.md security invariants).
 CREATE TABLE skald.content_env (
     id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     content_id       uuid        NOT NULL REFERENCES skald.content (id) ON DELETE CASCADE,
@@ -94,6 +160,13 @@ CREATE TABLE skald.content_env (
 );
 
 -- Append-only. No updates, no deletes: an audit log that can be edited is not one.
+-- (Nothing enforces that yet -- any code holding the JdbcTemplate can delete rows, and the
+-- tests do. A restricted role or a rule belongs with the audit work in spine #9.)
+--
+-- `subject_id` is the content UUID, never the path. The path is mutable, so identifying the
+-- subject by it would orphan every audit row written before a rename with no way to join
+-- old to new -- the trail would silently stop being one. The path is carried in
+-- `detail_json` as a human-readable label instead.
 CREATE TABLE skald.audit_event (
     id            bigserial   PRIMARY KEY,
     actor         text        NOT NULL,

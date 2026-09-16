@@ -158,49 +158,84 @@ echo "== runtime-added content (spine #1: publish with NO restart) =="
 #
 # Uses /admin/content rather than SQL on purpose: a smoke test that reaches around the API it
 # is meant to exercise proves the database works, not the product.
-SLUG="smoke-runtime"
+#
+# Content is addressed by a PATH and identified by an opaque id. The spec id is derived from
+# that id, never from the path, so it survives a rename and is never handed to different
+# content later -- which is what stopped a re-created name inheriting a cached authorization
+# decision. The script therefore reads ids out of the API instead of building them from names.
+# A fresh path per run. Paths are reserved permanently once used -- that is what stops a
+# retired URL later pointing at different content -- so a script that hard-coded one would pass
+# the first time and fail with 409 Conflict on every run after. Each run consumes two
+# reservations in the dev registry, which is cheap and is the honest semantic.
+RUN_ID="${RUN_ID:-$(date +%s)$$}"
+PATHNAME="smoke/runtime-$RUN_ID"
 jstatus() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+# Tolerates error bodies, where "data" is a string rather than an object -- a cleanup probe on
+# an empty registry hits exactly that, and a traceback there would be noise that could hide a
+# real failure later in the run.
+jfld() { python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin).get("data")
+except Exception:
+    d = None
+if not isinstance(d, dict):
+    print(""); raise SystemExit
+d = d.get("content", d)
+print(d.get(sys.argv[1]) or "")' "$1"; }
 
-curl -s -o /dev/null -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$SLUG"   # from a previous run
+created=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d "{\"path\":\"$PATHNAME\",\"title\":\"Smoke runtime app\",\"owner\":\"alice\",\"type\":\"shiny\"}" \
+  "$BASE/admin/content")
+CID=$(printf '%s' "$created" | jfld id)
+check "alice creates content over the admin API" "$([ -n "$CID" ] && echo yes || echo no)" yes
 
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
-  -d "{\"slug\":\"$SLUG\",\"owner\":\"alice\",\"type\":\"shiny\"}" "$BASE/admin/content")
-check "alice creates content over the admin API" "$code" 201
-
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
-  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$SLUG/versions")
-check "alice adds and activates version 1" "$code" 201
+SPEC=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$CID/versions" | jfld activeSpecId)
+check "alice adds and activates version 1" "$([ -n "$SPEC" ] && echo yes || echo no)" yes
+check "the spec id is derived from the content id, not the path" \
+  "$(printf '%s' "$SPEC" | grep -qE '^c[0-9a-f]{32}--v1$' && echo yes || echo no)" yes
 
 # No restart happens anywhere between the lines above and below.
-check "alice sees the new app immediately"  "$(lists_spec "$ALICE" "$SLUG--v1")" yes
-check "alice may open the new app"          "$(opens_spec "$ALICE" "$SLUG--v1")" 200
-check "bob does NOT see alice's new app"    "$(lists_spec "$BOB" "$SLUG--v1")"   no
-check "bob is denied alice's new app"       "$(opens_spec "$BOB" "$SLUG--v1")"   403
+check "alice sees the new app immediately"  "$(lists_spec "$ALICE" "$SPEC")" yes
+check "alice may open the new app"          "$(opens_spec "$ALICE" "$SPEC")" 200
+check "bob does NOT see alice's new app"    "$(lists_spec "$BOB" "$SPEC")"   no
+check "bob is denied alice's new app"       "$(opens_spec "$BOB" "$SPEC")"   403
 check "bob cannot reach the admin API"      "$(jstatus -b "$BOB" -c "$BOB" "$BASE/admin/content")" 403
 
+# A rename keeps every link working and does not disturb the running spec id.
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X PUT -H 'Content-Type: application/json' \
+  -d "{\"path\":\"smoke/renamed-$RUN_ID\"}" "$BASE/admin/content/$CID/path")
+check "alice renames the content"                  "$code" 200
+check "the spec id is unchanged by the rename" \
+  "$(curl -s -b "$ALICE" -c "$ALICE" "$BASE/admin/content/by-path?path=smoke/renamed-$RUN_ID" | jfld activeSpecId)" "$SPEC"
+check "the OLD path still resolves for scripts" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" "$BASE/admin/content/by-path?path=$PATHNAME")" 200
+check "the old path may not be taken by anyone else" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+     -d "{\"path\":\"$PATHNAME\",\"title\":\"x\",\"owner\":\"alice\",\"type\":\"shiny\"}" "$BASE/admin/content")" 409
+
 # Refusals that protect decisions taken in spine #1, each proved live rather than asserted.
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
-  -d '{"slug":"hello","owner":"alice","type":"shiny"}' "$BASE/admin/content")
-check "a slug that shadows a YAML spec is refused" "$code" 409
-
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
-  -d '{"slug":"smoke-public","owner":"alice","type":"shiny","visibility":"anonymous"}' "$BASE/admin/content")
-check "visibility 'anonymous' is refused"          "$code" 400
-
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -d 'slug=smoke-csrf&owner=alice&type=shiny' "$BASE/admin/content")
-check "a form-encoded POST is refused (CSRF)"      "$code" 415
+check "a path nested inside another is refused" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+     -d '{"path":"smoke","title":"x","owner":"alice","type":"shiny"}' "$BASE/admin/content")" 409
+check "visibility 'anonymous' is refused" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+     -d "{\"path\":\"smoke-public-$RUN_ID\",\"title\":\"x\",\"owner\":\"alice\",\"type\":\"shiny\",\"visibility\":\"anonymous\"}" "$BASE/admin/content")" 400
+check "a form-encoded POST is refused (CSRF)" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -d "path=smoke-csrf-$RUN_ID&title=x&owner=alice&type=shiny" "$BASE/admin/content")" 415
 
 # A retired version must stop being startable, or activation never retires anything.
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
-  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$SLUG/versions")
-check "alice activates version 2"                  "$code" 201
-check "the retired version is no longer listed"    "$(lists_spec "$ALICE" "$SLUG--v1")" no
-check "the retired version cannot be opened"       "$(opens_spec "$ALICE" "$SLUG--v1")" 403
-check "the active version can be opened"           "$(opens_spec "$ALICE" "$SLUG--v2")" 200
+SPEC2=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$CID/versions" | jfld activeSpecId)
+check "alice activates version 2"                  "$([ -n "$SPEC2" ] && echo yes || echo no)" yes
+check "the retired version is no longer listed"    "$(lists_spec "$ALICE" "$SPEC")"  no
+check "the retired version cannot be opened"       "$(opens_spec "$ALICE" "$SPEC")"  403
+check "the active version can be opened"           "$(opens_spec "$ALICE" "$SPEC2")" 200
 
-code=$(jstatus -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$SLUG")
-check "alice deletes the content"                  "$code" 200
-check "the deleted app is gone from the index"     "$(lists_spec "$ALICE" "$SLUG--v2")" no
+check "alice deletes the content"                  "$(jstatus -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$CID")" 200
+check "the deleted app is gone from the index"     "$(lists_spec "$ALICE" "$SPEC2")" no
+check "its path is GONE, not free to reuse" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" "$BASE/admin/content/by-path?path=smoke/renamed-$RUN_ID")" 410
 
 rm -f "$ALICE" "$BOB"
 echo

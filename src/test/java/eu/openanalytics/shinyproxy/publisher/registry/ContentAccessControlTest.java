@@ -47,6 +47,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 
 /**
  * The deny cases for registry content, decided by ContainerProxy's real evaluator rather than
@@ -105,7 +106,12 @@ public class ContentAccessControlTest {
 
     @BeforeEach
     public void beforeEach() {
+        // content_path rows deliberately SURVIVE a content delete -- that is the reservation
+        // that stops a retired URL pointing at different content later. A test resetting the
+        // world has to clear them explicitly; a test that means to exercise the reservation
+        // must not.
         jdbc.update("DELETE FROM skald.content");
+        jdbc.update("DELETE FROM skald.content_path");
     }
 
     @AfterEach
@@ -119,7 +125,7 @@ public class ContentAccessControlTest {
     public void theOwnerCanAccessTheirOwnContent() {
         publish("report", "alice");
 
-        Assertions.assertTrue(canAccess(user("alice"), "report--v1"));
+        Assertions.assertTrue(canAccess(user("alice"), specIdOf("report")));
     }
 
     @Test
@@ -127,7 +133,7 @@ public class ContentAccessControlTest {
         publish("report", "alice");
         grant("report", "user", "bob");
 
-        Assertions.assertTrue(canAccess(user("bob"), "report--v1"));
+        Assertions.assertTrue(canAccess(user("bob"), specIdOf("report")));
     }
 
     @Test
@@ -135,7 +141,7 @@ public class ContentAccessControlTest {
         publish("report", "alice");
         grant("report", "group", "viewers");
 
-        Assertions.assertTrue(canAccess(user("bob", "viewers"), "report--v1"));
+        Assertions.assertTrue(canAccess(user("bob", "viewers"), specIdOf("report")));
     }
 
     /** viewer and editor differ in what may be changed, not in who may open the content. */
@@ -144,18 +150,18 @@ public class ContentAccessControlTest {
         publish("report", "alice");
         jdbc.update("""
             INSERT INTO skald.content_acl (content_id, principal_type, principal, permission)
-            SELECT id, 'user', 'bob', 'editor' FROM skald.content WHERE slug = 'report'
-            """);
+            VALUES (?, 'user', 'bob', 'editor')
+            """, contentId("report"));
 
-        Assertions.assertTrue(canAccess(user("bob"), "report--v1"));
+        Assertions.assertTrue(canAccess(user("bob"), specIdOf("report")));
     }
 
     @Test
     public void allAuthenticatedGrantsAnyLoggedInUser() {
         publish("open-report", "alice", "all_authenticated");
 
-        Assertions.assertTrue(canAccess(user("bob"), "open-report--v1"));
-        Assertions.assertTrue(canAccess(user("carol", "some-unrelated-group"), "open-report--v1"));
+        Assertions.assertTrue(canAccess(user("bob"), specIdOf("open-report")));
+        Assertions.assertTrue(canAccess(user("carol", "some-unrelated-group"), specIdOf("open-report")));
     }
 
     // ----------------------------------------------------------------- deny
@@ -164,7 +170,7 @@ public class ContentAccessControlTest {
     public void aUserWithNoGrantIsDenied() {
         publish("report", "alice");
 
-        Assertions.assertFalse(canAccess(user("bob"), "report--v1"));
+        Assertions.assertFalse(canAccess(user("bob"), specIdOf("report")));
     }
 
     @Test
@@ -172,18 +178,18 @@ public class ContentAccessControlTest {
         publish("report", "alice");
         grant("report", "group", "publishers");
 
-        Assertions.assertFalse(canAccess(user("bob", "viewers"), "report--v1"));
+        Assertions.assertFalse(canAccess(user("bob", "viewers"), specIdOf("report")));
     }
 
     @Test
     public void revokingAnAclDeniesOnTheNextEvaluation() {
         publish("report", "alice");
         grant("report", "user", "bob");
-        Assertions.assertTrue(canAccess(user("bob"), "report--v1"), "precondition: bob was granted");
+        Assertions.assertTrue(canAccess(user("bob"), specIdOf("report")), "precondition: bob was granted");
 
         jdbc.update("DELETE FROM skald.content_acl WHERE principal = 'bob'");
 
-        Assertions.assertFalse(canAccess(user("bob"), "report--v1"),
+        Assertions.assertFalse(canAccess(user("bob"), specIdOf("report")),
             "a revoked ACL must not survive in the memoised ProxySpec");
     }
 
@@ -192,7 +198,7 @@ public class ContentAccessControlTest {
         publish("report", "alice");
         grant("report", "group", "viewers");
 
-        Assertions.assertFalse(canAccess(anonymous(), "report--v1"));
+        Assertions.assertFalse(canAccess(anonymous(), specIdOf("report")));
     }
 
     /**
@@ -210,9 +216,9 @@ public class ContentAccessControlTest {
     public void anonymousIsDeniedEvenByTheMostPermissiveProjection() {
         publish("open-report", "alice", "all_authenticated");
 
-        Assertions.assertTrue(canAccess(user("bob"), "open-report--v1"),
+        Assertions.assertTrue(canAccess(user("bob"), specIdOf("open-report")),
             "precondition: all_authenticated grants an authenticated user");
-        Assertions.assertFalse(canAccess(anonymous(), "open-report--v1"),
+        Assertions.assertFalse(canAccess(anonymous(), specIdOf("open-report")),
             "anonymous access cannot be granted by an AccessControl; see AccessControlProjector");
     }
 
@@ -220,11 +226,58 @@ public class ContentAccessControlTest {
     public void anonymousVisibilityDeniesEveryoneRatherThanDowngrading() {
         publish("public-thing", "alice", "anonymous");
 
-        Assertions.assertFalse(canAccess(anonymous(), "public-thing--v1"));
-        Assertions.assertFalse(canAccess(user("alice"), "public-thing--v1"),
+        Assertions.assertFalse(canAccess(anonymous(), specIdOf("public-thing")));
+        Assertions.assertFalse(canAccess(user("alice"), specIdOf("public-thing")),
             "an unservable visibility mode must not silently become owner-only");
-        Assertions.assertFalse(canAccess(user("bob"), "public-thing--v1"),
+        Assertions.assertFalse(canAccess(user("bob"), specIdOf("public-thing")),
             "an unservable visibility mode must not silently become all_authenticated");
+    }
+
+    /**
+     * Review finding F1, at the level where it did damage.
+     *
+     * <p>Spec ids used to be derived from the publisher's slug, so deleting content and
+     * re-creating it under the same name handed the new content the old one's spec id. Because
+     * {@code ProxyAccessControlService} memoises decisions per {@code (sessionId, specId)} with
+     * no way to invalidate them, a user whose grant was gone kept access to whatever occupied
+     * the id next — reproduced live, where a revoked user opened the app and started a
+     * container while a fresh session was correctly refused.
+     *
+     * <p>Ids now come from the content UUID, so new content cannot collide with a cached
+     * decision. This drives a real {@code RequestContextHolder} so the cache is genuinely in
+     * play; without that, {@code canAccess} skips it entirely.
+     *
+     * <p><b>What this does and does not prove.</b> It is a structural guard, not the
+     * behavioural proof: with UUID-derived ids the two spec ids differ by construction, so the
+     * assertion cannot fail unless id allocation regresses to being derived from something a
+     * publisher controls — which is exactly the regression worth catching, and what it is here
+     * for. The behavioural proof that ids are never reused is
+     * {@code ContentAdminControllerTest.aRecreatedContentItemNeverInheritsTheOldSpecId}, which
+     * fails precisely under a mutation that makes {@code specId()} reuse ids. Path reservation
+     * closes the same hole a second time, independently, by making it impossible to re-create
+     * content at a retired name at all.
+     */
+    @Test
+    public void newContentCannotInheritACachedDecisionFromDeletedContent() {
+        UUID first = publish("first-report", "alice");
+        grant("first-report", "user", "bob");
+        String firstSpecId = specIdOf("first-report");
+
+        withRequestContext(() -> {
+            Assertions.assertTrue(canAccess(user("bob"), firstSpecId),
+                "precondition: bob is granted, and this caches the decision for his session");
+
+            // The content is deleted and different content is published. Bob is granted nothing.
+            jdbc.update("DELETE FROM skald.content WHERE id = ?", first);
+            publish("second-report", "alice");
+            String secondSpecId = specIdOf("second-report");
+
+            Assertions.assertNotEquals(firstSpecId, secondSpecId,
+                "precondition: the new content must not have been handed the retired id");
+            Assertions.assertFalse(canAccess(user("bob"), secondSpecId),
+                "bob reached content he was never granted, in the same session that had a "
+                    + "cached decision for the deleted content");
+        });
     }
 
     // ------------------------------------------------- the per-session cache
@@ -254,24 +307,24 @@ public class ContentAccessControlTest {
         grant("report", "user", "bob");
 
         withRequestContext(() -> {
-            Assertions.assertTrue(canAccess(user("bob"), "report--v1"),
+            Assertions.assertTrue(canAccess(user("bob"), specIdOf("report")),
                 "precondition: bob was granted, within a session");
 
             jdbc.update("DELETE FROM skald.content_acl WHERE principal = 'bob'");
 
             Assertions.assertFalse(
-                spec("report--v1").getAccessControl().hasUserAccess()
-                    && Arrays.asList(spec("report--v1").getAccessControl().getUsers()).contains("bob"),
+                spec(specIdOf("report")).getAccessControl().hasUserAccess()
+                    && Arrays.asList(spec(specIdOf("report")).getAccessControl().getUsers()).contains("bob"),
                 "precondition: the projection itself no longer grants bob");
 
-            Assertions.assertTrue(canAccess(user("bob"), "report--v1"),
+            Assertions.assertTrue(canAccess(user("bob"), specIdOf("report")),
                 "KNOWN LIMITATION: if this starts failing, the per-session authorization cache "
                     + "became invalidatable and this test should become a real deny assertion");
         });
 
         // ...and the same revocation is honoured immediately for a session that has not yet
         // asked, which is why the hole is invisible to a smoke test that logs in fresh.
-        Assertions.assertFalse(canAccess(user("bob"), "report--v1"));
+        Assertions.assertFalse(canAccess(user("bob"), specIdOf("report")));
     }
 
     // ------------------------------------------------------------- fixtures
@@ -280,6 +333,11 @@ public class ContentAccessControlTest {
         ProxySpec proxySpec = spec(specId);
         Assertions.assertNotNull(proxySpec, "spec '" + specId + "' does not exist");
         return accessControl.canAccess(auth, proxySpec);
+    }
+
+    /** Goes through the (sessionId, specId) cache the way a real request would. */
+    private static boolean canAccessBySpecId(Authentication auth, String specId) {
+        return accessControl.canAccess(auth, specId);
     }
 
     /** Always re-resolved: an ACL change produces a new ProxySpec instance by design. */
@@ -309,30 +367,39 @@ public class ContentAccessControlTest {
         }
     }
 
-    private static void publish(String slug, String owner) {
-        publish(slug, owner, "acl_only");
+    private static UUID publish(String path, String owner) {
+        return publish(path, owner, "acl_only");
     }
 
-    private static void publish(String slug, String owner, String visibility) {
-        jdbc.update("""
-            INSERT INTO skald.content (slug, owner, type, visibility) VALUES (?, ?, 'shiny', ?)
-            """, slug, owner, visibility);
-        jdbc.update("""
-            INSERT INTO skald.content_version (content_id, version, image, created_by)
-            SELECT id, 1, ?, ? FROM skald.content WHERE slug = ?
-            """, "registry:5000/" + slug + ":1", owner, slug);
+    private static UUID publish(String path, String owner, String visibility) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("INSERT INTO skald.content (id, title, owner, type, visibility) "
+            + "VALUES (?, ?, ?, 'shiny', ?)", id, path, owner, visibility);
+        jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) VALUES (?, ?, ?)",
+            path, path, id);
+        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by) "
+            + "VALUES (?, 1, ?, ?)", id, "registry:5000/" + path + ":1", owner);
         jdbc.update("""
             UPDATE skald.content c SET active_version_id = v.id
             FROM skald.content_version v
-            WHERE v.content_id = c.id AND v.version = 1 AND c.slug = ?
-            """, slug);
+            WHERE v.content_id = c.id AND v.version = 1 AND c.id = ?
+            """, id);
+        return id;
     }
 
-    private static void grant(String slug, String principalType, String principal) {
-        jdbc.update("""
-            INSERT INTO skald.content_acl (content_id, principal_type, principal)
-            SELECT id, ?, ? FROM skald.content WHERE slug = ?
-            """, principalType, principal, slug);
+    /** The spec id of version 1 of the content published at this path. */
+    private static String specIdOf(String path) {
+        return ContentSpecRepository.specId(contentId(path), 1);
+    }
+
+    private static UUID contentId(String path) {
+        return jdbc.queryForObject("SELECT content_id FROM skald.content_path WHERE path_key = ?",
+            (rs, i) -> (UUID) rs.getObject("content_id"), path);
+    }
+
+    private static void grant(String path, String principalType, String principal) {
+        jdbc.update("INSERT INTO skald.content_acl (content_id, principal_type, principal) "
+            + "VALUES (?, ?, ?)", contentId(path), principalType, principal);
     }
 
 }

@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.registry;
 import eu.openanalytics.containerproxy.ContainerProxyApplication;
 import eu.openanalytics.containerproxy.model.spec.ProxySpec;
 import eu.openanalytics.containerproxy.service.ProxyAccessControlService;
+import eu.openanalytics.containerproxy.service.ProxyService;
 import eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
 import okhttp3.MediaType;
@@ -47,6 +48,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.io.IOException;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -80,6 +82,7 @@ public class VersionResolvabilityTest {
     private static ShinyProxySpecProvider specProvider;
     private static ShinyProxyClient client;
     private static ProxyAccessControlService accessControl;
+    private static ProxyService proxyService;
 
     @BeforeAll
     public static void beforeAll() {
@@ -102,6 +105,7 @@ public class VersionResolvabilityTest {
         specProvider = app.getBean("shinyProxySpecProvider", ShinyProxySpecProvider.class);
         client = new ShinyProxyClient(USER, PORT);
         accessControl = app.getBean(ProxyAccessControlService.class);
+        proxyService = app.getBean(ProxyService.class);
     }
 
     @AfterAll
@@ -115,7 +119,12 @@ public class VersionResolvabilityTest {
 
     @BeforeEach
     public void beforeEach() {
+        // content_path rows deliberately SURVIVE a content delete -- that is the reservation
+        // that stops a retired URL pointing at different content later. A test resetting the
+        // world has to clear them explicitly; a test that means to exercise the reservation
+        // must not.
         jdbc.update("DELETE FROM skald.content");
+        jdbc.update("DELETE FROM skald.content_path");
     }
 
     /**
@@ -125,16 +134,16 @@ public class VersionResolvabilityTest {
     public void aContainerSurvivesActivateAndRollbackAndStopsCleanly() {
         publish("rollme", 1);
 
-        String proxyId = client.startProxy("rollme--v1");
+        String proxyId = client.startProxy(specIdOf("rollme", 1));
         Assertions.assertNotNull(proxyId, "the v1 container did not start");
         client.testProxyReachable(proxyId);
 
         // --- activate v2 while the v1 container is alive -------------------------------
         publish("rollme", 2);
 
-        Assertions.assertEquals(List.of("rollme--v2"), registryIds(),
+        Assertions.assertEquals(List.of(specIdOf("rollme", 2)), registryIds(),
             "only the active version should be listed");
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v1"),
+        Assertions.assertNotNull(specProvider.getSpec(specIdOf("rollme", 1)),
             "ADR-0008: a superseded version must stay resolvable while its containers live");
 
         Assertions.assertTrue(proxyIds().contains(proxyId),
@@ -144,12 +153,12 @@ public class VersionResolvabilityTest {
         // --- roll back to v1 ------------------------------------------------------------
         activate("rollme", 1);
 
-        Assertions.assertEquals(List.of("rollme--v1"), registryIds(),
+        Assertions.assertEquals(List.of(specIdOf("rollme", 1)), registryIds(),
             "rollback should put v1 back in the listing");
         // v2 is now superseded AND has no container of its own, so it must stop resolving:
         // that is what keeps activation able to retire a version. v1, which the live container
         // is on, is active again here and covered by the assertions above.
-        Assertions.assertNull(specProvider.getSpec("rollme--v2"),
+        Assertions.assertNull(specProvider.getSpec(specIdOf("rollme", 2)),
             "a superseded version with nothing running on it must not stay resolvable");
 
         Assertions.assertTrue(proxyIds().contains(proxyId),
@@ -185,34 +194,34 @@ public class VersionResolvabilityTest {
     @Test
     public void stopNeedsOnlyTheDispatcherButTheUsersProxyListNeedsTheSpec() {
         publish("vanishing", 1);
+        String specId = specIdOf("vanishing", 1);
 
-        String proxyId = client.startProxy("vanishing--v1");
+        String proxyId = client.startProxy(specId);
         Assertions.assertNotNull(proxyId);
         Assertions.assertTrue(proxyIds().contains(proxyId), "precondition: the proxy is listed");
 
         // Make the spec unresolvable out from under the running container. ON DELETE CASCADE
         // takes the versions with it, which is exactly what a content delete would do.
-        jdbc.update("DELETE FROM skald.content WHERE slug = 'vanishing'");
-        Assertions.assertNull(specProvider.getSpec("vanishing--v1"),
+        jdbc.update("DELETE FROM skald.content WHERE id = ?", contentId("vanishing"));
+        Assertions.assertNull(specProvider.getSpec(specId),
             "precondition: the spec no longer resolves");
 
         Assertions.assertFalse(proxyIds().contains(proxyId),
             "getUserProxies filters on canAccess, which needs the spec — if this now passes, "
                 + "upstream changed and the task 7 delete constraint can be relaxed");
 
-        // The other half of the claim: stop it while the spec is STILL unresolvable. Doing
-        // this after restoring the row would exercise the ordinary path and prove nothing.
+        // The other half of the claim: stop it while the spec is STILL unresolvable.
         Assertions.assertDoesNotThrow(() -> client.stopProxy(proxyId),
             "stopProxy needs only getDispatcher(specId), which LazyProxyDispatcherService "
                 + "answers for any id — if this throws, stop does depend on the spec after all");
 
-        // Restoring the row makes the proxy visible again IF it is still running, so this is
-        // how we tell a real stop from a proxy that merely became invisible.
-        publish("vanishing", 1);
-        Assertions.assertNotNull(specProvider.getSpec("vanishing--v1"),
-            "precondition: the spec resolves again");
-        Assertions.assertFalse(proxyIds().contains(proxyId),
-            "the proxy is still running — the stop with an unresolvable spec did not take effect");
+        // Telling a real stop from a proxy that merely became invisible. This used to re-create
+        // the content at the same path to make it visible again; paths are now reserved once
+        // used, so that is refused by design. Reading the proxy store directly is a better
+        // proof anyway, because it is not filtered by access control at all.
+        Assertions.assertTrue(
+            proxyService.getAllProxies().stream().noneMatch(p -> p.getId().equals(proxyId)),
+            "the proxy is still in the store — the stop with an unresolvable spec did nothing");
     }
 
     /**
@@ -229,17 +238,17 @@ public class VersionResolvabilityTest {
         publish("retired", 1);
         publish("retired", 2);
 
-        Assertions.assertEquals(List.of("retired--v2"), registryIds(), "precondition: v2 is active");
+        Assertions.assertEquals(List.of(specIdOf("retired", 2)), registryIds(), "precondition: v2 is active");
         Assertions.assertTrue(proxyIds().isEmpty(), "precondition: nothing is running");
 
-        int status = startStatus("retired--v1");
+        int status = startStatus(specIdOf("retired", 1));
         Assertions.assertTrue(status >= 400,
             "a retired version was startable (HTTP " + status + "); activation must retire code, "
                 + "not just hide it from the index");
         Assertions.assertTrue(proxyIds().isEmpty(), "a container was started on a retired version");
 
         // The active version is of course still startable.
-        Assertions.assertEquals(201, startStatus("retired--v2"),
+        Assertions.assertEquals(201, startStatus(specIdOf("retired", 2)),
             "the active version must still start");
         proxyIds().forEach(client::stopProxy);
     }
@@ -259,11 +268,11 @@ public class VersionResolvabilityTest {
         publish("acl-ver", 1);
         grantTo("acl-ver", "bob");
 
-        String proxyId = client.startProxy("acl-ver--v1");
+        String proxyId = client.startProxy(specIdOf("acl-ver", 1));
         Assertions.assertNotNull(proxyId, "precondition: a container is alive on v1");
         try {
             publish("acl-ver", 2);
-            ProxySpec superseded = specProvider.getSpec("acl-ver--v1");
+            ProxySpec superseded = specProvider.getSpec(specIdOf("acl-ver", 1));
             Assertions.assertNotNull(superseded, "precondition: v1 resolves, its container lives");
 
             Assertions.assertTrue(accessControl.canAccess(user("bob"), superseded),
@@ -272,7 +281,7 @@ public class VersionResolvabilityTest {
             jdbc.update("DELETE FROM skald.content_acl WHERE principal = 'bob'");
 
             Assertions.assertFalse(
-                accessControl.canAccess(user("bob"), specProvider.getSpec("acl-ver--v1")),
+                accessControl.canAccess(user("bob"), specProvider.getSpec(specIdOf("acl-ver", 1))),
                 "a superseded version kept a revoked grant — the ACL was snapshotted, so an old "
                     + "version would be a way to retain access after it is taken away");
         } finally {
@@ -285,10 +294,8 @@ public class VersionResolvabilityTest {
     }
 
     private static void grantTo(String slug, String principal) {
-        jdbc.update("""
-            INSERT INTO skald.content_acl (content_id, principal_type, principal)
-            SELECT id, 'user', ? FROM skald.content WHERE slug = ?
-            """, principal, slug);
+        jdbc.update("INSERT INTO skald.content_acl (content_id, principal_type, principal) "
+            + "VALUES (?, 'user', ?)", contentId(slug), principal);
     }
 
     private static int startStatus(String specId) throws IOException {
@@ -317,26 +324,41 @@ public class VersionResolvabilityTest {
     }
 
     /** Adds a version and makes it active, creating the content item on first use. */
-    private static void publish(String slug, int version) {
-        jdbc.update("""
-            INSERT INTO skald.content (slug, owner, type) VALUES (?, ?, 'shiny')
-            ON CONFLICT (slug) DO NOTHING
-            """, slug, USER);
+    private static UUID publish(String path, int version) {
+        UUID existing = contentId(path);
+        UUID id = (existing != null) ? existing : UUID.randomUUID();
+        if (existing == null) {
+            jdbc.update("INSERT INTO skald.content (id, title, owner, type) VALUES (?, ?, ?, 'shiny')",
+                id, path, USER);
+            jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) VALUES (?, ?, ?)",
+                path, path, id);
+        }
         jdbc.update("""
             INSERT INTO skald.content_version (content_id, version, image, created_by)
-            SELECT id, ?, ?, ? FROM skald.content WHERE slug = ?
-            ON CONFLICT (content_id, version) DO NOTHING
-            """, version, IMAGE, USER, slug);
-        activate(slug, version);
+            VALUES (?, ?, ?, ?) ON CONFLICT (content_id, version) DO NOTHING
+            """, id, version, IMAGE, USER);
+        activate(path, version);
+        return id;
     }
 
-    private static void activate(String slug, int version) {
+    private static void activate(String path, int version) {
         jdbc.update("""
             UPDATE skald.content c SET active_version_id = v.id
             FROM skald.content_version v
-            WHERE v.content_id = c.id AND v.version = ? AND c.slug = ?
-            """, version, slug);
+            WHERE v.content_id = c.id AND v.version = ? AND c.id = ?
+            """, version, contentId(path));
     }
 
+    private static UUID contentId(String path) {
+        List<UUID> found = jdbc.query(
+            "SELECT content_id FROM skald.content_path WHERE path_key = ?",
+            (rs, i) -> (UUID) rs.getObject("content_id"), path);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /** The spec id of a version of the content published at this path. */
+    private static String specIdOf(String path, int version) {
+        return ContentSpecRepository.specId(contentId(path), version);
+    }
 
 }

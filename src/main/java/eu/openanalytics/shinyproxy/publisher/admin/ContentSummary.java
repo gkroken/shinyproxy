@@ -24,7 +24,19 @@ package eu.openanalytics.shinyproxy.publisher.admin;
 
 import java.util.List;
 
-/** What the admin endpoints return for one content item. */
-public record ContentSummary(String slug, String owner, String type, String visibility,
-                             Integer activeVersion, List<Integer> versions) {
+/**
+ * What the admin endpoints return for one content item.
+ *
+ * <p>{@code id} is the stable identifier and the thing to store; {@code path} is display and
+ * addressing, and may change.
+ *
+ * <p>{@code activeSpecId} is the ContainerProxy spec id of the active version. It is exposed
+ * because an operator needs it: it is the {@code spec.id} metric tag, the Docker label value
+ * and the {@code SHINYPROXY_SPEC_ID} inside the container, so anything from a dashboard to
+ * {@code docker ps} shows it and there would otherwise be no way to map it back to content.
+ * It is null until a version exists.
+ */
+public record ContentSummary(String id, String path, String title, String owner, String type,
+                             String visibility, Integer activeVersion, String activeSpecId,
+                             List<Integer> versions) {
 }

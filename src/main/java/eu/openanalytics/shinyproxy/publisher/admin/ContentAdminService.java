@@ -27,56 +27,61 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.openanalytics.containerproxy.model.runtime.Proxy;
 import eu.openanalytics.containerproxy.service.ProxyService;
 import eu.openanalytics.containerproxy.service.UserService;
-import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
 import eu.openanalytics.shinyproxy.publisher.registry.AccessControlProjector;
+import eu.openanalytics.shinyproxy.publisher.registry.ContentPath;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.Array;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
+import java.util.UUID;
 
 /**
- * The admin-only write path for the content registry (spine #1 task 7).
+ * The admin-only write path for the content registry.
  *
- * <p>Every refusal here exists because an earlier task proved it was needed, and each one is
- * an explicit error rather than a silent adjustment:
+ * <p><b>Identity and address are separate here, and that is the point.</b> Content is
+ * identified by an immutable UUID, which the spec id derives from; the path is a publisher
+ * setting that can be renamed. An earlier version keyed everything on a slug and got both
+ * halves wrong — the spec id became reusable, so deleting content and re-creating it at the
+ * same name handed the new content the old one's cached authorization decisions, and the URL
+ * became frozen, because renaming would have changed the spec id that running containers are
+ * recorded against.
+ *
+ * <p>Refusals, each an explicit error rather than a silent adjustment:
  *
  * <ul>
- *   <li><b>Slug collides with a configured spec</b> — WORKPLAN-REGISTRY.md decision 3. YAML
- *       specs are authoritative, and the collision is rejected on write so the publisher gets
- *       exactly one error at the moment they can still act on it, instead of a URL that
- *       silently points somewhere else.</li>
- *   <li><b>{@code visibility = anonymous}</b> — task 5. ContainerProxy rejects anonymous
- *       principals before access control is evaluated, so Skald cannot serve it; accepting the
- *       value would store content that is permanently invisible.</li>
- *   <li><b>Deleting content with live proxies</b> — task 6. {@code content_version} is
- *       {@code ON DELETE CASCADE} from {@code content}, and a proxy whose spec stops resolving
+ *   <li><b>Path already used</b>, by live content or by content since deleted — retired paths
+ *       stay reserved, so nobody inherits a retired URL's audience and its stale links.</li>
+ *   <li><b>Path nested inside another</b>, either way round. Content owns its whole subtree,
+ *       so {@code team} and {@code team/reports} cannot both exist: a request would be
+ *       satisfiable two ways and the resolver has no basis to choose.</li>
+ *   <li><b>{@code visibility = anonymous}</b> — ContainerProxy rejects anonymous principals
+ *       before access control is evaluated, so the content would be permanently invisible.</li>
+ *   <li><b>Deleting content with live proxies</b> — a proxy whose spec stops resolving
  *       disappears from its own owner's list.</li>
  * </ul>
  *
- * <p><b>Deliberately absent: any way to change an ACL or a visibility mode.</b> Those are the
- * two writes that would make ContainerProxy's per-session authorization cache a live bug — a
- * revoked grant does not reach a session that is already using the app
- * ({@code docs/UPSTREAM_CHANGES.md} section B). Creating, versioning, activating and deleting
- * content do not touch either: a new spec id has never been cached, activation and rollback
- * leave ACLs alone, and deletion is safe because
- * {@code ProxyAccessControlService.canAccess(auth, specId)} null-checks the resolved spec
- * before it consults the cache. Sharing arrives in spine #4, and owns that decision.
+ * <p><b>Still deliberately absent: any way to change an ACL or a visibility mode.</b> Those
+ * remain the two mutations that would make ContainerProxy's uninvalidatable per-session
+ * authorization cache a live bug ({@code docs/UPSTREAM_CHANGES.md} section B). Note that the
+ * original justification for that scope — "a new spec id has never been cached" — was false
+ * while spec ids came from slugs, and holds now only because they come from UUIDs.
  */
 @Service
 @ConditionalOnProperty(name = "spring.datasource.url")
 public class ContentAdminService {
-
-    /** Mirrors the {@code content_slug_format} CHECK constraint in V1__content_registry.sql. */
-    private static final Pattern SLUG = Pattern.compile("^[a-z0-9][a-z0-9-]{0,49}$");
 
     /** Mirrors {@code content_type_known}. */
     private static final Set<String> TYPES =
@@ -84,62 +89,81 @@ public class ContentAdminService {
 
     /**
      * Mirrors {@code content_visibility_known} minus {@code anonymous}, which the schema
-     * permits and Skald cannot yet serve. Kept as a separate set rather than a subtraction so
-     * that implementing anonymous access (spine #5) is a one-line change here.
+     * permits and Skald cannot yet serve. A separate set rather than a subtraction, so that
+     * implementing anonymous access (spine #5) is a one-line change here.
      */
     private static final Set<String> WRITABLE_VISIBILITIES =
         Set.of(AccessControlProjector.VISIBILITY_ACL_ONLY,
             AccessControlProjector.VISIBILITY_ALL_AUTHENTICATED);
 
+    private static final String SELECT_SUMMARY = """
+        SELECT c.id, c.title, c.owner, c.type, c.visibility,
+               (SELECT p.path FROM skald.content_path p
+                 WHERE p.content_id = c.id AND p.is_current) AS path,
+               (SELECT v.version FROM skald.content_version v
+                 WHERE v.id = c.active_version_id) AS active_version,
+               COALESCE((SELECT array_agg(v.version ORDER BY v.version)
+                         FROM skald.content_version v WHERE v.content_id = c.id), '{}') AS versions
+        FROM skald.content c
+        """;
+
     private final JdbcTemplate jdbc;
-    private final ContentSpecRepository repository;
-    private final ShinyProxySpecProvider specProvider;
     private final ProxyService proxyService;
     private final UserService userService;
     private final ObjectMapper objectMapper;
 
     public ContentAdminService(JdbcTemplate jdbc,
-                               ContentSpecRepository repository,
-                               @Lazy ShinyProxySpecProvider specProvider,
                                @Lazy ProxyService proxyService,
                                @Lazy UserService userService,
                                ObjectMapper objectMapper) {
         this.jdbc = jdbc;
-        this.repository = repository;
-        this.specProvider = specProvider;
         this.proxyService = proxyService;
         this.userService = userService;
         this.objectMapper = objectMapper;
     }
 
     public List<ContentSummary> list() {
-        return jdbc.query("""
-            SELECT c.slug, c.owner, c.type, c.visibility,
-                   (SELECT v.version FROM skald.content_version v WHERE v.id = c.active_version_id) AS active_version,
-                   COALESCE((SELECT array_agg(v.version ORDER BY v.version)
-                             FROM skald.content_version v WHERE v.content_id = c.id), '{}') AS versions
-            FROM skald.content c
-            ORDER BY c.slug
-            """, (rs, i) -> new ContentSummary(
-            rs.getString("slug"), rs.getString("owner"), rs.getString("type"),
-            rs.getString("visibility"),
-            (Integer) rs.getObject("active_version"),
-            versions(rs.getArray("versions"))));
+        return jdbc.query(SELECT_SUMMARY + " ORDER BY c.title", this::toSummary);
+    }
+
+    /**
+     * Resolves a path, following a rename.
+     *
+     * <p>The admin API has to do this for the same reason a browser gets a 301: a rename must
+     * not silently break every script that referenced the old name. A caller asking by a
+     * retired path gets the content, with {@code pathIsCurrent = false} so it can notice and
+     * update itself.
+     */
+    public PathResolution resolveByPath(String path) {
+        String key = normaliseOrBad(path);
+
+        List<Map<String, Object>> rows = jdbc.queryForList(
+            "SELECT content_id, is_current FROM skald.content_path WHERE path_key = ?", key);
+        if (rows.isEmpty()) {
+            throw notFound("no content at path '" + path + "'");
+        }
+
+        UUID contentId = (UUID) rows.get(0).get("content_id");
+        if (contentId == null) {
+            // Reserved, with nothing behind it. Gone, not missing: the distinction is the
+            // promise that nobody else will ever answer at this path.
+            throw new ContentAdminException(HttpStatus.GONE,
+                "path '" + path + "' belonged to content that has been deleted, and stays "
+                    + "reserved so that it can never point at different content");
+        }
+        return new PathResolution(requireContent(contentId), (Boolean) rows.get(0).get("is_current"));
     }
 
     @Transactional
     public ContentSummary create(CreateContentRequest request) {
-        String slug = require(request.slug(), "slug");
+        String title = require(request.title(), "title");
         String owner = require(request.owner(), "owner");
         String type = require(request.type(), "type");
+        String path = require(request.path(), "path");
         String visibility = (request.visibility() == null)
             ? AccessControlProjector.VISIBILITY_ACL_ONLY : request.visibility();
+        String key = normaliseOrBad(path);
 
-        if (!SLUG.matcher(slug).matches()) {
-            throw bad("slug must match " + SLUG.pattern()
-                + " (lower-case, max 50 characters, so that '<slug>--v<n>' stays inside the "
-                + "63-character Kubernetes label limit)");
-        }
         if (!TYPES.contains(type)) {
             throw bad("unknown type '" + type + "'; expected one of " + sorted(TYPES));
         }
@@ -154,135 +178,182 @@ public class ContentAdminService {
                 + sorted(WRITABLE_VISIBILITIES));
         }
 
-        // Configured specs are authoritative (WORKPLAN-REGISTRY.md decision 3). A registry
-        // spec id is always '<slug>--v<n>', never a bare slug, so a non-null lookup on the
-        // bare slug can only be a YAML spec.
-        if (specProvider.getSpec(slug) != null) {
-            throw conflict("'" + slug + "' is a configured spec id and is owned by the "
-                + "administrator; registry content cannot shadow it");
-        }
-        if (repository.slugExists(slug)) {
-            throw conflict("content '" + slug + "' already exists");
+        UUID contentId = UUID.randomUUID();
+        jdbc.update("INSERT INTO skald.content (id, title, owner, type, visibility) "
+            + "VALUES (?, ?, ?, ?, ?)", contentId, title, owner, type, visibility);
+        claimPath(contentId, path, key);
+
+        audit("content.create", contentId, Map.of("path", path, "title", title,
+            "owner", owner, "type", type, "visibility", visibility));
+        return requireContent(contentId);
+    }
+
+    /**
+     * Moves content to a new path, keeping the old one reserved and pointing at it.
+     *
+     * <p>The old row is retired rather than updated, because it is the source of the redirect.
+     * Nothing else changes: the spec id derives from the content UUID, so every running
+     * container keeps working across a rename.
+     */
+    @Transactional
+    public ContentSummary rename(UUID contentId, RenameRequest request) {
+        ContentSummary existing = requireContent(contentId);
+        String path = require(request.path(), "path");
+        String key = normaliseOrBad(path);
+
+        if (key.equals(normaliseOrBad(existing.path()))) {
+            return existing;
         }
 
-        // The slugExists check above is advisory: two concurrent creates both pass it and the
-        // unique constraint decides. Mapping that violation here is what makes 409 the documented
-        // answer in both cases rather than a 500 for whoever loses the race.
-        try {
-            jdbc.update("INSERT INTO skald.content (slug, owner, type, visibility) VALUES (?, ?, ?, ?)",
-                slug, owner, type, visibility);
-        } catch (DataIntegrityViolationException e) {
-            throw conflict("content '" + slug + "' already exists");
-        }
-        audit("content.create", slug, Map.of("owner", owner, "type", type, "visibility", visibility));
+        jdbc.update("UPDATE skald.content_path SET is_current = false, retired_at = now() "
+            + "WHERE content_id = ? AND is_current", contentId);
+        claimPath(contentId, path, key);
 
-        return findSummary(slug);
+        audit("content.rename", contentId, Map.of("from", existing.path(), "to", path));
+        return requireContent(contentId);
     }
 
     /**
      * Adds a version and, unless told otherwise, makes it the active one.
      *
-     * <p>The version number is assigned here rather than accepted from the caller. Letting a
-     * client choose it buys nothing — rollback names an existing version through
-     * {@link #activate} — and costs a class of conflicts and gaps to validate against.
+     * <p>The version number is assigned here rather than accepted from the caller: rollback
+     * names an existing version through {@link #activate}, so letting a client choose buys
+     * nothing and costs a class of conflicts to validate against.
      */
     @Transactional
-    public ContentSummary addVersion(String slug, AddVersionRequest request) {
-        ContentSummary existing = requireContent(slug);
+    public ContentSummary addVersion(UUID contentId, AddVersionRequest request) {
+        requireContent(contentId);
         String image = require(request.image(), "image");
 
-        // Serialise version allocation for this content item. Without the lock, two concurrent
-        // adds both read the same max(version) and the second violates content_version_unique;
-        // the caller saw a 500 rather than anything meaningful. Locking the content row is
-        // enough because every allocation for this item goes through it.
-        jdbc.queryForObject("SELECT id::text FROM skald.content WHERE slug = ? FOR UPDATE",
-            String.class, slug);
+        // Serialise allocation for this content item. Without the lock, two concurrent adds read
+        // the same max(version) and the second violates content_version_unique, which reached
+        // the caller as an unrecoverable error rather than a conflict.
+        jdbc.queryForObject("SELECT id::text FROM skald.content WHERE id = ? FOR UPDATE",
+            String.class, contentId);
 
-        Integer version = jdbc.queryForObject("""
-            SELECT COALESCE(max(v.version), 0) + 1 FROM skald.content_version v
-            JOIN skald.content c ON c.id = v.content_id WHERE c.slug = ?
-            """, Integer.class, slug);
+        Integer version = jdbc.queryForObject(
+            "SELECT COALESCE(max(version), 0) + 1 FROM skald.content_version WHERE content_id = ?",
+            Integer.class, contentId);
 
         try {
-            jdbc.update("""
-                INSERT INTO skald.content_version (content_id, version, image, created_by)
-                SELECT id, ?, ?, ? FROM skald.content WHERE slug = ?
-                """, version, image, actor(), slug);
+            jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by) "
+                + "VALUES (?, ?, ?, ?)", contentId, version, image, actor());
         } catch (DataIntegrityViolationException e) {
-            // Belt to the row lock's braces: if allocation ever races anyway, the caller gets
-            // the documented conflict rather than an unrecoverable error.
-            throw conflict("version " + version + " of '" + slug + "' already exists");
+            throw conflict("version " + version + " already exists");
         }
-        audit("content.version.add", slug, Map.of("version", String.valueOf(version), "image", image));
+        audit("content.version.add", contentId,
+            Map.of("version", String.valueOf(version), "image", image));
 
         if (!Boolean.FALSE.equals(request.activate())) {
-            setActiveVersion(slug, version);
+            setActiveVersion(contentId, version);
         }
-        return findSummary(existing.slug());
+        return requireContent(contentId);
     }
 
     /** Activation and rollback are the same operation: point at a version that already exists. */
     @Transactional
-    public ContentSummary activate(String slug, ActivateRequest request) {
-        requireContent(slug);
+    public ContentSummary activate(UUID contentId, ActivateRequest request) {
+        requireContent(contentId);
         if (request.version() == null) {
             throw bad("version is required");
         }
-        Integer exists = jdbc.queryForObject("""
-            SELECT count(*) FROM skald.content_version v
-            JOIN skald.content c ON c.id = v.content_id WHERE c.slug = ? AND v.version = ?
-            """, Integer.class, slug, request.version());
+        Integer exists = jdbc.queryForObject(
+            "SELECT count(*) FROM skald.content_version WHERE content_id = ? AND version = ?",
+            Integer.class, contentId, request.version());
         if (exists == null || exists == 0) {
-            throw notFound("content '" + slug + "' has no version " + request.version());
+            throw notFound("no version " + request.version() + " for this content");
         }
 
-        setActiveVersion(slug, request.version());
-        return findSummary(slug);
+        setActiveVersion(contentId, request.version());
+        return requireContent(contentId);
     }
 
     /**
-     * Deletes content, refusing while any of its versions still has a live proxy.
+     * Deletes content, refusing while any of its versions still has a live proxy, and leaving
+     * its paths reserved.
      *
-     * <p>{@code content_version} is {@code ON DELETE CASCADE} from {@code content}, so this
-     * would otherwise make the running proxy's spec unresolvable — and a proxy whose spec does
-     * not resolve vanishes from its own owner's list, because
-     * {@code ProxyService.getUserProxies} filters through {@code canAccess}. Task 6 proved that
-     * by deleting the row under a running container.
+     * <p>{@code content_version} is {@code ON DELETE CASCADE}, so deleting would otherwise make
+     * a running proxy's spec unresolvable — and a proxy whose spec does not resolve vanishes
+     * from its own owner's list. The paths are {@code ON DELETE SET NULL} and survive, so the
+     * URL answers 410 rather than becoming available to different content.
      */
     @Transactional
-    public void delete(String slug) {
-        requireContent(slug);
+    public void delete(UUID contentId) {
+        ContentSummary existing = requireContent(contentId);
 
-        List<String> live = liveSpecIds(slug);
+        List<String> live = liveSpecIds(contentId);
         if (!live.isEmpty()) {
-            throw conflict("content '" + slug + "' still has running apps (" + String.join(", ", live)
+            throw conflict("this content still has running apps (" + String.join(", ", live)
                 + "); stop them before deleting, or their owners would lose sight of them");
         }
 
-        jdbc.update("DELETE FROM skald.content WHERE slug = ?", slug);
-        audit("content.delete", slug, Map.of());
+        jdbc.update("UPDATE skald.content_path SET is_current = false, retired_at = now() "
+            + "WHERE content_id = ? AND is_current", contentId);
+        jdbc.update("DELETE FROM skald.content WHERE id = ?", contentId);
+        audit("content.delete", contentId, Map.of("path", existing.path()));
 
-        // Re-check before committing. A proxy can start between the check above and here, and
-        // no database lock can prevent that -- proxy state lives in ContainerProxy's store, not
-        // in PostgreSQL, so a row lock on content would serialise nothing. Re-checking inside
-        // the transaction turns "delete wins the race" into "delete loses it", which is the
-        // right way round: the residual window is between this check and the commit, and the
-        // cost of losing that one is a spurious 409 rather than a stranded container.
-        List<String> startedMeanwhile = liveSpecIds(slug);
+        // Re-check before committing. A proxy can start between the check above and here, and no
+        // database lock prevents that: proxy state lives in ContainerProxy's store, not in
+        // PostgreSQL, so locking the content row would serialise nothing. Re-checking inside the
+        // transaction turns "delete wins the race" into "delete loses it" — the residual window
+        // is between here and the commit, and losing it costs a spurious conflict rather than a
+        // stranded container.
+        List<String> startedMeanwhile = liveSpecIds(contentId);
         if (!startedMeanwhile.isEmpty()) {
-            throw conflict("content '" + slug + "' had an app start while it was being deleted ("
+            throw conflict("an app started while this content was being deleted ("
                 + String.join(", ", startedMeanwhile) + "); nothing was deleted, try again");
         }
     }
 
     // ------------------------------------------------------------------ internals
 
+    /**
+     * Reserves a path for this content, refusing anything already taken or nested.
+     *
+     * <p>The uniqueness check spans retired paths as well as live ones. The nesting check has to
+     * be a query rather than a constraint, because it is a relationship between rows.
+     */
+    private void claimPath(UUID contentId, String path, String key) {
+        List<String> clashes = jdbc.queryForList("""
+            SELECT path_key FROM skald.content_path
+            WHERE path_key = ? OR path_key LIKE ? || '/%' OR ? LIKE path_key || '/%'
+            """, String.class, key, key, key);
+
+        for (String other : clashes) {
+            if (other.equals(key)) {
+                throw conflict("path '" + path + "' is already in use, or was used by content "
+                    + "that has since been deleted; retired paths stay reserved so that they can "
+                    + "never point at different content");
+            }
+            throw conflict("path '" + path + "' conflicts with '" + other
+                + "': content owns its whole subtree, so one path cannot sit inside another");
+        }
+
+        try {
+            jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) "
+                + "VALUES (?, ?, ?)", path, key, contentId);
+        } catch (DataIntegrityViolationException e) {
+            // The check above is advisory; the unique index decides. Mapping the violation here
+            // is what makes a conflict the documented answer for whoever loses a race.
+            throw conflict("path '" + path + "' is already in use");
+        }
+    }
+
+    private String normaliseOrBad(String path) {
+        try {
+            return ContentPath.normalise(path);
+        } catch (IllegalArgumentException e) {
+            throw bad(e.getMessage());
+        }
+    }
+
     /** Spec ids of this content's versions that currently have a proxy, in any state. */
-    private List<String> liveSpecIds(String slug) {
-        Set<String> ids = Set.copyOf(jdbc.queryForList("""
-            SELECT ? || '--v' || v.version FROM skald.content_version v
-            JOIN skald.content c ON c.id = v.content_id WHERE c.slug = ?
-            """, String.class, slug, slug));
+    private List<String> liveSpecIds(UUID contentId) {
+        Set<String> ids = jdbc.queryForList(
+                "SELECT version FROM skald.content_version WHERE content_id = ?",
+                Integer.class, contentId).stream()
+            .map(v -> ContentSpecRepository.specId(contentId, v))
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
         return proxyService.getAllProxies().stream()
             .map(Proxy::getSpecId)
@@ -297,30 +368,41 @@ public class ContentAdminService {
      *
      * <p>Auditing here rather than in {@link #activate} is deliberate: adding a version
      * activates it by default, so auditing per endpoint would leave that activation — a real
-     * change to what users are served — unrecorded. The audit trail follows the state change.
+     * change to what users are served — unrecorded.
      */
-    private void setActiveVersion(String slug, int version) {
+    private void setActiveVersion(UUID contentId, int version) {
         jdbc.update("""
             UPDATE skald.content c SET active_version_id = v.id, updated_at = now()
             FROM skald.content_version v
-            WHERE v.content_id = c.id AND v.version = ? AND c.slug = ?
-            """, version, slug);
-        audit("content.activate", slug, Map.of("version", String.valueOf(version)));
+            WHERE v.content_id = c.id AND v.version = ? AND c.id = ?
+            """, version, contentId);
+        audit("content.activate", contentId, Map.of("version", String.valueOf(version)));
     }
 
-    private ContentSummary requireContent(String slug) {
-        ContentSummary summary = findSummary(slug);
-        if (summary == null) {
-            throw notFound("no content with slug '" + slug + "'");
+    private ContentSummary requireContent(UUID contentId) {
+        try {
+            return jdbc.queryForObject(SELECT_SUMMARY + " WHERE c.id = ?", this::toSummary, contentId);
+        } catch (EmptyResultDataAccessException e) {
+            throw notFound("no content with id " + contentId);
         }
-        return summary;
     }
 
-    private ContentSummary findSummary(String slug) {
-        return list().stream().filter(c -> c.slug().equals(slug)).findFirst().orElse(null);
+    private ContentSummary toSummary(ResultSet rs, int rowNum) throws SQLException {
+        UUID id = (UUID) rs.getObject("id");
+        Integer activeVersion = (Integer) rs.getObject("active_version");
+        return new ContentSummary(
+            id.toString(),
+            rs.getString("path"),
+            rs.getString("title"),
+            rs.getString("owner"),
+            rs.getString("type"),
+            rs.getString("visibility"),
+            activeVersion,
+            (activeVersion == null) ? null : ContentSpecRepository.specId(id, activeVersion),
+            versions(rs.getArray("versions")));
     }
 
-    private static List<Integer> versions(java.sql.Array array) throws java.sql.SQLException {
+    private static List<Integer> versions(Array array) throws SQLException {
         if (array == null) {
             return List.of();
         }
@@ -333,14 +415,17 @@ public class ContentAdminService {
     }
 
     /**
-     * Append-only record of every mutation. The table has existed since task 2 and nothing has
-     * written to it; filling it in as the write path is built is far cheaper than retrofitting
-     * an audit trail over endpoints that already ship (CLAUDE.md security invariants).
+     * Append-only record of every mutation.
+     *
+     * <p>The subject is the content UUID, never the path. The path is mutable, so identifying
+     * the subject by it would orphan every row written before a rename with no way to join old
+     * to new — the trail would silently stop being one. The path travels in the detail as a
+     * human-readable label.
      */
-    private void audit(String action, String slug, Map<String, String> detail) {
+    private void audit(String action, UUID contentId, Map<String, String> detail) {
         String json;
         try {
-            json = objectMapper.writeValueAsString(detail);
+            json = objectMapper.writeValueAsString(new HashMap<>(detail));
         } catch (JsonProcessingException e) {
             // Serialising a Map<String,String> cannot fail, but losing the mutation because the
             // audit row could not be written would be worse than losing the detail.
@@ -350,7 +435,7 @@ public class ContentAdminService {
         jdbc.update("""
             INSERT INTO skald.audit_event (actor, action, subject_type, subject_id, detail_json)
             VALUES (?, ?, 'content', ?, ?::jsonb)
-            """, actor(), action, slug, json);
+            """, actor(), action, contentId.toString(), json);
     }
 
     private String actor() {

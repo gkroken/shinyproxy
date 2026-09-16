@@ -291,3 +291,86 @@ both clients tail them.
 
 **Rejected:** an RStudio Addin and a VS Code/Positron extension in v1. Revisit if the CLI
 and R package prove to be the adoption barrier — which is a thing to measure, not assume.
+
+---
+
+## ADR-0011 — Content identity and content address are separate
+
+**Date:** 2026-09-16 · **Status:** accepted · **Amends:** WORKPLAN-REGISTRY decision 4, ADR-0008
+
+Spine #1 derived the ContainerProxy spec id from a publisher-chosen slug: `<slug>--v<n>`.
+A review of the finished track found that wrong in two independent ways, and the second
+one only became visible because the first was being fixed.
+
+**It made the spec id reusable.** `content_version` is `ON DELETE CASCADE`, and version
+numbers were allocated per content row, so deleting content and re-creating it under the
+same slug produced `<slug>--v1` again. ContainerProxy's `ProxyAccessControlService`
+memoises authorization per `(sessionId, specId)` with no invalidation path, so the new
+content inherited the old content's cached decisions. Reproduced on the dev stack: a user
+with no ACL entry on the new content opened it and started a container from a warm session,
+while a fresh session was correctly refused. The inverse also reproduced — a cached deny
+locking out someone the new content did grant.
+
+**It made the URL immutable.** `Proxy` persists only the spec id and ContainerProxy
+re-resolves it, so renaming a slug would have orphaned every running container — the
+ADR-0008 failure, self-inflicted. A publisher-settable URL is a requirement, and it is
+incompatible with deriving a durable identifier from it.
+
+**Decision.**
+
+```
+ProxySpec.id      c<content.id as 32 hex>--v<n>    opaque, immutable, never reused
+content_path      publisher-settable, renameable, its own rules
+```
+
+`--v<n>` and its reasoning are unchanged; only what precedes it is. At most 45 characters,
+inside the 63-character Kubernetes label limit.
+
+This also removes review finding F4 by construction rather than by a check: the write path
+used to compare a publisher's slug against configured YAML spec ids and compared only the
+bare slug, so publishing `probe` produced `probe--v1` and captured an admin's configured
+`probe--v1`. The namespaces are now disjoint.
+
+**It does not fix the authorization cache**, which remains ADR-0001's fork question for
+spine #4. It removes the id-reuse path into it.
+
+**Path rules.**
+
+1. All content under one prefix, `/c/<path>`. Not root-with-a-denylist, where a future
+   platform route would silently steal a published URL.
+2. At most 3 segments, each slug-shaped. A path may not be a strict prefix of another:
+   content owns its whole subtree, so that case is undecidable at request time and is
+   refused at publish time.
+3. A rename retires the old path, which is kept forever and redirects (301). Deleted
+   content's paths stay reserved and answer **410 Gone** — never 404, and never a redirect
+   to whoever takes the name next, which would be this ADR's own bug at the URL layer. The
+   history row must survive its content row, so the foreign key is `ON DELETE SET NULL` and
+   **not** a cascade; a cascade would delete the reservation along with the content and the
+   path would quietly become available again.
+4. ASCII only, matched case-insensitively with the publisher's capitalisation preserved.
+   Uniqueness is enforced on a normalised key across live paths *and* history. The
+   normalisation is pinned to ASCII in the application and the column is `COLLATE "C"`,
+   because `lower()` is collation-dependent — under a Turkish collation `'I'` lower-cases to
+   a dotless `'ı'` — so a `lower(path)` index would mean different things on different
+   installations.
+5. Unauthenticated requests redirect to login preserving the destination, so a shared link
+   works after signing in. Authenticated but not permitted returns **404, not 403**: it is
+   non-leaking and consistent with the index, which already hides content a user may not
+   see. Path resolution ends in the same `canAccess` the `/app` route uses.
+
+**Deferred, not decided: whether a reserved path can ever be reclaimed.** "Never
+reassignable" is the v1 default, not a principle, and it should not be written into this
+ADR as one. The case it blocks is not typos — those get renamed, and the old path
+redirects — but "published it, it was wrong, deleted it, want to republish under the same
+name", which is common on a self-service platform. Going from never to sometimes is
+additive, so living with the strict default now costs nothing later. When it lands (spine
+#3/#4): the previous owner reclaims their own retired path without an admin, anyone else
+needs one, both audited. The gate exists for inheriting *someone else's* audience — an
+`all_authenticated` page at the finance team's retired report URL, which every stale
+bookmark then lands on — not for reusing your own name.
+
+**Note for whoever builds that: releasing a path does not re-open the cache hole, and it
+needs no cache-invalidation step.** That hole was spec-id reuse. Ids are now UUID-derived,
+so content at a reclaimed path has a different id and a different cache key, and nothing
+caches on the path at all. A mechanism built for a problem that no longer exists is one
+nobody maintains correctly.

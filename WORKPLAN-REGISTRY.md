@@ -94,6 +94,15 @@ error, at the moment someone can still act on it.
 
 **4. The `ProxySpec` id is version-qualified; the URL is not.**
 
+> **SUPERSEDED in part by ADR-0011 (2026-09-16).** The `--v<n>` suffix and every reason for
+> it below still hold. What changed is the part before it: the id was `<slug>--v<n>`, derived
+> from a publisher-chosen name, and a review of the finished track showed that made the id
+> **reusable** — delete content, re-create it under the same slug, and the new content
+> inherited the old one's cached authorization decisions, reproduced live. It also made the
+> URL immutable, because renaming would have orphaned every running container. The id is now
+> `c<content.id as 32 hex>--v<n>`, and the URL is a separate, renameable `content_path`. Read
+> ADR-0011 before the text below, which describes the original scheme.
+
 `Proxy` persists `specId` and re-resolves it at stop time, so a spec id must stay valid
 for as long as any container references it. Therefore:
 
@@ -540,9 +549,24 @@ and stops, and is invisible to everyone else — **with no restart**. A containe
 version N keeps working and stops cleanly after N+1 is activated and after a rollback.
 Upstream tests stay 44/44 and `dev/smoke.sh` stays green with its new checks.
 
-**Met, 2026-09-16.** 94/94 tests (44 upstream + 50 ours), `dev/smoke.sh` 31/31,
-`dev/acl-live.sh` 19/19. Tasks 5 and 7 still need the Opus 5 review the standing rule in
-`WORKPLAN.md` requires before merge, because they touch ACL evaluation and a write path.
+**Met, then reviewed and reworked, 2026-09-16.** The Opus 5 review the standing rule
+requires found seven issues, one of them a live authorization bypass. Post-rework: 119/119
+tests, `dev/smoke.sh` 37/37 (re-runnable — verified twice in a row), `dev/acl-live.sh` 18/18
+(was reported as 19/19 with three checks that could not fail).
+
+| # | Finding | Outcome |
+|---|---|---|
+| F1 | Delete + re-create reused the spec id, so a warm session inherited cached access to different content. Reproduced live: a user with no ACL row opened the app and started a container | **Fixed** — ids are now UUID-derived (ADR-0011); paths are reserved, closing it a second time independently |
+| F2 | `audit()` hand-rolled JSON; any control character rolled back the whole mutation as a 500 | **Fixed** — Jackson |
+| F3 | check-then-insert races surfaced as 500, not the documented 409 | **Fixed** — row lock plus duplicate-key mapping; the delete race is narrowed, not eliminated, and says so |
+| F4 | The YAML-collision check compared the bare slug, so `probe` could capture a configured `probe--v1` | **Closed by construction** — the namespaces are now disjoint |
+| F5 | `dev/acl-live.sh` counted three assertions that could not fail | **Fixed** — the same anti-pattern this project had already been bitten by once |
+| F6 | Mutation results recorded as test counts, stale as soon as a later task added tests | **Fixed** — they now name the assertion each mutation trips |
+| F7 | The Design section claimed #1 ships the `content_env` encryption path; it ships only the table | **Corrected** |
+
+The review also confirmed, independently, the things worth confirming: the ADR-0008 table is
+right, the deny assertions are not vacuous, `hasLiveProxy`'s startup ordering holds, and the
+CSRF defence covers all three form-capable content types.
 
 **What spine #2 inherits, none of it in the original plan:**
 
