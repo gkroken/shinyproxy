@@ -33,6 +33,8 @@ import eu.openanalytics.containerproxy.spec.expression.SpelField;
 import eu.openanalytics.containerproxy.model.spec.ISpecExtension;
 import eu.openanalytics.shinyproxy.ShinyProxySpecExtension;
 import eu.openanalytics.shinyproxy.external.ExternalAppSpecExtension;
+import eu.openanalytics.containerproxy.service.ProxyService;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -94,7 +96,7 @@ public class ContentSpecRepository {
 
     private static final String SELECT_COLUMNS =
         "SELECT c.slug, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json, " +
-            "acl.acl_users, acl.acl_groups ";
+            "acl.acl_users, acl.acl_groups, (v.id = c.active_version_id) AS is_active ";
 
     private static final String SELECT_ACTIVE = SELECT_COLUMNS + """
         FROM skald.content c
@@ -133,8 +135,11 @@ public class ContentSpecRepository {
     private record CachedSpec(String fingerprint, ProxySpec spec) {
     }
 
-    public ContentSpecRepository(JdbcTemplate jdbc) {
+    private final ObjectProvider<ProxyService> proxyService;
+
+    public ContentSpecRepository(JdbcTemplate jdbc, ObjectProvider<ProxyService> proxyService) {
         this.jdbc = jdbc;
+        this.proxyService = proxyService;
     }
 
     /** The active version of every content item, as ProxySpecs. */
@@ -142,7 +147,21 @@ public class ContentSpecRepository {
         return jdbc.query(SELECT_ACTIVE, specRowMapper());
     }
 
-    /** Any version, active or superseded. Returns null when the id is not ours or not found. */
+    /**
+     * The active version, or a superseded one that still has live proxies. Null otherwise.
+     *
+     * <p>ADR-0008 requires superseded versions to stay resolvable "while their containers live",
+     * and both halves of that matter. Resolving them is what keeps a running container visible
+     * to its owner across an activate and a rollback. <b>Not</b> resolving them once nothing is
+     * running is what keeps activation meaningful: without this condition, any permitted user
+     * could start any historical version forever from a bookmarked {@code /app/<slug>--v<n>}
+     * URL, so publishing a fix would never retire the version it fixed. Verified against the
+     * live stack before this condition existed — v1 was absent from the index and still started
+     * a container.
+     *
+     * <p>The active version short-circuits before the proxy store is consulted, so the hot path
+     * — every {@code canAccess} call resolves a spec — costs nothing extra.
+     */
     public ProxySpec findSpec(String specId) {
         if (specId == null) {
             return null;
@@ -151,9 +170,43 @@ public class ContentSpecRepository {
         if (!matcher.matches()) {
             return null;
         }
-        List<ProxySpec> found = jdbc.query(SELECT_ONE, specRowMapper(),
+        List<ResolvedSpec> found = jdbc.query(SELECT_ONE,
+            (ResultSet rs, int rowNum) -> new ResolvedSpec(rs.getBoolean("is_active"), toProxySpec(rs)),
             matcher.group(1), Integer.parseInt(matcher.group(2)));
-        return found.isEmpty() ? null : found.get(0);
+
+        if (found.isEmpty()) {
+            return null;
+        }
+        ResolvedSpec resolved = found.get(0);
+        if (resolved.active()) {
+            return resolved.spec();
+        }
+        return hasLiveProxy(specId) ? resolved.spec() : null;
+    }
+
+    private record ResolvedSpec(boolean active, ProxySpec spec) {
+    }
+
+    /**
+     * Whether any proxy currently references this spec id, in any state.
+     *
+     * <p>{@code ObjectProvider} rather than a direct injection because {@code ProxyService}
+     * depends on the spec provider, which depends on this repository. Deferring the lookup to
+     * call time breaks the construction cycle; a failure to resolve it is treated as "nothing
+     * is running", which is the fail-closed answer and can only happen before the context is
+     * ready, when there are no user requests to serve anyway.
+     */
+    private boolean hasLiveProxy(String specId) {
+        try {
+            ProxyService proxyService = this.proxyService.getIfAvailable();
+            if (proxyService == null) {
+                return false;
+            }
+            return proxyService.getAllProxies().stream()
+                .anyMatch(proxy -> specId.equals(proxy.getSpecId()));
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** True when a content item with this slug exists, used to reject slug collisions on write. */

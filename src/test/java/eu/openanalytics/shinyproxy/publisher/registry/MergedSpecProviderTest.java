@@ -186,8 +186,18 @@ public class MergedSpecProviderTest {
             "changed content must be rebuilt");
     }
 
+    /**
+     * ADR-0008 is conditional, and this covers the half that has no containers.
+     *
+     * <p>The previous version of this test asserted that a superseded version stays resolvable
+     * "while its containers live" — with nothing running. That assertion never matched its own
+     * stated intent, and it was encoding a real hole: any permitted user could start any
+     * historical version forever from a bookmarked {@code /app/<slug>--v<n>} URL, so publishing
+     * a fix never retired the version it fixed. {@code VersionResolvabilityTest} covers the
+     * other half, with a container actually alive.
+     */
     @Test
-    public void onlyTheActiveVersionIsListedButSupersededVersionsStayResolvable() {
+    public void aSupersededVersionWithNothingRunningIsNeitherListedNorResolvable() {
         publish("rollme", "alice", 1, "registry:5000/rollme:1");
         publish("rollme", "alice", 2, "registry:5000/rollme:2");
 
@@ -195,10 +205,20 @@ public class MergedSpecProviderTest {
         Assertions.assertTrue(listed.contains("rollme--v2"), "the active version should be listed");
         Assertions.assertFalse(listed.contains("rollme--v1"), "a superseded version must not be listed");
 
-        // ADR-0008: ProxyService re-resolves the spec of a running proxy when stopping it, so
-        // v1 must stay resolvable or containers started on it break at shutdown.
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v1"),
-            "a superseded version must stay resolvable while its containers live");
+        Assertions.assertNotNull(specProvider.getSpec("rollme--v2"),
+            "the active version must resolve");
+        Assertions.assertNull(specProvider.getSpec("rollme--v1"),
+            "a superseded version with no running container must not resolve, or activation "
+                + "would never retire anything");
+
+        // ...and rolling back makes it resolvable again, because it is active again.
+        jdbc.update("""
+            UPDATE skald.content c SET active_version_id = v.id
+            FROM skald.content_version v
+            WHERE v.content_id = c.id AND v.version = 1 AND c.slug = 'rollme'
+            """);
+        Assertions.assertNotNull(specProvider.getSpec("rollme--v1"));
+        Assertions.assertNull(specProvider.getSpec("rollme--v2"));
     }
 
     @Test

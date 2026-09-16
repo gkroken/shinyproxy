@@ -154,8 +154,10 @@ public class ContentAdminControllerTest {
             Assertions.assertEquals(200, rollback.code(), body(rollback));
         }
         Assertions.assertEquals(List.of("rollme--v1"), registryIds(), "rollback did not take effect");
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v2"),
-            "ADR-0008: the rolled-back-from version must stay resolvable");
+        Assertions.assertNotNull(specProvider.getSpec("rollme--v1"), "the active version resolves");
+        Assertions.assertNull(specProvider.getSpec("rollme--v2"),
+            "with nothing running on it, the rolled-back-from version must stop resolving — "
+                + "otherwise rollback would not actually retire v2");
     }
 
     @Test

@@ -7,9 +7,11 @@ and what this plan builds — is the **publishing and automation layer**.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Current status (2026-09-15):** **spine #0 DONE** on branch `skald` (commit `ead6352`).
-`make dev` brings the stack up; `dev/smoke.sh` is 15/15 including a real container start;
-upstream tests 44/44. **NEXT = #1**, starting with the lazy-dispatcher fix.
+**Current status (2026-09-16):** **spine #0 and #1 DONE** on branch `skald`.
+`make dev` brings the stack up; `dev/smoke.sh` is 31/31 including a real container start and
+publishing with no restart; `dev/acl-live.sh` is 19/19; tests are 94/94 (44 upstream + 50
+ours). **NEXT = #2** (bundles + builds). Tasks 5 and 7 of #1 still need their Opus 5 review
+before merge.
 
 Re-verified at the start of #1 on a torn-down-and-rebuilt stack. `dev/smoke.sh` was
 **14/15**, not 15/15, and its stop check could never fail — two real bugs in the script,
@@ -114,24 +116,35 @@ that cost time are in `WORKPLAN-DEVSTACK.md`.
 
 The architectural bet. Everything after this assumes it holds.
 
-- [ ] **First commit: the dispatcher fix.** Replace `proxyDispatcherService` with a lazy
-      implementation that falls back to the default dispatcher for unknown spec ids.
-      Proven by a test that starts an app added *after* boot. Do this before any schema
-      work — if it does not hold, the whole plan changes shape.
-- [ ] Flyway + PostgreSQL. Tables: `content`, `content_version`, `content_acl`,
-      `content_env`, `audit_event`.
-- [ ] DB-backed `IProxySpecProvider` merged with YAML specs. **YAML specs stay read-only
-      and admin-owned** — a publisher can never shadow or edit one.
-- [ ] `content_acl` + visibility (`acl_only` | `all_authenticated` | `anonymous`)
-      projected into a synthesized `AccessControl`. Groups come from the existing auth
-      backends, unchanged.
-- [ ] **Superseded versions stay resolvable** while their containers live
-      (`ProxyService.java:536` re-resolves the spec at stop time).
-- [ ] Admin-only endpoint to insert content. No publishing API or UI yet.
-- [ ] Deny-case tests: wrong group, revoked ACL, anonymous against `acl_only`.
+- [x] **First commit: the dispatcher fix.** `LazyProxyDispatcherService` falls back to the
+      default dispatcher for unknown spec ids, proven by a test that starts an app added
+      *after* boot. **ADR-0001 holds.**
+- [x] Flyway + PostgreSQL. Tables: `content`, `content_version`, `content_acl`,
+      `content_env`, `audit_event`, in a dedicated `skald` schema.
+- [x] DB-backed spec provider merged with YAML specs — as a **subclass** of
+      `ShinyProxySpecProvider`, not a sibling bean; ShinyProxy injects the concrete class in
+      three places. YAML specs stay read-only and admin-owned; collisions are refused on write.
+- [x] `content_acl` + visibility projected into a synthesized `AccessControl`.
+      **`anonymous` is refused, not implemented** — ContainerProxy rejects anonymous principals
+      before access control is evaluated, so no projection can grant them. Designed into #5.
+- [x] **Superseded versions stay resolvable while their containers live** — and stop
+      resolving once nothing is running, which is what keeps activation able to retire code.
+      (The old note here said the spec is re-resolved "at stop time"; it is not. See ADR-0008.)
+- [x] Admin-only endpoints to create, version, activate, roll back and delete content. No
+      publishing API or UI. No ACL or visibility writes, deliberately — see below.
+- [x] Deny-case tests: wrong group, revoked ACL, anonymous against `acl_only`, shadowing a
+      YAML spec, a non-admin against every write endpoint, and a retired version.
 
-**Done when:** an app inserted via the admin endpoint appears for permitted users only,
-starts and stops, and disappears for others — with no restart.
+**Done:** content created through the admin endpoint appears for permitted users only, starts,
+serves and stops, and is invisible to everyone else — with no restart. 94/94 tests,
+`dev/smoke.sh` 31/31, `dev/acl-live.sh` 19/19. Details and the four things #2 onwards inherit
+are in `WORKPLAN-REGISTRY.md`.
+
+**The one decision this track deferred rather than took:** ContainerProxy caches authorization
+per session with no invalidation path, so a revoked grant never reaches a session that is
+already using the app. Task 7 shipped without ACL or visibility writes to keep that dormant.
+**Spine #4 adds sharing and must answer ADR-0001's fork question first** — a share button whose
+revocation silently fails is worse than no share button.
 
 ---
 

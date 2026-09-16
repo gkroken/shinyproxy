@@ -202,7 +202,23 @@ originally imagined, not better.
 
 **Consequence for spine #1 task 7.** `content_version` is `ON DELETE CASCADE` from
 `content`, so deleting a content item takes its versions with it. The write path must refuse
-to delete a content item or version that still has live proxies.
+to delete a content item or version that still has live proxies. *Done: `/admin/content`
+refuses such a delete with 409.*
+
+**Second correction, 2026-09-16 (task 8). "While their containers live" is a condition, and
+the implementation was ignoring it.** `ContentSpecRepository.findSpec` resolved *any* version
+unconditionally, which is broader than this ADR has ever said. The consequence was found by
+driving the dev stack: with v2 active and nothing running on v1, `/app/<slug>--v1` returned
+200 and the proxy API started a real container on v1. Activation and rollback therefore
+controlled *discovery* but not *execution* — so publishing a fix never retired the version it
+fixed, and any permitted user could keep starting a superseded version from a bookmarked URL
+forever.
+
+`findSpec` now resolves a version only when it is **active** or **still has live proxies**,
+which is what this ADR always specified. The active version short-circuits before the proxy
+store is consulted, so the hot path is unchanged. Three existing tests had encoded the old
+behaviour and were rewritten; one of them asserted a superseded version stays resolvable
+"while its containers live" with nothing running, which never matched its own stated intent.
 
 **Decision:** the spec provider resolves any version that still has live containers, not
 only the active one. Rollback and activation never invalidate a spec id in use. Tested in

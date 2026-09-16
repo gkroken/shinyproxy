@@ -24,8 +24,13 @@ package eu.openanalytics.shinyproxy.publisher.registry;
 
 import eu.openanalytics.containerproxy.ContainerProxyApplication;
 import eu.openanalytics.containerproxy.model.spec.ProxySpec;
+import eu.openanalytics.containerproxy.service.ProxyAccessControlService;
 import eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
+import okhttp3.MediaType;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,8 +39,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
@@ -70,6 +79,7 @@ public class VersionResolvabilityTest {
     private static JdbcTemplate jdbc;
     private static ShinyProxySpecProvider specProvider;
     private static ShinyProxyClient client;
+    private static ProxyAccessControlService accessControl;
 
     @BeforeAll
     public static void beforeAll() {
@@ -91,6 +101,7 @@ public class VersionResolvabilityTest {
         jdbc = app.getBean(JdbcTemplate.class);
         specProvider = app.getBean("shinyProxySpecProvider", ShinyProxySpecProvider.class);
         client = new ShinyProxyClient(USER, PORT);
+        accessControl = app.getBean(ProxyAccessControlService.class);
     }
 
     @AfterAll
@@ -135,8 +146,11 @@ public class VersionResolvabilityTest {
 
         Assertions.assertEquals(List.of("rollme--v1"), registryIds(),
             "rollback should put v1 back in the listing");
-        Assertions.assertNotNull(specProvider.getSpec("rollme--v2"),
-            "the rolled-back-from version must still resolve too");
+        // v2 is now superseded AND has no container of its own, so it must stop resolving:
+        // that is what keeps activation able to retire a version. v1, which the live container
+        // is on, is active again here and covered by the assertions above.
+        Assertions.assertNull(specProvider.getSpec("rollme--v2"),
+            "a superseded version with nothing running on it must not stay resolvable");
 
         Assertions.assertTrue(proxyIds().contains(proxyId),
             "the running proxy disappeared from the user's own list after rollback");
@@ -199,6 +213,92 @@ public class VersionResolvabilityTest {
             "precondition: the spec resolves again");
         Assertions.assertFalse(proxyIds().contains(proxyId),
             "the proxy is still running — the stop with an unresolvable spec did not take effect");
+    }
+
+    /**
+     * The hole this condition was added to close, at the level a user would exploit it.
+     *
+     * <p>Before {@code findSpec} required a live container, a superseded version was absent from
+     * the index but still fully startable from {@code /app/<slug>--v<n>} or the proxy API —
+     * confirmed against the running dev stack, where v1 started a real container while v2 was
+     * active. That made activation control discovery but not execution, so publishing a fix
+     * never retired the version it fixed.
+     */
+    @Test
+    public void aSupersededVersionWithNothingRunningCannotBeStarted() throws IOException {
+        publish("retired", 1);
+        publish("retired", 2);
+
+        Assertions.assertEquals(List.of("retired--v2"), registryIds(), "precondition: v2 is active");
+        Assertions.assertTrue(proxyIds().isEmpty(), "precondition: nothing is running");
+
+        int status = startStatus("retired--v1");
+        Assertions.assertTrue(status >= 400,
+            "a retired version was startable (HTTP " + status + "); activation must retire code, "
+                + "not just hide it from the index");
+        Assertions.assertTrue(proxyIds().isEmpty(), "a container was started on a retired version");
+
+        // The active version is of course still startable.
+        Assertions.assertEquals(201, startStatus("retired--v2"),
+            "the active version must still start");
+        proxyIds().forEach(client::stopProxy);
+    }
+
+    /**
+     * WORKPLAN-REGISTRY.md decision 4: "Superseded versions carry the same ACL as the content
+     * item, not a snapshot." Never tested until now, and only testable with a container alive —
+     * a superseded version with nothing running no longer resolves at all, so there would be
+     * nothing to evaluate an ACL against.
+     *
+     * <p>The point is that an old version is not a way to keep access someone has lost. A
+     * snapshotted ACL would mean revoking a grant leaves the revoked user able to reach
+     * whichever version they were granted on.
+     */
+    @Test
+    public void aSupersededVersionUsesTheContentsCurrentAclNotASnapshot() {
+        publish("acl-ver", 1);
+        grantTo("acl-ver", "bob");
+
+        String proxyId = client.startProxy("acl-ver--v1");
+        Assertions.assertNotNull(proxyId, "precondition: a container is alive on v1");
+        try {
+            publish("acl-ver", 2);
+            ProxySpec superseded = specProvider.getSpec("acl-ver--v1");
+            Assertions.assertNotNull(superseded, "precondition: v1 resolves, its container lives");
+
+            Assertions.assertTrue(accessControl.canAccess(user("bob"), superseded),
+                "precondition: bob was granted access to the content");
+
+            jdbc.update("DELETE FROM skald.content_acl WHERE principal = 'bob'");
+
+            Assertions.assertFalse(
+                accessControl.canAccess(user("bob"), specProvider.getSpec("acl-ver--v1")),
+                "a superseded version kept a revoked grant — the ACL was snapshotted, so an old "
+                    + "version would be a way to retain access after it is taken away");
+        } finally {
+            client.stopProxy(proxyId);
+        }
+    }
+
+    private static Authentication user(String name) {
+        return new UsernamePasswordAuthenticationToken(name, "n/a", List.of(new SimpleGrantedAuthority("users")));
+    }
+
+    private static void grantTo(String slug, String principal) {
+        jdbc.update("""
+            INSERT INTO skald.content_acl (content_id, principal_type, principal)
+            SELECT id, 'user', ? FROM skald.content WHERE slug = ?
+            """, principal, slug);
+    }
+
+    private static int startStatus(String specId) throws IOException {
+        Request request = new Request.Builder()
+            .post(RequestBody.create("{}", MediaType.get("application/json; charset=utf-8")))
+            .url(client.getBaseUrl() + "/api/proxy/" + specId)
+            .build();
+        try (Response response = client.newCall(request).execute()) {
+            return response.code();
+        }
     }
 
     // ------------------------------------------------------------------- fixtures

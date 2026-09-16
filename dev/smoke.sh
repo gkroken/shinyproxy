@@ -151,6 +151,57 @@ else
   bad "app 'hello' did not start"
 fi
 
+echo "== runtime-added content (spine #1: publish with NO restart) =="
+# The whole architectural bet in one block. Alice creates content through the admin endpoint
+# while the platform is running, then runs it; bob is denied. Nothing restarts between the
+# insert and the run -- if this needed a restart, the plan would have been wrong.
+#
+# Uses /admin/content rather than SQL on purpose: a smoke test that reaches around the API it
+# is meant to exercise proves the database works, not the product.
+SLUG="smoke-runtime"
+jstatus() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+curl -s -o /dev/null -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$SLUG"   # from a previous run
+
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d "{\"slug\":\"$SLUG\",\"owner\":\"alice\",\"type\":\"shiny\"}" "$BASE/admin/content")
+check "alice creates content over the admin API" "$code" 201
+
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$SLUG/versions")
+check "alice adds and activates version 1" "$code" 201
+
+# No restart happens anywhere between the lines above and below.
+check "alice sees the new app immediately"  "$(lists_spec "$ALICE" "$SLUG--v1")" yes
+check "alice may open the new app"          "$(opens_spec "$ALICE" "$SLUG--v1")" 200
+check "bob does NOT see alice's new app"    "$(lists_spec "$BOB" "$SLUG--v1")"   no
+check "bob is denied alice's new app"       "$(opens_spec "$BOB" "$SLUG--v1")"   403
+check "bob cannot reach the admin API"      "$(jstatus -b "$BOB" -c "$BOB" "$BASE/admin/content")" 403
+
+# Refusals that protect decisions taken in spine #1, each proved live rather than asserted.
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"slug":"hello","owner":"alice","type":"shiny"}' "$BASE/admin/content")
+check "a slug that shadows a YAML spec is refused" "$code" 409
+
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"slug":"smoke-public","owner":"alice","type":"shiny","visibility":"anonymous"}' "$BASE/admin/content")
+check "visibility 'anonymous' is refused"          "$code" 400
+
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -d 'slug=smoke-csrf&owner=alice&type=shiny' "$BASE/admin/content")
+check "a form-encoded POST is refused (CSRF)"      "$code" 415
+
+# A retired version must stop being startable, or activation never retires anything.
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"openanalytics/shinyproxy-demo"}' "$BASE/admin/content/$SLUG/versions")
+check "alice activates version 2"                  "$code" 201
+check "the retired version is no longer listed"    "$(lists_spec "$ALICE" "$SLUG--v1")" no
+check "the retired version cannot be opened"       "$(opens_spec "$ALICE" "$SLUG--v1")" 403
+check "the active version can be opened"           "$(opens_spec "$ALICE" "$SLUG--v2")" 200
+
+code=$(jstatus -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$SLUG")
+check "alice deletes the content"                  "$code" 200
+check "the deleted app is gone from the index"     "$(lists_spec "$ALICE" "$SLUG--v2")" no
+
 rm -f "$ALICE" "$BOB"
 echo
 echo "passed $PASS, failed $FAIL"

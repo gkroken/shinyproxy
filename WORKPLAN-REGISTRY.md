@@ -390,7 +390,13 @@ Visibility projects into a synthesized `AccessControl`:
       **Constraint this hands to task 7:** `content_version` is `ON DELETE CASCADE` from
       `content`, so deleting a content item takes its versions with it and orphans any live
       proxy. The write path must refuse to delete a content item or version that still has
-      live proxies.
+      live proxies. *Done in task 7 — 409.*
+
+      **Incomplete, and corrected in task 8.** This task tested one direction only: that
+      superseded versions *stay* resolvable. It never tested that they are not
+      **over**-resolvable, and they were — `findSpec` ignored ADR-0008's "while their
+      containers live" condition entirely, so a retired version stayed startable from a
+      bookmarked URL. Found by driving the dev stack, not by the tests written here.
 - [x] **7. Admin-only content endpoints.** `/admin/content` — list, create, add version,
       activate (rollback is the same call with an older version), delete. 92/92 tests green
       (81 + 11 new). No publisher API, no UI.
@@ -436,11 +442,53 @@ Visibility projects into a synthesized `AccessControl`:
       `ProxyAccessControlService.canAccess(auth, specId)` null-checks the resolved spec *before*
       consulting the cache. **Sharing lands in spine #4 and owns that decision**, which is where
       the ADR-0001 fork question finally has to be answered.
-- [ ] 8. Deny-case tests: wrong group, revoked ACL, anonymous against `acl_only`, and a
-      publisher attempting to shadow a YAML spec.
-- [ ] 9. Extend `dev/smoke.sh` with a runtime-added app: alice inserts it via the admin
-      endpoint, alice runs it, bob is denied — **with no restart between insert and run**.
-      Mutation-test the new deny assertions the way the existing ones now are.
+- [x] **8. Deny-case tests.** 94/94 green. The four the plan named were already covered by
+      tasks 5 and 7, so this was run as a gap audit rather than as new authorship — and the
+      audit is what earned its keep.
+
+      | Named case | Covered by |
+      |---|---|
+      | Wrong group | `ContentAccessControlTest.aUserInTheWrongGroupIsDenied` |
+      | Revoked ACL | `revokingAnAclDeniesOnTheNextEvaluation`, plus the cache characterisation test |
+      | Anonymous against `acl_only` | `anonymousIsDeniedAclOnlyContent` |
+      | Shadowing a YAML spec | `ContentAdminControllerTest.aSlugThatShadowsAConfiguredSpecIsRefused` (write) and `MergedSpecProviderTest.configuredSpecsAreAuthoritativeOverTheRegistry` (read) |
+
+      **Gap 1, and the reason this task mattered: a retired version was still startable.**
+      `findSpec` ignored ADR-0008's "while their containers live" condition and resolved *any*
+      version. Found by driving the dev stack, not by reading: with v2 active and nothing
+      running on v1, `/app/<slug>--v1` returned 200 and the proxy API started a real container.
+      Activation controlled discovery but not execution, so publishing a fix never retired the
+      version it fixed. `findSpec` now resolves a version only when it is active or still has
+      live proxies; the active version short-circuits before the proxy store is consulted, so
+      the hot path is unchanged. Three existing tests had encoded the old behaviour and were
+      rewritten — including one whose message said "while its containers live" while running no
+      containers, which never matched its own stated intent. Mutation-tested both ways.
+
+      **Gap 2: decision 4's "current ACL, not a snapshot" had never been tested.** It is only
+      testable with a container alive, since a superseded version with nothing running no longer
+      resolves at all. `aSupersededVersionUsesTheContentsCurrentAclNotASnapshot` revokes a grant
+      while a container runs on the superseded version and asserts the revocation applies —
+      otherwise an old version would be a way to retain access after it is taken away.
+      Mutation-tested by freezing the ACL in the spec fingerprint.
+
+      **Known and deliberately not closed:** `audit_event` is documented as append-only but
+      nothing enforces it — any code holding the `JdbcTemplate` can delete rows, and the tests
+      do. Enforcement (a rule or a restricted role) belongs with the audit work in spine #9.
+- [x] **9. `dev/smoke.sh` covers runtime-added content.** 31/31, up from 15/15.
+
+      Alice creates content through `/admin/content` while the platform runs, adds a version,
+      opens it, and bob is denied — **with no restart anywhere between the insert and the run**.
+      It goes through the admin API rather than SQL on purpose: a smoke test that reaches around
+      the API it is meant to exercise proves the database works, not the product.
+
+      The new block also proves live what unit tests assert: a slug shadowing a YAML spec is
+      refused (409), `visibility: anonymous` is refused (400), a form-encoded POST is refused
+      (415), and activating v2 makes v1 stop being openable while v2 opens fine.
+
+      **The new deny assertions were mutation-tested against live data**, the way the existing
+      ones are. Granting bob through SQL flips his 403 to 200; rolling back to v1 flips the
+      retired-version 403 to 200 and makes v2 return 403 instead. They track real state rather
+      than constants.
 
 ## Risks and open questions
 
@@ -477,6 +525,23 @@ An app inserted through the admin endpoint appears for permitted users only, sta
 and stops, and is invisible to everyone else — **with no restart**. A container started on
 version N keeps working and stops cleanly after N+1 is activated and after a rollback.
 Upstream tests stay 44/44 and `dev/smoke.sh` stays green with its new checks.
+
+**Met, 2026-09-16.** 94/94 tests (44 upstream + 50 ours), `dev/smoke.sh` 31/31,
+`dev/acl-live.sh` 19/19. Tasks 5 and 7 still need the Opus 5 review the standing rule in
+`WORKPLAN.md` requires before merge, because they touch ACL evaluation and a write path.
+
+**What spine #2 inherits, none of it in the original plan:**
+
+1. **The ACL cache decision is now unavoidable.** Task 7 shipped without ACL or visibility
+   writes precisely to keep it dormant. Spine #4 adds sharing, and a share button whose
+   revocation does not reach a warm session is worse than no share button, so ADR-0001's fork
+   question has to be answered before that ships. `docs/UPSTREAM_CHANGES.md` section B.
+2. **Anonymous access is designed but not built** — `visibility: anonymous` is stored by the
+   schema, refused on write, and denied on read. The route to it needs no ContainerProxy
+   change; the design and its blast radius are a spine #5 item in `WORKPLAN.md`.
+3. **Registry content gets no metrics** (blocker 2, `Micrometer` registers per-spec metrics at
+   startup only). True from the moment this track landed; deferred to #9.
+4. **`audit_event` is append-only by documentation only.** Nothing enforces it. #9.
 
 ## Next agenda item
 
