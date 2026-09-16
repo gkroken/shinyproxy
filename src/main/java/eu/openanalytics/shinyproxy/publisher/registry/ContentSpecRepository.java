@@ -38,6 +38,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collections;
@@ -69,16 +70,41 @@ public class ContentSpecRepository {
 
     private static final int DEFAULT_PORT = 3838;
 
-    private static final String SELECT_ACTIVE = """
-        SELECT c.slug, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json
-        FROM skald.content c
-        JOIN skald.content_version v ON v.id = c.active_version_id
+    /**
+     * Aggregates {@code content_acl} into two arrays alongside the content row, so that
+     * listing every spec stays one round trip instead of one per item.
+     *
+     * <p>{@code array_agg} is ordered so the projected {@link AccessControl} — and therefore
+     * the spec fingerprint below — is stable across calls; without it PostgreSQL may return
+     * the principals in any order and every request would look like a change.
+     *
+     * <p>No filter on {@code permission}: {@code viewer} and {@code editor} both grant the
+     * right to open the content, and differ only in what the holder may change.
+     */
+    private static final String ACL_JOIN = """
+        LEFT JOIN LATERAL (
+            SELECT array_agg(a.principal ORDER BY a.principal)
+                     FILTER (WHERE a.principal_type = 'user')  AS acl_users,
+                   array_agg(a.principal ORDER BY a.principal)
+                     FILTER (WHERE a.principal_type = 'group') AS acl_groups
+            FROM skald.content_acl a
+            WHERE a.content_id = c.id
+        ) acl ON TRUE
         """;
 
-    private static final String SELECT_ONE = """
-        SELECT c.slug, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json
+    private static final String SELECT_COLUMNS =
+        "SELECT c.slug, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json, " +
+            "acl.acl_users, acl.acl_groups ";
+
+    private static final String SELECT_ACTIVE = SELECT_COLUMNS + """
+        FROM skald.content c
+        JOIN skald.content_version v ON v.id = c.active_version_id
+        """ + ACL_JOIN;
+
+    private static final String SELECT_ONE = SELECT_COLUMNS + """
         FROM skald.content c
         JOIN skald.content_version v ON v.content_id = c.id
+        """ + ACL_JOIN + """
         WHERE c.slug = ? AND v.version = ?
         """;
 
@@ -146,9 +172,16 @@ public class ContentSpecRepository {
         int version = rs.getInt("version");
         String specId = specId(slug, version);
 
+        String[] aclUsers = principals(rs, "acl_users");
+        String[] aclGroups = principals(rs, "acl_groups");
+
+        // The ACL is part of the fingerprint: granting or revoking a principal must produce a
+        // NEW ProxySpec instance, or the memoised one below would keep serving the old
+        // AccessControl and a revocation would never reach the evaluator at all.
         String fingerprint = String.join("\u0000",
             slug, rs.getString("owner"), rs.getString("type"), rs.getString("visibility"),
-            String.valueOf(version), rs.getString("image"));
+            String.valueOf(version), rs.getString("image"),
+            String.join(",", aclUsers), String.join(",", aclGroups));
 
         CachedSpec cached = specCache.get(specId);
         if (cached != null && cached.fingerprint().equals(fingerprint)) {
@@ -164,7 +197,8 @@ public class ContentSpecRepository {
         ProxySpec spec = ProxySpec.builder()
             .id(specId)
             .displayName(slug)
-            .accessControl(accessControlFor(rs))
+            .accessControl(AccessControlProjector.project(
+                slug, rs.getString("visibility"), rs.getString("owner"), aclUsers, aclGroups))
             .containerSpecs(Collections.singletonList(containerSpec))
             .build();
 
@@ -178,16 +212,23 @@ public class ContentSpecRepository {
     }
 
     /**
-     * Interim access control: the owner, and nobody else.
+     * Reads one of the aggregated {@code content_acl} arrays.
      *
-     * <p>Full projection of {@code content_acl} and the visibility modes is task 5. Until then
-     * this fails closed on purpose — an unfinished ACL layer that defaults to "visible" is how
-     * content leaks, and a default of "owner only" cannot.
+     * <p>Returns an empty array rather than null for content with no ACL rows, so that
+     * {@link AccessControlProjector} never has to distinguish "no grants" from "column
+     * absent" — the two mean the same thing and only one of them should exist in code.
      */
-    private AccessControl accessControlFor(ResultSet rs) throws SQLException {
-        AccessControl accessControl = new AccessControl();
-        accessControl.setUsers(new String[]{rs.getString("owner")});
-        return accessControl;
+    private static String[] principals(ResultSet rs, String column) throws SQLException {
+        Array array = rs.getArray(column);
+        if (array == null) {
+            return new String[0];
+        }
+        try {
+            String[] values = (String[]) array.getArray();
+            return (values == null) ? new String[0] : values;
+        } finally {
+            array.free();
+        }
     }
 
     /**

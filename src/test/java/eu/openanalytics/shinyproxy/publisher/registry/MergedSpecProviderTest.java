@@ -33,9 +33,15 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -219,6 +225,55 @@ public class MergedSpecProviderTest {
         Assertions.assertNull(specProvider.getSpec("nope--v1"));
         Assertions.assertNull(specProvider.getSpec("' OR 1=1 --v1"));
         Assertions.assertNull(specProvider.getSpec(null));
+    }
+
+    /**
+     * Risk 4 in WORKPLAN-REGISTRY.md: {@code ShinyProxySpecProvider} caches the whole
+     * max-instances map per session for 60 minutes, on the stated assumption that it "never
+     * changes during the lifetime of a session". Publishing breaks that assumption, and the
+     * failure is not cosmetic — {@code BaseController.validateMaxInstances} unboxes the
+     * {@code Integer} this returns, so a missing entry is a 500 on every attempt to open the
+     * new content, for the rest of that session.
+     *
+     * <p>The request and security contexts are set up by hand because the cache is only
+     * consulted when there is a session id to key on; without them the parent recomputes every
+     * time and this test would pass with the override removed.
+     */
+    @Test
+    public void contentPublishedAfterASessionCachedItsMaxInstancesIsStillResolvable() {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.getSession(true);
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
+        SecurityContextHolder.getContext().setAuthentication(
+            new UsernamePasswordAuthenticationToken("demo", "n/a", List.of()));
+
+        try {
+            // Warm the per-session cache while the registry is empty, exactly as opening the
+            // index page would.
+            Map<String, Integer> beforePublishing = specProvider.getMaxInstances();
+            Assertions.assertTrue(beforePublishing.containsKey("boot-spec"),
+                "precondition: the configured spec is in the cached map");
+            Assertions.assertFalse(beforePublishing.containsKey("late--v1"),
+                "precondition: the content does not exist yet");
+
+            publish("late", "alice", 1, "registry:5000/late:1");
+
+            ProxySpec spec = specProvider.getSpec("late--v1");
+            Assertions.assertNotNull(spec, "precondition: the content became a spec");
+
+            Assertions.assertNotNull(specProvider.getMaxInstancesForSpec(spec),
+                "content published mid-session has no max-instances entry, so "
+                    + "BaseController.validateMaxInstances would throw on unboxing null");
+            Assertions.assertEquals(1, specProvider.getMaxInstancesForSpec(spec),
+                "registry content should fall back to proxy.default-max-instances");
+
+            // The configured specs must survive the overlay unchanged.
+            Assertions.assertEquals(beforePublishing.get("boot-spec"),
+                specProvider.getMaxInstances().get("boot-spec"));
+        } finally {
+            SecurityContextHolder.clearContext();
+            RequestContextHolder.resetRequestAttributes();
+        }
     }
 
     /** Creates content (if needed), adds a version, and makes it the active one. */

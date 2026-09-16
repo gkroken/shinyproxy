@@ -110,8 +110,18 @@ for as long as any container references it. Therefore:
 - The user-facing URL carries the slug; `content.active_version_id` says which version it
   means today. Rollback moves that pointer and invalidates nothing.
 
-Superseded versions carry the **same ACL as the content item**, not a snapshot — so a
-revoked ACL takes effect immediately even for someone holding a running old version.
+Superseded versions carry the **same ACL as the content item**, not a snapshot.
+
+> **Correction, task 5.** The original sentence continued "— so a revoked ACL takes effect
+> immediately even for someone holding a running old version." The first half holds: the
+> projection reads the content item's current ACL for every version. The conclusion does
+> not. `ProxyAccessControlService` memoises the decision per `(sessionId, specId)` with no
+> invalidation path and an `expireAfterAccess` expiry, so a session that keeps using the app
+> refreshes the cached answer indefinitely and the revocation never reaches it. Task 7 must
+> decide this before it ships an ACL write path; `docs/UPSTREAM_CHANGES.md` section B has
+> the detail. `V1__content_registry.sql` carries the same over-claim in a comment and is
+> **deliberately left alone**: it has been applied, and Flyway checksums migration files, so
+> editing even a comment fails validation on every existing database.
 
 **5. Flyway owns the schema, and the `DataSource` is declared explicitly.**
 `DataSourceAutoConfiguration` is excluded upstream, so `spring.datasource.*` does nothing
@@ -278,14 +288,66 @@ Visibility projects into a synthesized `AccessControl`:
       `ContentSpecRepository.slugExists` is there for it, and `getSpecs()` additionally filters
       and loudly logs a collision that somehow reached the database rather than picking a
       winner silently.
-- [ ] 5. `AccessControlProjector` — ACL + visibility into a synthesized `AccessControl`,
-      including the `anonymous` mapping, verified by deny tests rather than by reading.
-      Replaces the fail-closed owner-only placeholder task 4 ships. Per the standing rule in
-      `WORKPLAN.md` this diff gets an **Opus 5 review before merge** regardless of who writes
-      it, because it touches ACL evaluation.
+- [x] **5. `AccessControlProjector` + the `maxInstancesCache` fix.** Replaces task 4's
+      fail-closed owner-only placeholder. 79/79 tests green (53 + 26 new). Still needs its
+      **Opus 5 review before merge** per the standing rule in `WORKPLAN.md`.
 
-      **Do the `maxInstancesCache` work here too** (risk 4). The two interact: both are about
-      a session holding a stale view — one of what the user may see, one of which specs exist.
+      `acl_only` and `all_authenticated` project as designed. Both `viewer` and `editor` ACL
+      grants convey the right to open the content — they differ in what may be changed, which
+      the write path enforces, not the projection.
+
+      **The `anonymous` mapping does not work, and the Design table above is wrong about it.**
+      The table said it "requires verifying how ContainerProxy evaluates an unauthenticated
+      principal". It was verified, and the answer is that it cannot be granted at all:
+      `AccessControlEvaluationService.checkAccess:56-61` rejects an
+      `AnonymousAuthenticationToken` whenever the auth backend has authorization, **before**
+      users, groups or the expression are consulted. No `AccessControl` we could synthesize
+      grants an anonymous visitor. `anonymous` therefore projects to deny-everyone with a loud
+      log, and task 7 must reject the value on write. A second problem outlives that one:
+      every anonymous visitor is the principal `"anonymousUser"`, so on container-backed
+      content they would share one container and one max-instances budget. Anonymous access
+      belongs with spine #5's static documents, which have no container per viewer. Full
+      reasoning in `docs/UPSTREAM_CHANGES.md` section A.
+
+      **The projection's real hazard is the empty object, not the exception.** An
+      `AccessControl` with no users, no groups and no expression means *unrestricted* —
+      `hasNoAccessControl()` returns true and every authenticated principal is let through. So
+      every branch of the projector emits an explicit positive or negative statement, and
+      `AccessControlProjectorTest.noInputEverProducesAnUnrestrictedAccessControl` sweeps every
+      visibility/owner combination to prove none of them produces one.
+
+      **The ACL is part of the spec fingerprint.** `ContentSpecRepository` memoises ProxySpec
+      instances (task 4's instance-stability requirement), so without this a revoked grant
+      would keep being served from the memoised object. Mutation-tested: dropping the ACL from
+      the fingerprint fails five tests.
+
+      **Risk 4 was real and is fixed.** `MergedSpecProvider.getMaxInstances()` now recomputes
+      the registry portion of the map on every call and overlays it on the parent's
+      per-session cache, which is left alone because it is still correct for YAML specs.
+      Confirmed by mutation: with the override reduced to `return super.getMaxInstances()`,
+      content published mid-session has no entry and `BaseController.validateMaxInstances`
+      would throw on unboxing null. The parent's `PROP_DEFAULT_MAX_INSTANCES` is private, so
+      the constant is duplicated rather than the upstream file widened.
+
+      **A second stale-view cache was found, and it is the more serious one.** Risk 4 named
+      only `maxInstancesCache`. `ProxyAccessControlService` (ContainerProxy) memoises
+      authorization decisions per `(sessionId, specId)` with **no invalidation path at all**,
+      and because the expiry is `expireAfterAccess` rather than `expireAfterWrite`, a session
+      that keeps using an app refreshes it indefinitely — so a revoked ACL never takes effect
+      for that session, not merely "within 60 minutes". Fixing it means changing
+      ContainerProxy, i.e. a second override and an ADR-0001 decision, and no ACL write path
+      exists until task 7, so it is deliberately not fixed here.
+      `ContentAccessControlTest.anAclRevocationDoesNotReachASessionThatIsAlreadyUsingTheApp`
+      demonstrates it against a real `RequestContextHolder` rather than asserting it, and
+      asserts the contrast — the same revocation *is* honoured for a session that has not yet
+      asked, which is why a smoke test that logs in fresh cannot see it.
+      **Task 7 must decide this before it ships a write path.** See
+      `docs/UPSTREAM_CHANGES.md` section B.
+
+      Every deny assertion was mutation-tested. Making `acl_only` return an empty
+      `AccessControl` fails nine tests; making `anonymous` downgrade to `acl_only` fails two;
+      dropping the ACL from the fingerprint fails five. A deny test that has never been seen
+      to fail is not evidence.
 - [ ] 6. Version resolvability (ADR-0008): `getSpec()` resolves superseded versions that
       still have live containers. Tested with a container held alive **across** an
       activate and a rollback, asserting it still stops cleanly.
@@ -312,7 +374,11 @@ Visibility projects into a synthesized `AccessControl`:
 3. **`Micrometer` still registers per-spec metrics at startup only** (blocker 2). Every
    piece of runtime-added content in #1 will have no metrics, silently. That is accepted
    and deferred to #9, but it becomes true the moment this track lands.
-4. **`ShinyProxySpecProvider.maxInstancesCache` is per-session with a 60-minute TTL**, built
+4. ~~**`ShinyProxySpecProvider.maxInstancesCache` is per-session with a 60-minute TTL**~~
+   **Fixed in task 5**, and it turned out to be the smaller half of the problem —
+   `ProxyAccessControlService` caches authorization decisions the same way with no
+   invalidation path, which task 7 must decide on. Original text:
+   `ShinyProxySpecProvider.maxInstancesCache` is per-session with a 60-minute TTL, built
    on the comment "this never changes during the lifetime of a session"
    (`ShinyProxySpecProvider.java:99-105`). Publishing breaks that assumption: content created
    after a user's session started is absent from that session's cached map, so

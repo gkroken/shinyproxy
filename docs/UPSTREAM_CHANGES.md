@@ -4,13 +4,17 @@ Everything this fork does that is not purely additive, and why. Apache 2.0 §4(b
 modified upstream files to be marked as modified; this file is the index of those, plus of
 the behavioural overrides that change upstream without editing it.
 
-Two categories, kept separate on purpose:
+Three categories, kept separate on purpose:
 
 - **Modified upstream files** — a diff against an Open Analytics source file. Each one is a
   permanent merge cost. There are none yet, and the aim is to keep it that way.
 - **Behavioural overrides** — our own code, in our own package, that changes how an
   upstream component behaves at runtime. Cheaper than a diff, but still a coupling to
   upstream internals, so each one is recorded here with what it depends on.
+- **Upstream behaviour we depend on but have not changed** — places where an upstream
+  decision constrains what Skald can do, and we designed around it rather than overriding
+  it. Recorded because the reasoning is invisible in the code that accommodates it, and
+  because each one is a candidate for the fork conversation if it ever has to change.
 
 ## Modified upstream files
 
@@ -105,3 +109,77 @@ attached.
 **Test:** `MergedSpecProviderTest`, against real PostgreSQL via Testcontainers — the schema
 uses `jsonb`, `gen_random_uuid()`, CHECK constraints and a circular foreign key, none of which
 an in-memory stand-in would exercise honestly.
+
+## Upstream behaviour we depend on but have not changed
+
+Neither of these is an override. They are ContainerProxy behaviours that Skald's design now
+rests on, recorded because both are load-bearing, both are invisible in a passing test
+suite, and changing either would require a second ContainerProxy override and therefore an
+ADR-0001 decision. Found in spine #1 task 5, against ContainerProxy 1.2.4.
+
+### A. Anonymous principals are rejected before access control is evaluated
+
+`AccessControlEvaluationService.checkAccess` (lines 56-61) returns `false` for an
+`AnonymousAuthenticationToken` whenever `authBackend.hasAuthorization()`, **before** users,
+groups or the expression are consulted. Every backend except `none` returns true there.
+
+**Consequence.** `content.visibility = 'anonymous'` cannot be delivered by projecting an
+`AccessControl` — no value of that object grants an unauthenticated visitor. The route side
+is not the obstacle: `UISecurityConfig` registers `/app/{specId}/**` with
+`.access(canAccessOrHasExistingProxy)` *before* `WebSecurityConfig` adds
+`anyRequest().fullyAuthenticated()`, so the spec ACL is already the only gate.
+
+`AccessControlProjector` therefore denies `anonymous` outright and logs it, rather than
+downgrading it to `all_authenticated`. `ContentAccessControlTest
+.anonymousIsDeniedEvenByTheMostPermissiveProjection` pins the upstream behaviour; if it ever
+starts failing, anonymous content became implementable through projection alone.
+
+**A second problem, which changing the above would not solve.**
+`AnonymousAuthenticationToken.getName()` is `"anonymousUser"` for *every* visitor. Proxies
+are keyed by user id and `proxy.default-max-instances` is 1, so anonymous visitors to a
+container-backed app would share one container — one visitor's Shiny session state visible
+to the next — or be refused. Anonymous access is therefore natural for spine #5's static
+documents, which are served from object storage with no container per viewer, and needs a
+per-visitor identity answer before it can mean anything for `shiny` / `plumber` / `fastapi`.
+
+### B. Authorization decisions are cached per session, with no way to invalidate them
+
+`ProxyAccessControlService` (lines 55-65, 96-102) memoises `canAccess` per
+`(sessionId, specId)`:
+
+```java
+// cache authorization results for (at least) 60 minutes, since this never changes during the lifetime of a session
+authorizationCache = Caffeine.newBuilder()
+    .scheduler(Scheduler.systemScheduler())
+    .expireAfterAccess(60, TimeUnit.MINUTES)
+    .build();
+```
+
+The field is private, there is no eviction method, and nothing in ContainerProxy listens for
+session destruction. `ProxyService.getUserSpecs():174` (the index listing) and
+`UISecurityConfig:73` (the `/app/{specId}/**` gate) both route through it.
+
+**Consequence.** The comment is true of YAML ACLs, which are fixed at boot, and false for
+published content. Because the expiry is `expireAfterAccess` and not `expireAfterWrite`,
+every request refreshes the entry — so for a session that keeps using the app, **a revoked
+ACL never takes effect at all**, not merely "within 60 minutes". Granting access is stale in
+the same way, which presents as "the app someone shared with me doesn't appear until I log
+out".
+
+This is inherited, not introduced: an admin editing `application.yml` has always had the
+same window. What changes with self-service publishing is that ACL changes become frequent
+and user-driven rather than rare and admin-driven.
+
+**Why it is not fixed here.** The fix is roughly ten lines inside `ProxyAccessControlService`
+— make the cache invalidatable and call it from the ACL write path — but that is a second
+ContainerProxy override, which ADR-0001 says means forking ContainerProxy. No ACL write path
+exists until spine #1 task 7, so nothing can currently go stale. The decision belongs with
+that task, taken against evidence rather than reasoning:
+`ContentAccessControlTest.anAclRevocationDoesNotReachASessionThatIsAlreadyUsingTheApp`
+demonstrates the staleness by driving a real `RequestContextHolder`, and asserts the
+*contrast* — the same revocation is honoured immediately for a session that has not yet
+asked, which is why a smoke test that logs in fresh cannot see the hole.
+
+**Note for whoever writes the deny tests in task 8.** Unit tests do not hit this cache:
+`canAccess` bypasses it entirely when there is no request context. A deny test written the
+obvious way will pass while the hole is open.
