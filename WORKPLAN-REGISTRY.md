@@ -391,7 +391,51 @@ Visibility projects into a synthesized `AccessControl`:
       `content`, so deleting a content item takes its versions with it and orphans any live
       proxy. The write path must refuse to delete a content item or version that still has
       live proxies.
-- [ ] 7. Admin-only endpoint to insert/activate/roll back content. No publisher API, no UI.
+- [x] **7. Admin-only content endpoints.** `/admin/content` — list, create, add version,
+      activate (rollback is the same call with an older version), delete. 92/92 tests green
+      (81 + 11 new). No publisher API, no UI.
+
+      **Authorization is inherited, not written.** The path sits under `/admin`, which
+      `UISecurityConfig` already gates on `userService.isAdmin(...)`, so the endpoint adds no
+      security configuration at all — a second matcher would be a second place for an
+      authorization rule to drift. Proven by mutation: moving the controller to `/xadmin/content`
+      lets a non-admin list, create, version, activate and delete.
+
+      **The version number is assigned by the server**, not chosen by the caller. Rollback names
+      an existing version through the activate endpoint, so accepting one on write would buy
+      nothing and cost a class of gap/conflict validation.
+
+      **Refusals, each inherited from an earlier task:** slug shadowing a configured spec → 409
+      (decision 3; a registry spec id is always `<slug>--v<n>`, so a non-null lookup on the bare
+      slug can only be YAML); `visibility: anonymous` → 400 (task 5); delete with a live proxy →
+      409 (task 6, tested with a real container); plus slug format, unknown type, missing owner,
+      duplicate slug, and activating a version that does not exist.
+
+      **CSRF.** ShinyProxy protects exactly one route — `WebSecurityConfig:136` restricts CSRF to
+      `POST /login` — so a session-authenticated admin on a hostile page could otherwise be made
+      to submit a form here. Every content type an HTML form can produce is refused with 415.
+      That has **two independent guards**: `@RequestBody` binding (the only converter for these
+      records is Jackson's, which declares JSON alone) and an explicit `consumes`. Mutation
+      testing found that removing `consumes` alone does *not* break it — the first draft of the
+      javadoc claimed `consumes` was the mechanism, which was wrong — and that removing both
+      (binding with `@ModelAttribute`) lets a cross-site form create content, 201. The explicit
+      declaration is kept because the implicit guard depends on converter configuration nothing
+      in this repository owns. Re-declaring `http.csrf(...)` from the `ICustomSecurityConfig`
+      seam was rejected: that matcher is global and our seam runs after upstream sets it.
+
+      **Every mutation is audited** into `audit_event`, which had existed unused since task 2.
+      The audit sits on the state change, not the endpoint: `setActiveVersion` records
+      `content.activate`, so the activation implied by adding a version is recorded too. A test
+      caught that gap — the first version audited per endpoint and silently lost it.
+
+      **No ACL or visibility writes, deliberately** — signed off before implementation. Those
+      are the two mutations that would make ContainerProxy's per-session authorization cache a
+      live bug (`docs/UPSTREAM_CHANGES.md` section B). The operations this task does ship leave
+      it dormant: a new spec id has never been cached, activate and rollback do not change who
+      may see anything, and delete is safe because
+      `ProxyAccessControlService.canAccess(auth, specId)` null-checks the resolved spec *before*
+      consulting the cache. **Sharing lands in spine #4 and owns that decision**, which is where
+      the ADR-0001 fork question finally has to be answered.
 - [ ] 8. Deny-case tests: wrong group, revoked ACL, anonymous against `acl_only`, and a
       publisher attempting to shadow a YAML spec.
 - [ ] 9. Extend `dev/smoke.sh` with a runtime-added app: alice inserts it via the admin

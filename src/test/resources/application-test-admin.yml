@@ -1,0 +1,38 @@
+# Config for ContentAdminControllerTest.
+#
+# Two users in different roles, because the point of the admin endpoint is as much who is
+# REFUSED as who is served: adminuser is in a group listed under admin-groups, plainuser is
+# an ordinary authenticated user. ShinyProxyClient authenticates with username == password.
+#
+# boot-spec exists so the "a registry slug may not shadow a configured spec" refusal
+# (WORKPLAN-REGISTRY.md decision 3) has something real to collide with.
+
+spring:
+  session:
+    store-type: none
+  data:
+    redis:
+      repositories:
+        enabled: false
+
+proxy:
+  authentication: simple
+  container-backend: docker
+  heartbeat-timeout: -1
+  default-stop-proxy-on-logout: false
+
+  admin-groups:
+    - admins
+
+  users:
+    - name: adminuser
+      password: adminuser
+      groups: [admins]
+    - name: plainuser
+      password: plainuser
+      groups: [users]
+
+  specs:
+    - id: boot-spec
+      display-name: Present at startup
+      container-image: openanalytics/shinyproxy-integration-test-app:latest
