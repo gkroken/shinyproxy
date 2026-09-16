@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.admin;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.openanalytics.containerproxy.model.runtime.Proxy;
 import eu.openanalytics.containerproxy.service.ProxyService;
 import eu.openanalytics.containerproxy.service.UserService;
@@ -30,6 +32,7 @@ import eu.openanalytics.shinyproxy.publisher.registry.AccessControlProjector;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -93,17 +96,20 @@ public class ContentAdminService {
     private final ShinyProxySpecProvider specProvider;
     private final ProxyService proxyService;
     private final UserService userService;
+    private final ObjectMapper objectMapper;
 
     public ContentAdminService(JdbcTemplate jdbc,
                                ContentSpecRepository repository,
                                @Lazy ShinyProxySpecProvider specProvider,
                                @Lazy ProxyService proxyService,
-                               @Lazy UserService userService) {
+                               @Lazy UserService userService,
+                               ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.repository = repository;
         this.specProvider = specProvider;
         this.proxyService = proxyService;
         this.userService = userService;
+        this.objectMapper = objectMapper;
     }
 
     public List<ContentSummary> list() {
@@ -159,8 +165,15 @@ public class ContentAdminService {
             throw conflict("content '" + slug + "' already exists");
         }
 
-        jdbc.update("INSERT INTO skald.content (slug, owner, type, visibility) VALUES (?, ?, ?, ?)",
-            slug, owner, type, visibility);
+        // The slugExists check above is advisory: two concurrent creates both pass it and the
+        // unique constraint decides. Mapping that violation here is what makes 409 the documented
+        // answer in both cases rather than a 500 for whoever loses the race.
+        try {
+            jdbc.update("INSERT INTO skald.content (slug, owner, type, visibility) VALUES (?, ?, ?, ?)",
+                slug, owner, type, visibility);
+        } catch (DataIntegrityViolationException e) {
+            throw conflict("content '" + slug + "' already exists");
+        }
         audit("content.create", slug, Map.of("owner", owner, "type", type, "visibility", visibility));
 
         return findSummary(slug);
@@ -178,15 +191,28 @@ public class ContentAdminService {
         ContentSummary existing = requireContent(slug);
         String image = require(request.image(), "image");
 
+        // Serialise version allocation for this content item. Without the lock, two concurrent
+        // adds both read the same max(version) and the second violates content_version_unique;
+        // the caller saw a 500 rather than anything meaningful. Locking the content row is
+        // enough because every allocation for this item goes through it.
+        jdbc.queryForObject("SELECT id::text FROM skald.content WHERE slug = ? FOR UPDATE",
+            String.class, slug);
+
         Integer version = jdbc.queryForObject("""
             SELECT COALESCE(max(v.version), 0) + 1 FROM skald.content_version v
             JOIN skald.content c ON c.id = v.content_id WHERE c.slug = ?
             """, Integer.class, slug);
 
-        jdbc.update("""
-            INSERT INTO skald.content_version (content_id, version, image, created_by)
-            SELECT id, ?, ?, ? FROM skald.content WHERE slug = ?
-            """, version, image, actor(), slug);
+        try {
+            jdbc.update("""
+                INSERT INTO skald.content_version (content_id, version, image, created_by)
+                SELECT id, ?, ?, ? FROM skald.content WHERE slug = ?
+                """, version, image, actor(), slug);
+        } catch (DataIntegrityViolationException e) {
+            // Belt to the row lock's braces: if allocation ever races anyway, the caller gets
+            // the documented conflict rather than an unrecoverable error.
+            throw conflict("version " + version + " of '" + slug + "' already exists");
+        }
         audit("content.version.add", slug, Map.of("version", String.valueOf(version), "image", image));
 
         if (!Boolean.FALSE.equals(request.activate())) {
@@ -235,6 +261,18 @@ public class ContentAdminService {
 
         jdbc.update("DELETE FROM skald.content WHERE slug = ?", slug);
         audit("content.delete", slug, Map.of());
+
+        // Re-check before committing. A proxy can start between the check above and here, and
+        // no database lock can prevent that -- proxy state lives in ContainerProxy's store, not
+        // in PostgreSQL, so a row lock on content would serialise nothing. Re-checking inside
+        // the transaction turns "delete wins the race" into "delete loses it", which is the
+        // right way round: the residual window is between this check and the commit, and the
+        // cost of losing that one is a spurious 409 rather than a stranded container.
+        List<String> startedMeanwhile = liveSpecIds(slug);
+        if (!startedMeanwhile.isEmpty()) {
+            throw conflict("content '" + slug + "' had an app start while it was being deleted ("
+                + String.join(", ", startedMeanwhile) + "); nothing was deleted, try again");
+        }
     }
 
     // ------------------------------------------------------------------ internals
@@ -300,20 +338,19 @@ public class ContentAdminService {
      * an audit trail over endpoints that already ship (CLAUDE.md security invariants).
      */
     private void audit(String action, String slug, Map<String, String> detail) {
-        String json = detail.entrySet().stream()
-            .map(e -> "\"" + escape(e.getKey()) + "\":\"" + escape(e.getValue()) + "\"")
-            .reduce((a, b) -> a + "," + b)
-            .map(body -> "{" + body + "}")
-            .orElse("{}");
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(detail);
+        } catch (JsonProcessingException e) {
+            // Serialising a Map<String,String> cannot fail, but losing the mutation because the
+            // audit row could not be written would be worse than losing the detail.
+            json = "{}";
+        }
 
         jdbc.update("""
             INSERT INTO skald.audit_event (actor, action, subject_type, subject_id, detail_json)
             VALUES (?, ?, 'content', ?, ?::jsonb)
             """, actor(), action, slug, json);
-    }
-
-    private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private String actor() {

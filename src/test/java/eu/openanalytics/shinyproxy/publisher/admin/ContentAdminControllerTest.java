@@ -41,8 +41,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -336,6 +342,101 @@ public class ContentAdminControllerTest {
         // ...and once nothing is running, the same delete succeeds.
         try (Response r = delete(admin, "/admin/content/busy")) {
             Assertions.assertEquals(200, r.code(), body(r));
+        }
+    }
+
+    // ------------------------------------------------- robustness (review F2, F3)
+
+    /**
+     * F2: {@code audit()} hand-rolled its JSON and escaped only quote and backslash, so any
+     * control character produced invalid JSON, failed the {@code ?::jsonb} cast, and rolled the
+     * whole mutation back with an unrecoverable-error body. Fields reaching it are not all
+     * validated — {@code owner} and {@code image} are only checked for being non-blank, and the
+     * trim they get leaves embedded newlines intact.
+     */
+    @Test
+    public void controlCharactersInAuditedFieldsDoNotBreakTheWrite() throws IOException {
+        try (Response r = post(admin, "/admin/content",
+            "{\"slug\":\"ctrl\",\"owner\":\"al\\nice\",\"type\":\"shiny\"}")) {
+            Assertions.assertEquals(201, r.code(), body(r));
+        }
+        try (Response r = post(admin, "/admin/content/ctrl/versions",
+            "{\"image\":\"img\\nbad\"}")) {
+            Assertions.assertEquals(201, r.code(), body(r));
+        }
+
+        Assertions.assertTrue(slugs().contains("ctrl"), "the mutation was rolled back");
+        Assertions.assertEquals("al\nice", jdbc.queryForObject(
+            "SELECT detail_json->>'owner' FROM skald.audit_event WHERE action = 'content.create'",
+            String.class), "the audit detail must survive round-tripping through jsonb");
+        Assertions.assertEquals("img\nbad", jdbc.queryForObject(
+            "SELECT detail_json->>'image' FROM skald.audit_event WHERE action = 'content.version.add'",
+            String.class));
+    }
+
+    /**
+     * F3: create and addVersion were check-then-insert, so concurrent callers got 500s from the
+     * unique constraint instead of the 409 the API documents. Integrity was never at risk; the
+     * contract was.
+     */
+    @Test
+    public void concurrentCreatesOfOneSlugYieldOneCreatedAndTheRestConflict() throws Exception {
+        int callers = 6;
+        List<Integer> codes = inParallel(callers, () -> {
+            try (Response r = post(admin, "/admin/content",
+                "{\"slug\":\"racy\",\"owner\":\"adminuser\",\"type\":\"shiny\"}")) {
+                return r.code();
+            }
+        });
+
+        Assertions.assertEquals(1, codes.stream().filter(c -> c == 201).count(),
+            "exactly one caller should create it, got " + codes);
+        Assertions.assertEquals(callers - 1, codes.stream().filter(c -> c == 409).count(),
+            "every loser should get 409, got " + codes);
+        Assertions.assertEquals(1, slugs().stream().filter("racy"::equals).count());
+    }
+
+    @Test
+    public void concurrentVersionAddsAllSucceedWithDistinctVersions() throws Exception {
+        createContent("versioned");
+
+        int callers = 6;
+        List<Integer> codes = inParallel(callers, () -> {
+            try (Response r = post(admin, "/admin/content/versioned/versions",
+                "{\"image\":\"" + IMAGE + "\"}")) {
+                return r.code();
+            }
+        });
+
+        Assertions.assertTrue(codes.stream().allMatch(c -> c == 201 || c == 409),
+            "version allocation produced something other than 201/409: " + codes);
+        Assertions.assertEquals(codes.stream().filter(c -> c == 201).count(),
+            (long) jdbc.queryForObject("""
+                SELECT count(DISTINCT v.version) FROM skald.content_version v
+                JOIN skald.content c ON c.id = v.content_id WHERE c.slug = 'versioned'
+                """, Integer.class),
+            "every success must have allocated a distinct version");
+    }
+
+    private static List<Integer> inParallel(int callers, Callable<Integer> call) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        try {
+            CountDownLatch go = new CountDownLatch(1);
+            List<Future<Integer>> futures = new ArrayList<>();
+            for (int i = 0; i < callers; i++) {
+                futures.add(pool.submit(() -> {
+                    go.await();
+                    return call.call();
+                }));
+            }
+            go.countDown();
+            List<Integer> codes = new ArrayList<>();
+            for (Future<Integer> f : futures) {
+                codes.add(f.get(60, TimeUnit.SECONDS));
+            }
+            return codes;
+        } finally {
+            pool.shutdownNow();
         }
     }
 

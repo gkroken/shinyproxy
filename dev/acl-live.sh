@@ -28,7 +28,20 @@ ok()   { echo "  ok   $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL $1"; FAIL=$((FAIL+1)); }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2')"; fi; }
 
-sql() { $COMPOSE exec -T postgres psql -U skald -d skald -v ON_ERROR_STOP=1 -q -c "$1" >/dev/null; }
+# Aborts the run on a failed statement rather than letting setup failures masquerade as
+# passing assertions. ON_ERROR_STOP makes psql exit non-zero; without this check the script
+# carried on and reported "ok" for setup that had not happened.
+sql() {
+  if ! $COMPOSE exec -T postgres psql -U skald -d skald -v ON_ERROR_STOP=1 -q -c "$1" >/dev/null; then
+    echo "  !! SQL failed, aborting: $1" >&2
+    exit 1
+  fi
+}
+
+# Reports an observation without counting it as a passing assertion. Used where both outcomes
+# are informative and neither is a pass -- counting those inflates the total, which is the
+# 14/15-reported-as-15/15 failure this project has already been bitten by once.
+note() { echo "  --   $1"; }
 
 # Same browser flow as dev/smoke.sh.
 login() {
@@ -69,7 +82,8 @@ grant() { # slug type principal
 
 echo "== reset registry =="
 sql "DELETE FROM skald.content;"
-ok "registry emptied"
+check "registry is empty at the start" \
+  "$($COMPOSE exec -T postgres psql -U skald -d skald -t -A -c 'SELECT count(*) FROM skald.content;')" 0
 
 echo
 echo "== publish before login =="
@@ -78,7 +92,8 @@ publish shared-user    alice acl_only ; grant shared-user  user  bob
 publish shared-group   alice acl_only ; grant shared-group group viewers
 publish open-to-all    alice all_authenticated
 publish public-thing   alice anonymous
-ok "five content items inserted directly into PostgreSQL"
+check "five content items exist" \
+  "$($COMPOSE exec -T postgres psql -U skald -d skald -t -A -c 'SELECT count(*) FROM skald.content;')" 5
 
 ALICE=$(mktemp); BOB=$(mktemp)
 login alice "$ALICE" || exit 1
@@ -126,10 +141,12 @@ warm=$(opens_spec "$BOB" shared-user--v1)
 FRESH=$(mktemp); login bob "$FRESH" || exit 1
 fresh=$(opens_spec "$FRESH" shared-user--v1)
 check "a FRESH session is denied the revoked content" "$fresh" 403
+# An observation, not an assertion: both outcomes are worth knowing and neither is a failure,
+# so it is reported with note() and does NOT count towards the total.
 if [ "$warm" = "403" ]; then
-  ok "warm session also denied — the cache finding no longer reproduces, revisit UPSTREAM_CHANGES.md B"
+  note "warm session also denied — the cache finding no longer reproduces, revisit UPSTREAM_CHANGES.md B"
 else
-  ok "warm session still gets $warm — reproduces the documented cache limitation"
+  note "warm session still gets $warm — reproduces the documented cache limitation"
 fi
 
 rm -f "$ALICE" "$BOB" "$FRESH"

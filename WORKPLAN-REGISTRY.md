@@ -188,9 +188,15 @@ content_env      id, content_id, key, value_encrypted, is_secret
 audit_event      id, actor, action, subject_type, subject_id, detail_json, at
 ```
 
-`content_env.value_encrypted` is encrypted at rest with a key from the environment, never
-stored in the DB and never logged (CLAUDE.md security invariants). #1 creates the table
-and the encryption path; the publishing surface that fills it arrives in #3.
+`content_env.value_encrypted` is *intended* to be encrypted at rest with a key from the
+environment, never stored in the DB and never logged (CLAUDE.md security invariants).
+
+> **Correction (review finding F7).** This said #1 creates "the table and the encryption
+> path". #1 creates **only the table** — there is no encryption code anywhere under
+> `publisher/`, and nothing writes to `content_env`. The task list never promised the
+> encryption path, so nothing was skipped, but CLAUDE.md lists encrypt-at-rest as a
+> per-phase invariant and a later track reading the original sentence would have assumed a
+> path that does not exist. **Whoever first writes to `content_env` builds it.**
 
 Visibility projects into a synthesized `AccessControl`:
 
@@ -328,7 +334,8 @@ Visibility projects into a synthesized `AccessControl`:
       **The ACL is part of the spec fingerprint.** `ContentSpecRepository` memoises ProxySpec
       instances (task 4's instance-stability requirement), so without this a revoked grant
       would keep being served from the memoised object. Mutation-tested: dropping the ACL from
-      the fingerprint fails five tests.
+      the fingerprint fails `aSupersededVersionUsesTheContentsCurrentAclNotASnapshot` and
+      `revokingAnAclDeniesOnTheNextEvaluation`, among others.
 
       **Risk 4 was real and is fixed.** `MergedSpecProvider.getMaxInstances()` now recomputes
       the registry portion of the map on every call and overlays it on the parent's
@@ -353,10 +360,15 @@ Visibility projects into a synthesized `AccessControl`:
       **Task 7 must decide this before it ships a write path.** See
       `docs/UPSTREAM_CHANGES.md` section B.
 
-      Every deny assertion was mutation-tested. Making `acl_only` return an empty
-      `AccessControl` fails nine tests; making `anonymous` downgrade to `acl_only` fails two;
-      dropping the ACL from the fingerprint fails five. A deny test that has never been seen
-      to fail is not evidence.
+      Every deny assertion was mutation-tested, recorded by the assertion each mutation trips
+      rather than by a count — counts go stale the moment a later task adds a test, and a stale
+      number presented as evidence is worse than none (review finding F6, which caught exactly
+      that here). Making `acl_only` return an empty `AccessControl` trips
+      `aUserWithNoGrantIsDenied` (`expected false, got true`) and is named by
+      `noInputEverProducesAnUnrestrictedAccessControl`; making `anonymous` downgrade trips
+      `anonymousVisibilityDeniesEveryoneRatherThanDowngrading`; dropping the ACL from the
+      fingerprint trips `revokingAnAclDeniesOnTheNextEvaluation`. A deny test that has never
+      been seen to fail is not evidence.
 - [x] **6. Version resolvability (ADR-0008).** 81/81 tests green (79 + 2 new).
 
       **The capability was already there** — `ContentSpecRepository.findSpec` has resolved any
@@ -365,7 +377,9 @@ Visibility projects into a synthesized `AccessControl`:
       correction to why it matters. `VersionResolvabilityTest` holds a **real container** alive
       across an activate *and* a rollback and asserts it stays listed, stays reachable through
       the proxy, and then stops cleanly. Mutation-tested: pointing `SELECT_ONE` at
-      `active_version_id` fails it, and `MergedSpecProviderTest` with it.
+      `active_version_id` trips `aContainerSurvivesActivateAndRollbackAndStopsCleanly`.
+      (This originally also claimed `MergedSpecProviderTest` fails with it. That was true when
+      written and stale by the end of task 8, which rewrote that test — review finding F6.)
 
       **The recorded reason for ADR-0008 was wrong, in four documents.** All of them said
       `ProxyService.java:536` re-resolves `getSpec(proxy.getSpecId())` "when stopping a proxy".
