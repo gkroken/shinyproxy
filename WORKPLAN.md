@@ -7,11 +7,23 @@ and what this plan builds — is the **publishing and automation layer**.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Current status (2026-09-16):** **spine #0 and #1 DONE** on branch `skald`.
-`make dev` brings the stack up; `dev/smoke.sh` is 31/31 including a real container start and
-publishing with no restart; `dev/acl-live.sh` is 19/19; tests are 94/94 (44 upstream + 50
-ours). **NEXT = #2** (bundles + builds). Tasks 5 and 7 of #1 still need their Opus 5 review
-before merge.
+**Current status (2026-09-16):** **spine #0 and #1 DONE** on branch `skald`, reviewed and
+reworked. `make dev` brings the stack up; `dev/smoke.sh` is 47/47, including a real container
+start, publishing with no restart, and the full signed-out Keycloak round trip back to a
+shared link; `dev/acl-live.sh` is 18/18 (was recorded as 19/19, three of which could not
+fail); tests are 133/133. **NEXT = #2** (bundles + builds).
+
+The Opus 5 review the standing rule requires has happened, in two rounds. The first found a
+live authorization bypass — spec ids derived from a publisher-chosen slug were reusable, so
+deleting content and re-creating it under the same name handed the new content the old one's
+cached authorization decisions (ADR-0011). The second reviewed the fix and found the nesting
+rule did not hold under concurrency. Both are closed; the findings tables are in
+`WORKPLAN-REGISTRY.md`.
+
+**Not yet reviewed: the `/c/<path>` serving layer.** It was designed and written by the same
+session that reviewed the two rounds above, so the independence the standing rule is buying
+is absent for that commit specifically. It touches a write path's read side and an
+authentication boundary, so it wants a pass from someone who did not design it.
 
 Re-verified at the start of #1 on a torn-down-and-rebuilt stack. `dev/smoke.sh` was
 **14/15**, not 15/15, and its stop check could never fail — two real bugs in the script,
