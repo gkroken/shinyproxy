@@ -612,28 +612,36 @@ Cleanup uses the artifact ledger, grace periods and repeatable mark/recheck/dele
 **Retention policy, decided in Q3 on 2026-09-17. This table is the only authoritative
 statement; earlier proposals elsewhere in this document are superseded.** The earlier draft
 said failed artifacts were collectable after 24 hours, which would have destroyed evidence
-28 days before the decided policy allows, and let a successful build's logs live forever
-by attaching them to the version. A collector cannot be written against two policies.
+28 days before the decided policy allows, and let a successful build's logs live forever by
+attaching them to the version. A collector cannot be written against two policies.
 
 | Artifact | Retained | Clock starts |
 |---|---|---|
 | Incomplete upload (no committed receipt) | 1 hour | last write to the multipart upload |
 | Bundle of a **published** version | until the content is deleted | — |
 | Image of a **published** version | until the content is deleted | — |
-| Artifacts of a failed, cancelled or timed-out attempt | **30 days** | attempt reached its terminal status |
-| Logs of a failed, cancelled or timed-out attempt | **30 days** | attempt reached its terminal status |
-| Logs of a **successful** build | **90 days** | attempt reached its terminal status |
+| Artifacts of a `FAILED`, `CANCELLED`, `TIMED_OUT` or `INTERRUPTED` attempt | **30 days** | the attempt reached that terminal status |
+| **Build logs, whatever the outcome** — `SUCCEEDED` and every terminal alternative alike | **90 days** | the attempt reached its terminal status |
 | Unused dependency cache | 14 days | last cache hit |
 
-Two consequences of splitting those rows, both deliberate. A published version's **image
-and bundle are pinned indefinitely** while **its logs expire at 90 days**: the artifacts are
-what rollback needs and the logs are diagnostics, and treating them as one thing is what
-made the earlier draft retain logs forever. And a failed attempt's logs and artifacts expire
-**together at 30 days**, because a log that outlives the artifacts it describes invites
-someone to conclude the build is still recoverable.
+**Logs are retained for 90 days regardless of how the build ended.** An earlier revision of
+this table gave a failed attempt's logs 30 days so that they expired alongside its artifacts,
+on the reasoning that a log outliving its artifacts might imply the build is recoverable.
+That was a policy invented while implementing one, and it is exactly backwards: a failed
+build's log is the *more* valuable of the two, because it is the only record of why the
+failure happened, and nobody diagnoses a three-week-old failure from an image that was never
+produced. The decision on record is 90 days for build logs and 30 days for failed-build
+artifacts, and the two clocks are independent by design.
 
-Every retention clock starts at a **terminal status**, never at creation: a build that runs
-for six hours must not have its logs aged out from under it while it is still running.
+A published version's **image and bundle are pinned indefinitely** while its logs expire on
+the same 90-day clock as any other build's: the artifacts are what rollback needs, the logs
+are diagnostics, and treating them as one thing is what made the first draft retain logs
+forever.
+
+**Build** retention clocks start at a **terminal status**, never at creation, so a build that
+runs for six hours cannot have its logs aged out from under it while it is still running.
+That rule is about builds only — the multipart row is measured from its last write and the
+cache row from its last hit, because neither has a terminal status to measure from.
 
 The safety rule is not optional and is not a retention period: never collect retained
 versions, live-proxy images, nonterminal attempts, leased work or in-flight publication,
@@ -953,10 +961,13 @@ below are marked passed by this planning document.
       asserted cleanup, described in Done when. Include restart during build, failed build
       retry, log retention, orphan/multipart cleanup and real registry GC with a referenced
       old image protected. **Retention is asserted per row of the policy table above, on both
-      sides of each boundary** — a failed attempt's artifacts and logs still present at 29
-      days and collected at 31; a successful build's logs present at 89 and collected at 91;
-      a published version's image and bundle still present after both; a nonterminal attempt
-      never collected however old its clock would make it. "Cleanup ran" is not the assertion;
+      sides of each boundary, and the failed-attempt rows are asserted separately from the log
+      row because they are on different clocks** — a failed attempt's *artifacts* present at 29
+      days and collected at 31, while that same attempt's *logs* are still present at 31 and
+      survive to 89, being collected only at 91; a successful build's logs likewise present at
+      89 and collected at 91; a published version's image and bundle still present after all of
+      those; an `INTERRUPTED` attempt treated as terminal like the rest; and a nonterminal
+      attempt never collected however old its clock would make it. "Cleanup ran" is not the assertion;
       "cleanup collected exactly what the policy names, and nothing it protects" is. Re-run the extraction and isolation suite against the final
       integrated artifact; independent reviewer signs off changes since T5. Run
       `make build`, `make dev`, smoke, ACL, bundle live tests and `make test` anew.
