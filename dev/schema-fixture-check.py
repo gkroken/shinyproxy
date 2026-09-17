@@ -175,6 +175,28 @@ def check_path_rules_have_not_drifted():
     print()
 
 
+def check_semantic_fixtures_have_an_owning_rule():
+    """Every semantic-only fixture must be named by a rule in the plan.
+
+    These fixtures are the ones the schema deliberately accepts, so nothing in this runner
+    can fail when one of them is wrong -- by construction, they all "pass". That makes them
+    the easiest thing in the corpus to add and then forget, and a fixture nobody owns is
+    indistinguishable from a rule nobody implemented. Naming each one in the S-table is what
+    turns the group from a list of known gaps into a list of assigned ones.
+    """
+    print("== semantic rule coverage ==")
+    plan = pathlib.Path("WORKPLAN-BUNDLES.md").read_text(encoding="utf-8")
+    exp = load("dev/fixtures/manifests/expectations.json")
+    orphans = [n for n in exp["semantic_invalid"] if n not in plan]
+    if orphans:
+        fail("semantic fixtures with no owning rule in WORKPLAN-BUNDLES.md: %s"
+             % ", ".join(orphans))
+        return
+    print("  ok   all %d semantic-only fixtures are named by a rule in the plan"
+          % len(exp["semantic_invalid"]))
+    print()
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -219,6 +241,7 @@ print()
 for corpus in CORPORA:
     check_corpus(corpus)
 check_path_rules_have_not_drifted()
+check_semantic_fixtures_have_an_owning_rule()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")

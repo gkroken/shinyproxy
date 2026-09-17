@@ -301,6 +301,58 @@ error until their reviewed manifest branch/recipe exists. Future formats extend 
 versioned schemas, not a permissive `additionalProperties` escape hatch. Do not ship
 guessed Quarto/data/API field semantics that their owning tracks must later live with.
 
+### Semantic validation, and what the schema deliberately does not do
+
+JSON Schema decides the *shape* of a manifest. It cannot decide whether a path stays inside
+the payload, whether the entrypoint resolves, whether the inventory describes the bytes that
+actually arrived, or whether a `renv.lock` makes sense under a Python runtime. Those are the
+semantic validator's, and `dev/fixtures/manifests/expectations.json` already classifies
+eleven manifests as `semantic_invalid` — structurally valid documents the schema **must
+accept**, recorded so that "the schema accepted it" reads as expected rather than as a hole.
+
+This table gives every one of them an owning rule, and names the rules that have no fixture
+yet so the gap is visible rather than implied. A rule without a case is a rule nobody has
+watched fail.
+
+| # | Rule | Rejects | Fixture |
+|---|---|---|---|
+| S1 | Every `files[].path` resolves inside the payload root after normalisation | `../escape.txt`, and anything whose real target escapes | `path-traversal` |
+| S2 | No `.` or `..` segment, no empty segment, no trailing slash on a file | `a/./app.R` | `path-dot-segment` |
+| S3 | Inventory paths are unique after NFC normalisation and case folding | a repeated path; `App.R` beside `app.R` | `duplicate-inventory-path`; case and NFC cases **owed** |
+| S4 | A file entrypoint is a regular inventory member and matches its language's extension | Python naming a directory, or a path absent from `files` | `python-entrypoint-names-a-directory`, `python-entrypoint-absent` |
+| S5 | A directory entrypoint resolves through the inventory: `app.R`, or both `ui.R` and `server.R`, beneath it | R naming a file; a directory with neither layout; `ui.R` alone | `r-entrypoint-names-a-file`, `r-directory-without-layout`, `r-only-ui-no-server` |
+| S6 | `dependencies.path` is a regular inventory member | a lockfile named but not listed | `lockfile-absent-from-inventory` |
+| S7 | `dependencies.format` agrees with `runtime.language` | `pip-hashed` under an R runtime, or `renv` under Python | `language-format-disagreement` |
+| S8 | `type` is enabled by the recipe matrix, not merely registered | `quarto_static` before its recipe exists | `registered-but-unsupported-type` |
+| S9 | `type` equals the target `content.type` | a `shiny` bundle uploaded to `plumber` content | **owed** — needs a target, so it belongs with T8's upload path |
+| S10 | Each declared `size` and `sha256` matches the bytes actually extracted | a truthful-looking manifest describing different bytes | **owed** — needs real archives, so it belongs with T2/T5 |
+| S11 | The inventory and the payload agree exactly: no extracted file missing from `files`, no listed file absent from the archive | a smuggled extra file, or a phantom entry | **owed** — T2/T5 |
+
+S1 and S2 look like duplicates of the extraction contract's path rules and are not. Extraction
+validates the *archive's* member names as they stream past; these validate the *manifest's*
+claims. A bundle can carry a well-behaved archive and a lying inventory, and only one of the
+two checks sees that. Both run, and neither is permitted to assume the other did.
+
+**Ordering matters, and the reason is not performance.** Schema validation runs first, then
+S1-S9 against the manifest alone, then extraction under the operator limits, then S10-S11
+against what was extracted. Nothing is written outside the private extraction directory until
+every one of them has passed, and no build is queued. The point is that S10 and S11 are the
+only rules that require having read the payload, so everything cheap and everything hostile
+is decided before a single byte of untrusted content is committed anywhere a later step could
+mistake for validated.
+
+**A rejection names its rule.** "S5: entrypoint `dashboards` contains neither `app.R` nor both
+`ui.R` and `server.R`" is actionable by the publisher who wrote the manifest; "invalid bundle"
+sends them to an administrator. This is the same reasoning as Q3's decision to surface a build
+log rather than guess at a package name: say precisely what was observed, and do not
+editorialise beyond it.
+
+**What the semantic validator must not do.** It does not repair, normalise away or "helpfully"
+accept anything in the list above — no stripping a `..`, no lower-casing a colliding path, no
+inferring an entrypoint when none resolves. Every one of those turns a rejection into a
+silently different bundle, which is how an uploader and a server come to disagree about what
+was published. Reject, name the rule, and stop.
+
 ### Storage layout and completion protocol
 
 `C`, `U`, `B`, `V`, `R` below mean content UUID, bundle UUID, build UUID, version UUID
@@ -912,7 +964,9 @@ below are marked passed by this planning document.
       storage failure, restart-safe retries and no filesystem durability fallback.
 
 - [ ] **T5. Extractor plus mandatory independent mid-track security review.** Depends
-      T1–T4. Implement bounded extraction, validation and private workspace handling.
+      T1–T4. Implement bounded extraction, validation and private workspace handling,
+      including rules S1–S11 of "Semantic validation" above — S10 and S11 in particular,
+      which no earlier task can prove because they need real extracted bytes.
       Run the untouched T2 corpus and resource measurements; mutation-test each defense.
       A new reviewer/session reads the extractor and sandbox configuration, adds withheld
       archive/escape fixtures and drives T3's live attempts independently. Review all
