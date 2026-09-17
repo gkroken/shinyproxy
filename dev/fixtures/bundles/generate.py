@@ -26,8 +26,10 @@ import json
 import os
 import pathlib
 import random
+import shutil
 import sys
 import tarfile
+import tempfile
 import unicodedata
 
 # Default operator limits from WORKPLAN-BUNDLES.md. Boundary fixtures are parameterised off
@@ -90,10 +92,17 @@ class Builder:
     """
 
     def __init__(self):
-        self.raw = io.BytesIO()
-        self.tar = tarfile.open(fileobj=self.raw, mode="w", format=tarfile.GNU_FORMAT)
+        # The tar body goes to a temp FILE, not a BytesIO. One fixture's body is two
+        # gigabytes and another's is a quarter of one; buffering them cost 2094 MiB of
+        # peak RSS in the generator, which is the same defect as 6987f01-F1 one process
+        # over. Nothing here needs the body in memory: it is written once and read once.
+        self.body = tempfile.TemporaryFile()
+        self.tar = tarfile.open(fileobj=self.body, mode="w", format=tarfile.GNU_FORMAT)
         self.closed = False
         self.manifest_written = False
+        # The gzip member's stored original filename. Ordinary metadata; one fixture pair
+        # uses its length as a byte-exact size lever (see _compressed_solution).
+        self.gzip_name = ""
 
     def add(self, name, data=b"", mode=0o644, typ=tarfile.REGTYPE, linkname="", size=None):
         info = tarfile.TarInfo(name)
@@ -128,23 +137,36 @@ class Builder:
         self.tar.offset += len(header) + len(payload) + ((512 - len(payload) % 512) % 512)
         return self
 
-    def bytes(self, truncate_tar=False, skip_gzip=False, append=b"", gzip_name=""):
+    def _finish(self):
         if not self.closed:
             self.tar.close()
             self.closed = True
-        body = self.raw.getvalue()
+        self.body.seek(0)
+
+    def bytes(self, truncate_tar=False, skip_gzip=False, append=b""):
+        """The whole archive in memory. Only for the handful of fixtures in SPECIAL, which
+        need to truncate, concatenate or append; every one of them is a few kilobytes."""
+        self._finish()
+        body = self.body.read()
         if truncate_tar:
             body = body[:len(body) // 2]
         if skip_gzip:
             return body + append
         out = io.BytesIO()
         # mtime=0 so the gzip header is byte-stable and the recorded hash means something.
-        # gzip_name is the member's stored original filename -- ordinary gzip metadata,
-        # what the gzip CLI writes by default. It is used by one fixture pair as a
-        # byte-exact size lever; see _compressed_exact.
-        with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, filename=gzip_name) as gz:
+        with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, filename=self.gzip_name) as gz:
             gz.write(body)
         return out.getvalue() + append
+
+    def write(self, path):
+        """Stream the archive to `path`. Nothing larger than a chunk is ever resident."""
+        self._finish()
+        with open(path, "wb") as out:
+            with gzip.GzipFile(fileobj=out, mode="wb", mtime=0,
+                               filename=self.gzip_name) as gz:
+                shutil.copyfileobj(self.body, gz, 1 << 20)
+        self.body.close()
+        return os.path.getsize(path)
 
 
 def raw_header(name, size_field, typeflag=b"0", mode=b"0000644", bad_checksum=False):
@@ -237,33 +259,33 @@ def entry(path, data):
             "sha256": hashlib.sha256(data).hexdigest()}
 
 
-_RANDOM = b""
-
-
-def _incompressible(n):
-    """`n` bytes of deterministic pseudo-random data, generated once and sliced.
-
-    Deterministic because every recorded SHA-256 depends on it, and incompressible
-    because the compressed cap is the one limit a compressible payload cannot reach.
-    """
-    global _RANDOM
-    if len(_RANDOM) < n:
-        r = random.Random(20260917)
-        _RANDOM = b"".join(r.randbytes(1 << 22) for _ in range((n >> 22) + 2))
-    return _RANDOM[:n]
+def random_entry(path, size):
+    """An inventory entry for `size` pseudo-random bytes, hashed without holding them."""
+    h, st = hashlib.sha256(), _RandomStream(size)
+    while True:
+        chunk = st.read(1 << 20)
+        if not chunk:
+            break
+        h.update(chunk)
+    return {"path": path, "size": size, "sha256": h.hexdigest()}
 
 
 def _fill_compressed(b, size):
-    pad = _incompressible(size)
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
-                                   entry("www/pad.bin", pad)]))
-    b.add("app/app.R", R_APP).add("app/renv.lock", RENV).add("app/www/pad.bin", pad)
+                                   random_entry("www/pad.bin", size)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    info = tarfile.TarInfo("app/www/pad.bin")
+    info.size = size
+    info.mtime = 0
+    b.tar.addfile(info, _RandomStream(size))
 
 
-def _compressed_bytes(size, gzip_name):
+def _compressed_size(size, gzip_name):
     b = Builder()
+    b.gzip_name = gzip_name
     _fill_compressed(b, size)
-    return b.bytes(gzip_name=gzip_name)
+    with tempfile.TemporaryDirectory() as tmp:
+        return b.write(pathlib.Path(tmp) / "probe.tar.gz")
 
 
 _SOLVED = {}
@@ -288,7 +310,7 @@ def _compressed_solution(target):
         return _SOLVED[target]
     size = target - 320 * 1024
     for _ in range(8):
-        room = target - len(_compressed_bytes(size, ""))
+        room = target - _compressed_size(size, "")
         if 2 <= room <= 4096:
             _SOLVED[target] = (size, room - 1)
             return _SOLVED[target]
@@ -713,6 +735,32 @@ class _ZeroStream(io.RawIOBase):
         return True
 
 
+class _RandomStream(io.RawIOBase):
+    """Deterministic pseudo-random bytes, produced on demand rather than buffered.
+
+    Incompressible, because the compressed cap is the one bound a compressible payload
+    cannot reach. Generated in fixed 64 KiB blocks and sliced from a carry buffer, so the
+    byte sequence does not depend on how the consumer chunks its reads -- otherwise a
+    change in tarfile's copy buffer would silently change every recorded hash.
+    """
+
+    def __init__(self, size, seed=20260917):
+        self.left, self.r, self.buf = size, random.Random(seed), b""
+
+    def read(self, n=-1):
+        if self.left <= 0:
+            return b""
+        take = self.left if n is None or n < 0 else min(n, self.left)
+        while len(self.buf) < take:
+            self.buf += self.r.randbytes(1 << 16)
+        out, self.buf = self.buf[:take], self.buf[take:]
+        self.left -= take
+        return out
+
+    def readable(self):
+        return True
+
+
 @fixture("link-hardlink-inside", "links", "reject", "-",
          "a hardlink whose target IS inside the tree. The plan asks for both directions, and "
          "the inside case is the one that looks harmless: two names for one inode means a "
@@ -783,9 +831,6 @@ def _(b):
     b.tar.addfile(info, _ZeroStream(size))
 
 
-# The compressed pair is emitted through SPECIAL: the property is the size of the finished
-# file, so the archive has to be assembled and weighed rather than described.
-
 @fixture("bomb-compressed-at-limit", "bombs", "accept", "-",
          "an upload of exactly max_compressed_bytes. The compressed cap is the first bound "
          "anything hits -- it is checked on the uploaded byte count, before a single header "
@@ -794,7 +839,9 @@ def _(b):
          "256 MiB on disk",
          pins=True)
 def _(b):
-    pass
+    size, namelen = _compressed_solution(LIMITS["max_compressed_bytes"])
+    b.gzip_name = "p" * namelen
+    _fill_compressed(b, size)
 
 
 @fixture("bomb-compressed-over-limit", "bombs", "reject", "-",
@@ -802,7 +849,9 @@ def _(b):
          "differing only by a single byte of gzip filename is what makes this a true N/N+1 "
          "pair, so an extractor comparing with >= instead of > is caught")
 def _(b):
-    pass
+    size, namelen = _compressed_solution(LIMITS["max_compressed_bytes"])
+    b.gzip_name = "p" * (namelen + 1)
+    _fill_compressed(b, size)
 
 
 @fixture("bomb-extended-header-at-limit", "bombs", "accept", "-",
@@ -1184,25 +1233,7 @@ def _(b):
 
 # --------------------------------------------------------------------- emit
 
-def _at_compressed_cap():
-    target = LIMITS["max_compressed_bytes"]
-    size, namelen = _compressed_solution(target)
-    data = _compressed_bytes(size, "p" * namelen)
-    assert len(data) == target, (len(data), target)
-    return data
-
-
-def _over_compressed_cap():
-    target = LIMITS["max_compressed_bytes"]
-    size, namelen = _compressed_solution(target)
-    data = _compressed_bytes(size, "p" * (namelen + 1))
-    assert len(data) == target + 1, (len(data), target + 1)
-    return data
-
-
 SPECIAL = {
-    "bomb-compressed-at-limit": lambda b: _at_compressed_cap(),
-    "bomb-compressed-over-limit": lambda b: _over_compressed_cap(),
     "bomb-truncated-gzip": lambda b: b.bytes()[:len(b.bytes()) // 2],
     "bomb-truncated-tar": lambda b: gzip_of(b.bytes(skip_gzip=True)[:1024]),
     "bomb-concatenated-members": lambda b: b.bytes() + b.bytes(),
@@ -1217,6 +1248,14 @@ def gzip_of(body):
     return out.getvalue()
 
 
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def build_all(outdir):
     outdir = pathlib.Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -1224,13 +1263,18 @@ def build_all(outdir):
     for f in FIXTURES:
         b = Builder()
         f["build"](b)
-        data = SPECIAL[f["name"]](b) if f["name"] in SPECIAL else b.bytes()
         path = outdir / (f["name"] + ".tar.gz")
-        path.write_bytes(data)
+        # SPECIAL fixtures truncate, concatenate or append, so they need the archive in
+        # hand; all of them are a few kilobytes. Everything else streams to disk, which
+        # is what keeps the two-gigabyte and quarter-gigabyte fixtures off the heap.
+        if f["name"] in SPECIAL:
+            path.write_bytes(SPECIAL[f["name"]](b))
+        else:
+            b.write(path)
         produced.append({
             "name": f["name"], "group": f["group"], "expect": f["expect"],
             "rule": f["rule"], "why": f["why"], "pins": f["pins"],
-            "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+            "sha256": _sha256_file(path), "bytes": os.path.getsize(path),
         })
     return produced
 

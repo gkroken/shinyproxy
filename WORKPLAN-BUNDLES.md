@@ -1141,10 +1141,18 @@ below are marked passed by this planning document.
         oracle meters it.
       - Four fixtures: compressed cap N/N+1 and extended-header cap N/N+1, all four
         parameterised. The compressed pair is the expensive one — 256 MiB of deterministic
-        incompressible payload each — and it takes the suite from 47s to ~115s. Worth it:
+        incompressible payload each — and it takes the suite from 47s to ~73s. Worth it:
         the compressed cap is the first bound anything hits, checked on the uploaded byte
         count before a header is parsed, and it was the only documented bound with no
         fixture at all.
+      - **Nothing holds an archive.** Both sides stream: the generator writes the tar body
+        to a temp file and gzips it to disk in chunks, and the checker hashes and walks
+        from the file. Peak resident memory for the whole suite is **69 MiB**, against
+        924 MiB in the checker and 2094 MiB in the generator when the pair was first
+        added. The suite prints its own peak, including the generator's, so the next
+        fixture that buffers something shows up there rather than in a CI runner being
+        killed. Disk is the remaining cost: a generation writes 518 MiB into a temporary
+        directory.
       - Hitting the cap **exactly** needs two levers. The tar body only moves in 512-byte
         blocks and deflate's output on incompressible data jitters a few bytes either side
         of the trend, so a search on payload size oscillates and never lands (measured:

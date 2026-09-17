@@ -26,6 +26,7 @@ import io
 import json
 import pathlib
 import re
+import resource
 import subprocess
 import sys
 import tempfile
@@ -157,23 +158,21 @@ def walk(source):
     return members, note
 
 
-def gunzip(data, limit=64 * 1024 * 1024):
-    """Bounded decompression, returning whatever was read before the bound.
+def gunzip(fh, limit=8 * 1024 * 1024):
+    """Bounded decompression of an open archive, returning the prefix it read.
 
-    Returning the PREFIX rather than nothing is the point. The expansion bombs are the
-    fixtures whose headers most need inspecting, and a reader that discards its buffer on
-    hitting a limit cannot see them at all -- which is how bomb-expanded-over-limit first
-    appeared not to exhibit its own property. A tar header precedes its payload, so a few
-    megabytes is ample to see every header that matters -- 20,000 empty members is about 10 MB
-    of headers, so the bound has to clear that -- while still refusing to materialise
-    two gigabytes of zeroes.
+    The prefix answers the questions that are about raw bytes rather than headers -- a NUL
+    spliced into a name field, a deliberately wrong checksum, a PAX record's literal text.
+    All of those sit in the first blocks of an archive. Headers no longer come from here:
+    walk() streams the whole archive, which is why this bound could drop from 64 MiB to 8
+    and why the peak memory of the suite is no longer a function of the largest fixture.
 
     Two failures are distinguished: `error` means the gzip stream itself is broken, `capped`
     means it was fine and we chose to stop. Only the first is a property of the fixture.
     """
     out, chunks, error = 0, [], None
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+        with gzip.GzipFile(fileobj=fh) as gz:
             while True:
                 chunk = gz.read(256 * 1024)
                 if not chunk:
@@ -365,8 +364,8 @@ PREDICATES = {
     # an artifact of our own decompression bound. The streaming walk reads to the archive's
     # end, so truncation is now a property of the fixture and nothing else.
     "bomb-truncated-tar": lambda ctx: ctx["note"] == "truncated",
-    "bomb-concatenated-members": lambda ctx: ctx["gzip_members"] >= 2,
-    "bomb-trailing-garbage": lambda ctx: ctx["trailing"] > 0,
+    "bomb-concatenated-members": lambda ctx: _framing(ctx)[0] >= 2,
+    "bomb-trailing-garbage": lambda ctx: _framing(ctx)[1] > 0,
 
     # types and path limits
     "type-device": typeflag(b"3"),
@@ -609,54 +608,87 @@ HOSTILE = {
 }
 
 
-def context(data, limits):
-    trailing, gzip_members = 0, 0
-    body, gzip_error, _capped = gunzip(data)
-    # Two passes over the same bytes, deliberately. `body` is a bounded prefix, held in
-    # memory, and answers the questions that are about raw bytes rather than headers
-    # ("does a PAX record say path=app/../.."). The members come from a second, streaming
-    # pass that reads every header to the end of the archive at constant memory, so a
-    # fixture whose point is the FOURTH half-gigabyte member is still fully inspected.
-    gz = gzip.GzipFile(fileobj=io.BytesIO(data))
-    try:
-        members, note = walk(gz)
-    finally:
+def context(path, limits):
+    """Everything the predicates ask about one fixture, read from the file on disk.
+
+    Nothing holds the archive. Two bounded passes: `raw` is a prefix for the raw-byte
+    questions, and the members come from a streaming walk that reads every header to the
+    end at constant memory. A third pass, over the gzip framing, is deferred to the two
+    predicates that need it (see _framing), because it decompresses the whole archive to
+    find where one member ends and the next begins.
+    """
+    with path.open("rb") as fh:
+        body, gzip_error, _capped = gunzip(fh)
+    with path.open("rb") as fh:
+        gz = gzip.GzipFile(fileobj=fh)
         try:
-            gz.close()
-        except Exception:
-            pass
-    # Count gzip members and any bytes after the last one, without decompressing twice.
-    pos, count = 0, 0
-    while pos < len(data) and data[pos:pos + 2] == b"\x1f\x8b":
-        try:
-            d = zlib_skip(data, pos)
-        except Exception:
-            break
-        count += 1
-        pos = d
-    gzip_members = count
-    trailing = len(data) - pos if pos < len(data) else 0
+            members, note = walk(gz)
+        finally:
+            try:
+                gz.close()
+            except Exception:
+                pass
     return {"raw": body or b"", "members": members, "note": note, "limits": limits,
-            "gzip_error": gzip_error,
-            "compressed": len(data),
-            "declared_total": sum(max(size_of(m), 0) for m in members),
-            "gzip_members": gzip_members, "trailing": trailing}
+            "gzip_error": gzip_error, "path": path,
+            "compressed": path.stat().st_size,
+            "declared_total": sum(max(size_of(m), 0) for m in members)}
 
 
-def zlib_skip(data, start):
-    """Return the offset just past the gzip member beginning at `start`."""
+def _framing(ctx):
+    """(gzip member count, bytes after the last member), computed once, on demand.
+
+    Only two fixtures ask, and answering costs a full decompression -- gzip does not
+    record a member's compressed length, so the only way to find the next one is to
+    finish the current one. Computing it for all 90 fixtures would decompress several
+    gigabytes to answer a question nobody asked of them.
+    """
+    if "framing" not in ctx:
+        ctx["framing"] = _gzip_framing(ctx["path"])
+    return ctx["framing"]
+
+
+def _gzip_framing(path):
     import zlib
-    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    d.decompress(data[start:], 1 << 20)
-    while not d.eof:
-        if not d.unconsumed_tail and not d.unused_data:
-            d.decompress(b"", 1 << 20)
-            if not d.eof and not d.unconsumed_tail:
+    size = path.stat().st_size
+    pos, count = 0, 0
+    with path.open("rb") as fh:
+        while pos < size:
+            fh.seek(pos)
+            if fh.read(2) != b"\x1f\x8b":
                 break
-        d.decompress(d.unconsumed_tail, 1 << 20)
-    if not d.eof:
-        raise ValueError("member did not end")
-    return len(data) - len(d.unused_data)
+            fh.seek(pos)
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            consumed, ended = 0, False
+            try:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    consumed += len(chunk)
+                    d.decompress(chunk, 1 << 20)
+                    while not d.eof and d.unconsumed_tail:
+                        d.decompress(d.unconsumed_tail, 1 << 20)
+                    if d.eof:
+                        consumed -= len(d.unused_data)
+                        ended = True
+                        break
+            except Exception:
+                break
+            if not ended:
+                break
+            count += 1
+            pos += consumed
+    return count, max(size - pos, 0)
+
+
+def _sha256(path):
+    """Hashed in chunks. One fixture is 256 MiB and there are two of them; reading a
+    fixture whole was worth 700 MiB of peak RSS for a suite that inspects headers."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def main():
@@ -682,9 +714,7 @@ def main():
             return 1
 
         for f in exp["fixtures"]:
-            data = (pathlib.Path(tmp) / (f["name"] + ".tar.gz")).read_bytes()
-            got = hashlib.sha256(data).hexdigest()
-            if got != f["sha256"]:
+            if _sha256(pathlib.Path(tmp) / (f["name"] + ".tar.gz")) != f["sha256"]:
                 fail("%s: regenerated bytes differ from the recorded hash" % f["name"])
                 return 1
         print("  ok   %d fixtures regenerated, every SHA-256 matches" % len(exp["fixtures"]))
@@ -705,8 +735,7 @@ def main():
 
         asserted, swept = 0, 0
         for f in exp["fixtures"]:
-            data = (pathlib.Path(tmp) / (f["name"] + ".tar.gz")).read_bytes()
-            ctx = context(data, limits)
+            ctx = context(pathlib.Path(tmp) / (f["name"] + ".tar.gz"), limits)
             # A predicate and the hostile sweep are not alternatives. An accepted boundary
             # fixture wants both: that it really sits AT the limit, and that it is over
             # none of the others.
@@ -735,6 +764,16 @@ def main():
     for f in exp["fixtures"]:
         by_group[f["group"]] = by_group.get(f["group"], 0) + 1
     print("  groups: " + ", ".join("%s %d" % kv for kv in sorted(by_group.items())))
+    # Reported, not asserted, and it counts the generator too -- that child was the larger
+    # half of the problem, at 2094 MiB against this process's 924, and a figure that left
+    # it out would have looked like a fix. This suite regenerates half a gigabyte of
+    # archives and the cost is easy to lose track of; printing it means the next fixture
+    # that buffers something shows up here rather than in somebody's CI runner being killed.
+    print("  peak:   %d MiB resident (this process %d, generator %d)" % (
+        max(resource.getrusage(r).ru_maxrss for r in
+            (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)) // 1024,
+        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
+        resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss // 1024))
     print()
     print("RESULT:", "corpus is internally consistent" if ok else "MISMATCH")
     return 0 if ok else 1
