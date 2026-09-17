@@ -17,6 +17,7 @@
 
 import json
 import pathlib
+import re
 import sys
 
 from importlib.metadata import version as _pkg_version
@@ -175,25 +176,70 @@ def check_path_rules_have_not_drifted():
     print()
 
 
-def check_semantic_fixtures_have_an_owning_rule():
-    """Every semantic-only fixture must be named by a rule in the plan.
+def parse_semantic_rule_table(plan):
+    """Fixture -> [rule ids] from the S-table in "Semantic validation".
 
-    These fixtures are the ones the schema deliberately accepts, so nothing in this runner
-    can fail when one of them is wrong -- by construction, they all "pass". That makes them
-    the easiest thing in the corpus to add and then forget, and a fixture nobody owns is
-    indistinguishable from a rule nobody implemented. Naming each one in the S-table is what
-    turns the group from a list of known gaps into a list of assigned ones.
+    A bounded parser of one known table, not a Markdown framework. It reads only rows whose
+    first cell is a rule id, and only the last cell of those rows, so a fixture name
+    appearing in prose, in the Rejects column, or in a historical note is not an owner.
+    """
+    mapping = {}
+    rules = set()
+    for line in plan.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) != 4:
+            continue
+        rule_id = cells[0]
+        if not re.fullmatch(r"S\d+", rule_id):
+            continue
+        rules.add(rule_id)
+        for name in re.findall(r"`([a-z0-9][a-z0-9-]*)`", cells[3]):
+            mapping.setdefault(name, []).append(rule_id)
+    return mapping, rules
+
+
+def check_semantic_fixtures_have_an_owning_rule():
+    """Every semantic-only fixture must be owned by a numbered rule.
+
+    These fixtures are the ones the schema deliberately accepts, so nothing else in this
+    runner can fail when one is wrong -- by construction they all "pass". That makes them the
+    easiest thing in the corpus to add and forget, and a fixture nobody owns is
+    indistinguishable from a rule nobody implemented.
+
+    The association is parsed, not searched for. An earlier version asked whether the fixture
+    name occurred anywhere in the plan, which stayed green after every rule row was deleted so
+    long as the names survived in a note saying they had no rule (finding 61101bc-F1). The
+    mutation test that accompanied it only removed names entirely, which is the one mutation
+    that version could catch.
     """
     print("== semantic rule coverage ==")
     plan = pathlib.Path("WORKPLAN-BUNDLES.md").read_text(encoding="utf-8")
     exp = load("dev/fixtures/manifests/expectations.json")
-    orphans = [n for n in exp["semantic_invalid"] if n not in plan]
-    if orphans:
-        fail("semantic fixtures with no owning rule in WORKPLAN-BUNDLES.md: %s"
-             % ", ".join(orphans))
+
+    mapping, rules = parse_semantic_rule_table(plan)
+    if not rules:
+        fail("no S-numbered rule rows found in WORKPLAN-BUNDLES.md; the coverage check "
+             "would otherwise pass by having nothing to check against")
         return
-    print("  ok   all %d semantic-only fixtures are named by a rule in the plan"
-          % len(exp["semantic_invalid"]))
+
+    orphans = sorted(n for n in exp["semantic_invalid"] if n not in mapping)
+    if orphans:
+        fail("semantic fixtures with no owning rule row: %s" % ", ".join(orphans))
+        return
+
+    unknown = sorted(n for n in mapping if n not in exp["semantic_invalid"]
+                     and n not in exp["schema_invalid"] and n not in exp["valid"])
+    if unknown:
+        fail("rule rows cite fixtures that do not exist: %s" % ", ".join(unknown))
+        return
+
+    print("  ok   %d semantic-only fixtures, each owned by a rule row (%d rules parsed)"
+          % (len(exp["semantic_invalid"]), len(rules)))
+    for name in sorted(exp["semantic_invalid"]):
+        print("       %-38s %s" % (name, ", ".join(mapping[name])))
     print()
 
 

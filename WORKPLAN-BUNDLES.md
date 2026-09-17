@@ -314,6 +314,14 @@ This table gives every one of them an owning rule, and names the rules that have
 yet so the gap is visible rather than implied. A rule without a case is a rule nobody has
 watched fail.
 
+`dev/schema-fixture-check.py` parses the **Fixture** column of this table and requires every
+`semantic_invalid` fixture to be cited by a row whose first cell is a rule id. That is a
+narrow parser of one known table, and it is deliberately not a substring search: the first
+version asked whether a fixture's name appeared anywhere in this document, which stayed green
+after every rule row was deleted so long as the names survived in a note saying they had no
+rule. Editing the table therefore has consequences — deleting a row, or removing a rule's id,
+fails the run, as does citing a fixture that does not exist or removing the table entirely.
+
 | # | Rule | Rejects | Fixture |
 |---|---|---|---|
 | S1 | Every `files[].path` resolves inside the payload root after normalisation | `../escape.txt`, and anything whose real target escapes | `path-traversal` |
