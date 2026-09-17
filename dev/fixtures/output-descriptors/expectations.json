@@ -1,16 +1,25 @@
 {
-  "note": "Expectations for schemas/output-descriptor/v1.schema.json. Unlike the manifest corpus there is no semantic-only group yet: nothing writes or reads a rendition until spine #5/#6/#8, so containment and key-encoding checks belong to whichever of those ships a writer. The names-needing-url-encoding fixture exists to pin that the descriptor carries such names literally, with encoding done at the S3 or URL boundary and not in this document. url_encoding_expected_paths states the names separately from the fixture so that the round-trip check compares the parsed file against something other than itself; comparing a document to its own re-serialisation can never fail.",
+  "note": "Expectations for schemas/output-descriptor/v1.schema.json. Unlike the manifest corpus there is no semantic-only group yet: nothing writes or reads a rendition until spine #5/#6/#8, so containment and key-encoding checks belong to whichever of those ships a writer. The names-needing-url-encoding fixture exists to pin that the descriptor carries such names literally, with encoding done at the S3 or URL boundary and not in this document. url_encoding_expected_paths states the names separately from the fixture so that the round-trip check compares the parsed file against something other than itself; comparing a document to its own re-serialisation can never fail. The created-at-impossible-* cases are NOT regex-visible: they need `format: date-time` enforced as an assertion with a provisioned checker. In JSON Schema 2020-12 `format` is an annotation by default, so a validator that merely reads this schema will accept every one of them.",
   "schema": "schemas/output-descriptor/v1.schema.json",
   "valid": [
     "build-three-files",
     "empty-rendition",
+    "fractional-seconds",
+    "leap-day-utc",
     "names-needing-url-encoding",
+    "negative-offset",
     "scheduled-render-with-offset"
   ],
   "schema_invalid": [
     "content-version-zero",
     "created-at-date-only",
+    "created-at-impossible-day",
+    "created-at-impossible-hour",
+    "created-at-impossible-minute",
+    "created-at-impossible-month",
+    "created-at-impossible-offset",
     "created-at-no-offset",
+    "created-at-non-leap-feb-29",
     "created-at-trailing-newline",
     "file-absolute-path",
     "file-backslash-path",
@@ -41,5 +50,8 @@
     "日本語/ページ.html",
     "plus+and&amp.html",
     "quote'apostrophe.html"
+  ],
+  "requires_format_assertion": [
+    "date-time"
   ]
 }

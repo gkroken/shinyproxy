@@ -21,7 +21,7 @@ import sys
 
 from importlib.metadata import version as _pkg_version
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 
 REPO = pathlib.Path(".")
 
@@ -41,6 +41,32 @@ CORPORA = [
 ]
 
 ok = True
+
+
+def require_format_checkers(needed):
+    """Refuse to run unless `format` is actually enforceable for the formats we rely on.
+
+    Two separate things have to be true, and neither is a default. In JSON Schema 2020-12
+    `format` is an ANNOTATION: a validator ignores it unless asked to assert. And in this
+    library, asking is not enough -- `date-time` only appears in the checker registry when a
+    date-time implementation is installed alongside. With `pip install jsonschema` alone,
+    passing FORMAT_CHECKER silently checks nothing, which is how four impossible timestamps
+    (month 99, February 30th, hour 99, offset +99:99) validated against a schema that
+    advertises RFC 3339 (finding c225d50-F1).
+
+    Failing loudly here is the point. A missing dependency must not quietly restore the green
+    this once had.
+    """
+    available = FormatChecker().checkers
+    if not needed:
+        return
+    missing = [f for f in needed if f not in available]
+    if missing:
+        print("!! format checker(s) not installed: %s" % ", ".join(missing))
+        print("!! `format` would be an inert annotation and impossible values would validate.")
+        print("!! install rfc3339-validator alongside jsonschema; see dev/validate-manifests.sh")
+        sys.exit(2)
+    print("format assertions enabled for: %s" % ", ".join(sorted(needed)))
 
 
 def fail(message):
@@ -63,6 +89,7 @@ def vacuity_probe(validator, label):
 def check_corpus(corpus):
     print("== %s ==" % corpus["name"])
     exp = load(corpus["dir"] / "expectations.json")
+    require_format_checkers(exp.get("requires_format_assertion", []))
     versioned = pathlib.Path(exp["schema"])
     ver_text = versioned.read_text(encoding="utf-8")
 
@@ -77,11 +104,11 @@ def check_corpus(corpus):
         if "$schema" not in pub:
             fail("%s is not a JSON Schema document" % corpus["published"])
         Draft202012Validator.check_schema(pub)
-        validators["published"] = Draft202012Validator(pub)
+        validators["published"] = Draft202012Validator(pub, format_checker=FormatChecker())
 
     ver = json.loads(ver_text)
     Draft202012Validator.check_schema(ver)
-    validators["versioned"] = Draft202012Validator(ver)
+    validators["versioned"] = Draft202012Validator(ver, format_checker=FormatChecker())
 
     for label, v in validators.items():
         vacuity_probe(v, "%s (%s)" % (corpus["name"], label))

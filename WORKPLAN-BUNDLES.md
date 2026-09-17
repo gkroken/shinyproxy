@@ -789,10 +789,32 @@ below are marked passed by this planning document.
       - The ECMA-262 cross-check now covers the descriptor's UUID, timestamp, media-type and
         path patterns too, and rejects **CR and CRLF** as well as LF — a value from a
         Windows-authored file carries those, and `$` is not the only lenient anchor.
+      - **`format: date-time` is enforced as an assertion, and the runner refuses to start
+        without the checker.** Two separate things have to be true and neither is a default:
+        in JSON Schema 2020-12 `format` is an *annotation* unless a validator is told to
+        assert, and in this library being told is not enough — `date-time` only exists in the
+        checker registry when a date-time implementation is installed alongside. With
+        `pip install jsonschema` alone, passing `FORMAT_CHECKER` silently checks nothing.
+        Month 99, **February 30th**, hour 99 and offset `+99:99` all validated against a
+        schema advertising RFC 3339 (finding `c225d50-F1`). Six impossible-value fixtures and
+        three positive controls — a leap day, a negative offset, fractional seconds — now
+        cover it, because "rejects everything" and "works" look identical without them.
+      - **The server-side validator inherits this requirement and must be proved, not
+        assumed.** networknt follows the same 2020-12 default, so reading this schema is not
+        enough to enforce the timestamp. Run the `created-at-impossible-*` fixtures against it
+        when it lands. Not verified here: no Java validator exists in the tree yet.
       - Guards mutation-tested: widening `renditionPath.maxLength` reports the drift;
         percent-encoding one fixture filename reports the mismatch against the stated
         expectation; stripping `type`/`required` from the descriptor schema trips the vacuity
-        probe on `null`, `42` and `{}`.
+        probe on `null`, `42` and `{}`; removing `rfc3339-validator` from the container aborts
+        with "format checker(s) not installed: date-time" and exit 2 rather than passing; and
+        keeping the package but not passing the checker to the validator reports every
+        `created-at-impossible-*` case as "ACCEPTED by the schema". Both halves fail
+        independently, which is the property that matters — a missing dependency must not be
+        able to quietly restore the green this once had.
+      - Q4: `jsonschema==4.26.0` and `rfc3339-validator==0.1.4`, both MIT, both container-only
+        dev tools pinned in `dev/validate-manifests.sh`. Neither ships in the jar and neither
+        is a Maven dependency.
       - The round-trip check compares the parsed fixture against `url_encoding_expected_paths`
         in `expectations.json`, not against its own re-serialisation. An earlier draft did the
         latter, which is true whatever the fixture contains — a check that cannot fail is

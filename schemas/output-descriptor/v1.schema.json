@@ -53,7 +53,7 @@
       }
     },
     "created_at": {
-      "description": "When the rendition was completed, RFC 3339 with an explicit offset. A local time without an offset is ambiguous and is rejected.",
+      "description": "When the rendition was completed, RFC 3339 with an explicit offset. A local time without an offset is ambiguous and is rejected by the pattern. CALENDAR VALIDITY IS NOT IN THE PATTERN and cannot be: a regular expression cannot know that February has no 30th. It needs `format: date-time` enforced as an ASSERTION, which in JSON Schema 2020-12 is not the default -- `format` is an annotation unless a validator is told otherwise, and a validator told otherwise still does nothing unless a date-time checker is actually installed. Both halves were missing once already (finding c225d50-F1), so any validator reading this schema must be proved against the created-at-impossible-* fixtures rather than assumed to enforce it.",
       "type": "string",
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})(?![\\s\\S])",

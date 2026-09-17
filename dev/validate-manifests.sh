@@ -32,8 +32,13 @@ JS_IMAGE="${SCHEMA_REGEX_IMAGE:-node:22-slim}"
 
 echo "== JSON Schema validation (python jsonschema; not the server's networknt) =="
 docker run --rm -v "$PWD":/ws:ro -w /ws "$PY_IMAGE" sh -c '
-  pip install --quiet --disable-pip-version-check jsonschema >/dev/null 2>&1 || {
-    echo "!! could not install jsonschema in the validator container" >&2; exit 2; }
+  # rfc3339-validator is not optional. jsonschema alone has no date-time checker, so
+  # `format` stays an inert annotation and February 30th validates (finding c225d50-F1).
+  # Both are MIT, both are container-only dev tools, and neither ships in the jar.
+  pip install --quiet --disable-pip-version-check \
+      "jsonschema==4.26.0" "rfc3339-validator==0.1.4" >/dev/null 2>&1 || {
+    echo "!! could not install jsonschema + rfc3339-validator in the validator container" >&2
+    exit 2; }
   exec python dev/schema-fixture-check.py
 ' || exit 1
 
