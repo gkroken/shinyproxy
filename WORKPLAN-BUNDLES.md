@@ -1147,7 +1147,10 @@ below are marked passed by this planning document.
         fixture at all.
       - **Nothing holds an archive.** Both sides stream: the generator writes the tar body
         to a temp file and gzips it to disk in chunks, and the checker hashes and walks
-        from the file. Peak resident memory for the whole suite is **69 MiB**, against
+        from the file. The only payloads kept are the two that *are* content — PAX records
+        and the manifest — and both are read by the walker rather than out of a
+        fixed-size decompression prefix, so no size question depends on how much of a
+        payload the checker chose to keep. Peak resident memory for the whole suite is **69 MiB**, against
         924 MiB in the checker and 2094 MiB in the generator when the pair was first
         added. The suite prints its own peak, including the generator's, so the next
         fixture that buffers something shows up there rather than in a CI runner being

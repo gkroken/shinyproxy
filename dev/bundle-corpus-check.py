@@ -65,10 +65,12 @@ def _skip(fh, n):
     return True
 
 
-# A checker-side memory bound, not the contract's max_extended_header_bytes. Predicates
-# about the size of an extended header read the DECLARED header size, so capturing less
-# than a record cannot mask an oversized one.
+# Checker-side memory bounds, not contract bounds. Every predicate that compares a
+# payload against a CONFIGURED limit reads the declared size out of the header, so
+# capturing less than a payload can never mask an oversized one. These only bound what
+# gets parsed: PAX records, and the manifest JSON.
 PAX_CAPTURE = 64 * 1024
+MANIFEST_CAPTURE = 64 * 1024 * 1024
 
 
 def walk(source):
@@ -135,18 +137,26 @@ def walk(source):
 
             members.append({"name": name, "type": typeflag, "linkname": linkname,
                             "mode": mode, "size": size, "size_field": size_field,
-                            "pax": b""})
-            # A PAX header's payload IS its content, so it is kept rather than skipped --
-            # bounded, because one fixture's whole point is a 256 KiB record. Without it
-            # a PAX override can only be substring-matched in the raw prefix, which says
-            # some bytes are present, not that an override resolves to anything.
-            if typeflag in (b"x", b"g") and padded:
+                            "pax": b"", "body": b""})
+            # Two payloads ARE content rather than bytes to step over: a PAX header's
+            # records, and the manifest. Both are captured here, bounded, and everything
+            # else is skipped at constant memory. The manifest is read here rather than
+            # out of the decompression prefix because the prefix is a fixed size and the
+            # manifest's cap is operator configuration: once the cap exceeded the prefix,
+            # a correct fixture was truncated before its predicate could measure it
+            # (finding 8571859-F1).
+            take = 0
+            if typeflag in (b"x", b"g"):
                 take = min(padded, PAX_CAPTURE)
+            elif name == b"manifest.json" and typeflag in (b"0", b"\0"):
+                take = min(padded, MANIFEST_CAPTURE)
+            if take:
                 head = _read_exactly(fh, take)
                 if len(head) < take:
                     note = "truncated"
                     break
-                members[-1]["pax"] = head[:size or 0]
+                key = "pax" if typeflag in (b"x", b"g") else "body"
+                members[-1][key] = head[:size or 0]
                 padded -= take
             if not _skip(fh, padded):
                 note = "truncated"
@@ -161,11 +171,12 @@ def walk(source):
 def gunzip(fh, limit=8 * 1024 * 1024):
     """Bounded decompression of an open archive, returning the prefix it read.
 
-    The prefix answers the questions that are about raw bytes rather than headers -- a NUL
+    The prefix answers the three questions that really are about raw bytes -- a NUL
     spliced into a name field, a deliberately wrong checksum, a PAX record's literal text.
-    All of those sit in the first blocks of an archive. Headers no longer come from here:
-    walk() streams the whole archive, which is why this bound could drop from 64 MiB to 8
-    and why the peak memory of the suite is no longer a function of the largest fixture.
+    All three fixtures are a few kilobytes and none of them is sized by a configured
+    limit, so this bound is not coupled to anything an operator can change. Headers come
+    from walk(), which streams the whole archive, and the manifest is captured there too;
+    reading it from a fixed-size prefix broke as soon as its cap exceeded the prefix.
 
     Two failures are distinguished: `error` means the gzip stream itself is broken, `capped`
     means it was fine and we chose to stop. Only the first is a property of the fixture.
@@ -422,11 +433,11 @@ PREDICATES = {
         _manifest(ctx).get("runtime", {}).get("language") == "r"
         and _manifest(ctx).get("dependencies", {}).get("format") == "pip-hashed"),
     "unsupported-type": lambda ctx: _manifest(ctx).get("type") == "quarto_static",
-    # One question, read off the limit. The old form also accepted "more than 50000 file
-    # entries", which is not a documented bound and let the fixture satisfy the predicate
-    # without being over the cap it is named for.
+    # One question, read off the limit and off the declared size. The old form also
+    # accepted "more than 50000 file entries", which is not a documented bound and let the
+    # fixture satisfy the predicate without being over the cap it is named for.
     "manifest-over-limit": lambda ctx: (
-        len(_manifest_body(ctx) or b"") > ctx["limits"]["max_manifest_bytes"]),
+        _manifest_size(ctx) > ctx["limits"]["max_manifest_bytes"]),
 }
 
 
@@ -510,22 +521,26 @@ def _manifest_index(ctx):
     return -1
 
 
-def _manifest_body(ctx):
-    off = 0
-    raw = ctx["raw"]
-    while off + 512 <= len(raw):
-        block = raw[off:off + 512]
-        if block == b"\0" * 512:
-            break
-        name = block[0:100].rstrip(b"\0")
-        try:
-            size = int(block[124:136].rstrip(b"\0 ") or b"0", 8)
-        except ValueError:
-            size = 0
-        if name == b"manifest.json":
-            return raw[off + 512:off + 512 + size]
-        off += 512 + ((size + 511) // 512) * 512
+def _manifest_member(ctx):
+    for m in ctx["members"]:
+        if m["name"] == b"manifest.json" and m["type"] in (b"0", b"\0"):
+            return m
     return None
+
+
+def _manifest_body(ctx):
+    m = _manifest_member(ctx)
+    return None if m is None else m["body"]
+
+
+def _manifest_size(ctx):
+    """The manifest's DECLARED size, which is what its cap is about.
+
+    Read from the header, not from the captured body: a size comparison must not depend
+    on how much of the payload this checker chose to keep.
+    """
+    m = _manifest_member(ctx)
+    return 0 if m is None else max(size_of(m), 0)
 
 
 def _is_json(ctx):
@@ -602,7 +617,7 @@ HOSTILE = {
         and (m["size"] or 0) > ctx["limits"]["max_extended_header_bytes"]
         for m in ctx["members"]),
     "a manifest over the configured limit": lambda ctx: (
-        len(_manifest_body(ctx) or b"") > ctx["limits"]["max_manifest_bytes"]),
+        _manifest_size(ctx) > ctx["limits"]["max_manifest_bytes"]),
     "a payload file the manifest never declares": lambda ctx: _inventory_vs_payload(ctx)[0],
     "a declared file the payload never ships": lambda ctx: _inventory_vs_payload(ctx)[1],
 }
