@@ -243,6 +243,69 @@ def check_semantic_fixtures_have_an_owning_rule():
     print()
 
 
+def check_lifecycle_is_consistent():
+    """The bundle and build state machines, checked for the ways a hand-written one rots.
+
+    spec/lifecycle-v1.json is the single source: T6's tables, the coordinator and the admin
+    API are written from it, and WORKPLAN-BUNDLES.md explains it rather than restating it.
+    Nothing validates against it, so nothing else would notice a state that became
+    unreachable, a terminal state that grew an outgoing edge, or a non-terminal state with no
+    way out -- each of which is a coordinator that hangs or loses an attempt.
+    """
+    print("== lifecycle ==")
+    spec = load("spec/lifecycle-v1.json")
+    actors = {"platform", "worker", "operator"}
+
+    for name, m in spec["machines"].items():
+        states, terminal = set(m["states"]), set(m["terminal"])
+        transitions = m["transitions"]
+        froms = {t["from"] for t in transitions}
+
+        unknown = sorted({t[k] for t in transitions for k in ("from", "to")} - states)
+        if unknown:
+            fail("%s: transitions reference undeclared states: %s" % (name, ", ".join(unknown)))
+            return
+        if not terminal <= states:
+            fail("%s: terminal states not declared: %s" % (name, ", ".join(sorted(terminal - states))))
+            return
+        if m["initial"] not in states:
+            fail("%s: initial state %s is not declared" % (name, m["initial"]))
+            return
+
+        bad_actor = sorted({t["actor"] for t in transitions} - actors)
+        if bad_actor:
+            fail("%s: unknown actor(s) %s; who causes a transition decides who may be "
+                 "fenced off from it" % (name, ", ".join(bad_actor)))
+            return
+
+        # Terminal and "has no way out" must be the same set, checked both ways. One
+        # direction alone lets a state be forgotten from the terminal list, or a terminal
+        # state quietly grow an outgoing edge.
+        dead_ends = states - froms
+        if dead_ends != terminal:
+            fail("%s: terminal list %s disagrees with the states that have no outgoing "
+                 "transition %s" % (name, sorted(terminal), sorted(dead_ends)))
+            return
+
+        # Every state must be reachable from the initial one.
+        reachable, frontier = {m["initial"]}, [m["initial"]]
+        while frontier:
+            here = frontier.pop()
+            for t in transitions:
+                if t["from"] == here and t["to"] not in reachable:
+                    reachable.add(t["to"])
+                    frontier.append(t["to"])
+        orphans = sorted(states - reachable)
+        if orphans:
+            fail("%s: unreachable state(s) %s" % (name, ", ".join(orphans)))
+            return
+
+        print("  ok   %-7s %d states, %d transitions, %d terminal, all reachable"
+              % (name, len(states), len(transitions), len(terminal)))
+
+    print()
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -288,6 +351,7 @@ for corpus in CORPORA:
     check_corpus(corpus)
 check_path_rules_have_not_drifted()
 check_semantic_fixtures_have_an_owning_rule()
+check_lifecycle_is_consistent()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")

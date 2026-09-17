@@ -361,6 +361,43 @@ inferring an entrypoint when none resolves. Every one of those turns a rejection
 silently different bundle, which is how an uploader and a server come to disagree about what
 was published. Reject, name the rule, and stop.
 
+### Identifiers and lifecycles
+
+`spec/lifecycle-v1.json` holds the bundle and build state machines and the meaning of every
+identifier. It is the single source: T6's tables and CHECK constraints, the coordinator and
+the admin API are written from it, and this document explains it rather than repeating it.
+Restating a policy in two places is what produced finding `d4f5baf-F1`, where a retention
+decision and its collector instructions disagreed for two commits.
+
+It is **not** under `schemas/` and is not a JSON Schema. A document at a schema path is
+loadable as a schema whether or not it is one, and one that is not becomes a validator that
+accepts everything — which is finding `dd46cac-F1`, and is exactly the mistake that naming
+tempts you into.
+
+Nothing validates against it, which is precisely why it is machine-checked:
+`dev/schema-fixture-check.py` refuses a state machine with an unreachable state, a terminal
+state that has grown an outgoing edge, a state missing from the terminal list, a transition
+to an undeclared state, or an unknown actor. Each of those is a coordinator that hangs or
+loses an attempt, and none of them is visible by reading.
+
+Three decisions in that file are worth defending here, because they are choices rather than
+descriptions.
+
+**`build_id` identifies an attempt, not a build of a bundle.** A retry is a new id carrying
+`retry_of`, reusing the same immutable validated bundle. Reopening a terminal attempt would
+mean its logs, its artifacts and its retention clock describe two different executions.
+
+**Cancellation is refused once `PUBLISHING` has begun.** By then a push may already have
+produced a digest, and a cancel that races publication is how an image comes to exist with no
+row describing it. An operator who wants that content gone deletes the version afterwards,
+which is an operation with a transaction behind it.
+
+**`INTERRUPTED` is distinct from `FAILED`.** A failure is a build that ran and did not work;
+an interruption is an attempt the platform lost — worker death, lease loss, a restart across
+it — about which nothing is known, including how far it got. They are retained identically
+but must be distinguishable, because reconciliation can conclude something about the second
+that it cannot conclude about the first.
+
 ### Storage layout and completion protocol
 
 `C`, `U`, `B`, `V`, `R` below mean content UUID, bundle UUID, build UUID, version UUID
@@ -411,7 +448,7 @@ populated V1 database. Suggested tables/columns, finalized together in task 6:
 
 - `bundle`: UUID, content FK, initiating actor, upload/idempotency information, status,
   raw object key and digest, validated manifest/inventory digest, byte counts, timestamps,
-  validation/error code. Upload state is `UPLOADING → VALIDATING → VALIDATED` or `REJECTED`.
+  validation/error code. Its states and their transitions are in `spec/lifecycle-v1.json`.
 - `build`: UUID, content/bundle FKs, `retry_of`, initiating actor, idempotency key and input
   fingerprint, status, recipe/base/platform/cache descriptors, effective limits,
   lease owner/expiry/fencing generation, opaque worker handle, output digest, error code,
@@ -423,10 +460,7 @@ populated V1 database. Suggested tables/columns, finalized together in task 6:
   owning IDs, kind, digest, pin/retention and deletion state. Cleanup records survive
   content deletion; their denormalized subject UUID is not a cascading FK.
 
-Build states: `QUEUED → RUNNING → PUBLISHING → SUCCEEDED`; terminal alternatives
-`FAILED`, `CANCELLED`, `TIMED_OUT`, `INTERRUPTED`. No terminal attempt goes back to running.
-Cancellation while queued is immediate; during execution it requests kill and becomes
-terminal only after the whole worker is stopped, or explicitly reports cleanup pending.
+Build states and every legal transition are in `spec/lifecycle-v1.json`, not restated here.
 A lost worker lease fences subsequent updates and publication from the old generation.
 
 1. Admin admission checks authorization, quotas, media type and idempotency before reading
