@@ -301,6 +301,32 @@ error until their reviewed manifest branch/recipe exists. Future formats extend 
 versioned schemas, not a permissive `additionalProperties` escape hatch. Do not ship
 guessed Quarto/data/API field semantics that their owning tracks must later live with.
 
+### Image references
+
+`spec/image-references-v1.json` fixes the strings: the configured authority, the repository
+`skald/content/<content-uuid>`, the per-attempt tag `build-<build-uuid>`, and the
+digest-pinned execution reference stored in `content_version.image`. Decision 5 fixes the
+policy; this fixes the grammar, because a reference that does not parse fails at the one
+moment nothing is watching — when ContainerProxy tries to pull.
+
+**The digest pin is a requirement, not a preference.** `DockerEngineBackend`'s default pull
+policy is `IfNotPresent`, so a tag whose meaning changed is never re-fetched and a host keeps
+running whatever it cached. The runner therefore checks the *negative* that matters: the
+execution pattern must refuse a well-formed **tag** reference, and refuse an unpinned one with
+no digest at all. Malformed input is the easy case; a perfectly valid tag reference is the one
+that would quietly serve a stale image.
+
+**The repository is keyed on identity, never on address.** A rename must not move an image,
+and two content items must not share a repository — which is also what makes "retain every
+published version of this content" expressible to registry GC. The tag is per *attempt*, so a
+retry never overwrites the image of the attempt it retried; tags exist for humans and for GC,
+which cannot see an untagged manifest as referenced, and are not how anything executes.
+
+**One authority string, resolvable from both sides.** `localhost:5000` inside a rootless
+builder is the builder's own loopback, and a Compose service name is not resolvable by the
+host daemon unless the host is on that network. T5 and T7 prove a push *and a cold pull* with
+the configured string, not two strings that each work in their own context.
+
 ### Semantic validation, and what the schema deliberately does not do
 
 JSON Schema decides the *shape* of a manifest. It cannot decide whether a path stays inside

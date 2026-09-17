@@ -12,6 +12,7 @@ const fs = require("fs");
 
 const manifest = JSON.parse(fs.readFileSync("schemas/manifest.schema.json", "utf8"));
 const descriptor = JSON.parse(fs.readFileSync("schemas/output-descriptor/v1.schema.json", "utf8"));
+const images = JSON.parse(fs.readFileSync("spec/image-references-v1.json", "utf8"));
 
 // [label, pattern, a value that must be accepted]
 const cases = [
@@ -23,6 +24,10 @@ const cases = [
   ["descriptor.path",      descriptor.$defs.renditionPath.pattern,                    "assets/logo.png"],
   ["descriptor.created",   descriptor.properties.created_at.pattern,                  "2026-09-17T17:20:31Z"],
   ["descriptor.media",     descriptor.properties.files.items.properties.media_type.pattern, "text/html"],
+  ["image.tag",            images.tag.pattern,             "build-22222222-2222-4222-8222-222222222222"],
+  ["image.repository",     images.repository.pattern,      "skald/content/11111111-1111-4111-8111-111111111111"],
+  ["image.execution",      images.execution_reference.pattern,
+     "registry.internal:5000/skald/content/11111111-1111-4111-8111-111111111111@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
 ];
 
 // Suffixes that must never be tolerated. CR and CRLF matter as much as LF: a value arriving

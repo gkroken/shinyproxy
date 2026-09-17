@@ -485,6 +485,71 @@ def check_admin_transport():
     print()
 
 
+def check_image_references():
+    """Image reference grammar, against its own positive and negative examples.
+
+    A reference that does not parse fails at the one moment nothing is watching -- when
+    ContainerProxy tries to pull -- and the most important negative is not malformed input
+    but a perfectly well-formed TAG reference. DockerEngineBackend pulls IfNotPresent, so a
+    tag whose meaning changed is never re-fetched and a host keeps running whatever it
+    cached. The execution pattern must refuse tags, which is only demonstrable by trying one.
+    """
+    print("== image references ==")
+    spec = load("spec/image-references-v1.json")
+    ex = spec["examples"]
+
+    exec_re = re.compile(spec["execution_reference"]["pattern"])
+    tag_re = re.compile(spec["tag"]["pattern"])
+    oci_tag_re = re.compile(spec["tag"]["oci_tag_pattern"])
+
+    for group, values in (("valid_execution_references", ex["valid_execution_references"]),
+                          ("valid_tags", ex["valid_tags"])):
+        if not values:
+            fail("%s is empty; the matching checks below would pass over nothing" % group)
+            return
+    if not ex["invalid_execution_references"] or not ex["invalid_tags"]:
+        fail("an invalid-example set is empty, so a pattern that accepts everything would "
+             "still pass")
+        return
+
+    for ref in ex["valid_execution_references"]:
+        if not exec_re.match(ref):
+            fail("valid execution reference rejected: %s" % ref)
+            return
+    for ref, why in ex["invalid_execution_references"].items():
+        if exec_re.match(ref):
+            fail("execution reference pattern accepted %r, which it must not: %s" % (ref, why))
+            return
+
+    for tag in ex["valid_tags"]:
+        if not tag_re.match(tag):
+            fail("valid tag rejected: %s" % tag)
+            return
+        if not oci_tag_re.match(tag):
+            fail("tag %s is not a legal OCI tag" % tag)
+            return
+    for tag, why in ex["invalid_tags"].items():
+        if tag_re.match(tag):
+            fail("tag pattern accepted %r, which it must not: %s" % (tag, why))
+            return
+
+    # Two properties stated in prose that must also hold mechanically.
+    if exec_re.match("registry:5000/skald/content/11111111-1111-4111-8111-111111111111:latest"):
+        fail("the execution pattern accepts a `latest` tag reference")
+        return
+    if "latest" in " ".join(ex["valid_execution_references"]) or \
+            any("latest" in t for t in ex["valid_tags"]):
+        fail("an example presented as valid contains `latest`")
+        return
+
+    print("  ok   %d valid and %d invalid execution references, %d valid and %d invalid tags"
+          % (len(ex["valid_execution_references"]), len(ex["invalid_execution_references"]),
+             len(ex["valid_tags"]), len(ex["invalid_tags"])))
+    print("  ok   the execution pattern refuses tag references, so IfNotPresent cannot serve "
+          "a stale image")
+    print()
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -532,6 +597,7 @@ check_path_rules_have_not_drifted()
 check_semantic_fixtures_have_an_owning_rule()
 check_lifecycle_is_consistent()
 check_admin_transport()
+check_image_references()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")
