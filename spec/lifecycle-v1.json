@@ -1,7 +1,6 @@
 {
   "note": "The authoritative bundle and build lifecycles. NOT a JSON Schema and deliberately not under schemas/ — a document at a schema path is loadable as a schema whether or not it is one, and one that is not turns into a validator accepting everything (review finding dd46cac-F1). Nothing validates against this file; T6's tables, the coordinator and the admin API are written from it, and dev/schema-fixture-check.py checks it is internally consistent. The transitions live here and only here: WORKPLAN-BUNDLES.md describes why they are what they are and does not restate them, because restating a policy in two places is what produced finding d4f5baf-F1.",
   "layout_version": 1,
-
   "identifiers": {
     "form": "Lower-case canonical UUID, server-generated. A publisher never supplies one and never sees one reused.",
     "bundle_id": "One accepted upload and its immutable bytes. Survives every build that reads it, including retries.",
@@ -11,12 +10,14 @@
     "idempotency_key": "Caller-supplied, scoped to one content item. Its job is to stop an HTTP retry becoming a second execution attempt; it is not an identifier of anything and never appears in an object key or an image tag.",
     "lease_generation": "Monotonic per build. A worker that loses its lease is fenced: updates and publication from the old generation are refused rather than merged."
   },
-
   "machines": {
     "bundle": {
       "description": "What happens to an upload. Ends at VALIDATED, which is durable and reusable: a bundle is built any number of times without changing state.",
       "initial": "UPLOADING",
-      "terminal": ["VALIDATED", "REJECTED"],
+      "terminal": [
+        "VALIDATED",
+        "REJECTED"
+      ],
       "states": {
         "UPLOADING": "Bytes are arriving. No receipt is committed, so nothing may read it.",
         "VALIDATING": "Bytes are complete and the receipt is committed. Schema, semantic rules S1-S9, bounded extraction and S10-S11 run here.",
@@ -24,21 +25,50 @@
         "REJECTED": "Failed a named rule. Retained for diagnosis under the failed-artifact policy; never becomes VALIDATED."
       },
       "transitions": [
-        {"from": "UPLOADING",  "to": "VALIDATING", "actor": "platform", "trigger": "all bytes received and receipt committed"},
-        {"from": "UPLOADING",  "to": "REJECTED",   "actor": "platform", "trigger": "upload abandoned past its deadline, or a transport-level limit exceeded"},
-        {"from": "VALIDATING", "to": "VALIDATED",  "actor": "platform", "trigger": "every rule passed"},
-        {"from": "VALIDATING", "to": "REJECTED",   "actor": "platform", "trigger": "a named rule failed"}
-      ]
+        {
+          "from": "UPLOADING",
+          "to": "VALIDATING",
+          "actor": "platform",
+          "trigger": "all bytes received and receipt committed"
+        },
+        {
+          "from": "UPLOADING",
+          "to": "REJECTED",
+          "actor": "platform",
+          "trigger": "upload abandoned past its deadline, or a transport-level limit exceeded"
+        },
+        {
+          "from": "VALIDATING",
+          "to": "VALIDATED",
+          "actor": "platform",
+          "trigger": "every rule passed"
+        },
+        {
+          "from": "VALIDATING",
+          "to": "REJECTED",
+          "actor": "platform",
+          "trigger": "a named rule failed"
+        }
+      ],
+      "deadline_bounded": {
+        "UPLOADING": "REJECTED",
+        "VALIDATING": "REJECTED"
+      }
     },
-
     "build": {
       "description": "One execution attempt. Every terminal state is final: no terminal attempt returns to running, and a retry is a different build_id.",
       "initial": "QUEUED",
-      "terminal": ["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED"],
+      "terminal": [
+        "SUCCEEDED",
+        "FAILED",
+        "CANCELLED",
+        "TIMED_OUT",
+        "INTERRUPTED"
+      ],
       "states": {
         "QUEUED": "Admitted, not yet leased to a worker. Cancellation here is immediate because nothing is running.",
         "RUNNING": "A worker holds the lease and is executing untrusted code.",
-        "PUBLISHING": "The image is being pushed and the version transaction prepared. Cancellation is REFUSED here: the push may already have produced a digest, and a cancel that races publication is how an image exists with no row describing it.",
+        "PUBLISHING": "The image is being pushed and the version transaction prepared. Operator cancellation is REFUSED here: the push may already have produced a digest, and a cancel that races publication is how an image exists with no row describing it. A DEADLINE is not refused -- the worker's lifetime bound covers this phase too, because a push or a verification can stall after the build itself has finished.",
         "SUCCEEDED": "Image published and verified, logs persisted, exactly one content_version inserted and linked. Does not activate anything.",
         "FAILED": "A build step failed, or publication could not be completed. No version exists.",
         "CANCELLED": "An operator stopped it, and the worker is confirmed stopped.",
@@ -46,26 +76,91 @@
         "INTERRUPTED": "The platform lost the attempt — worker death, lease loss, or a restart across it. Distinct from FAILED because nothing is known about how far it got, which is why its artifacts are retained rather than assumed absent."
       },
       "transitions": [
-        {"from": "QUEUED",     "to": "RUNNING",     "actor": "worker",    "trigger": "lease acquired"},
-        {"from": "QUEUED",     "to": "CANCELLED",   "actor": "operator",  "trigger": "cancel while nothing is running"},
-        {"from": "QUEUED",     "to": "INTERRUPTED", "actor": "platform",  "trigger": "admission state lost before a lease was taken"},
-        {"from": "RUNNING",    "to": "PUBLISHING",  "actor": "worker",    "trigger": "build produced an image"},
-        {"from": "RUNNING",    "to": "FAILED",      "actor": "worker",    "trigger": "a build step failed"},
-        {"from": "RUNNING",    "to": "CANCELLED",   "actor": "operator",  "trigger": "cancel requested and the whole worker confirmed stopped"},
-        {"from": "RUNNING",    "to": "TIMED_OUT",   "actor": "platform",  "trigger": "configured deadline exceeded"},
-        {"from": "RUNNING",    "to": "INTERRUPTED", "actor": "platform",  "trigger": "worker died or the lease was lost"},
-        {"from": "PUBLISHING", "to": "SUCCEEDED",   "actor": "platform",  "trigger": "image verified, logs persisted and the version transaction committed"},
-        {"from": "PUBLISHING", "to": "FAILED",      "actor": "platform",  "trigger": "push, verification or the version transaction failed"},
-        {"from": "PUBLISHING", "to": "INTERRUPTED", "actor": "platform",  "trigger": "the platform lost the attempt mid-publication; reconciliation decides what exists"}
-      ]
+        {
+          "from": "QUEUED",
+          "to": "RUNNING",
+          "actor": "worker",
+          "trigger": "lease acquired"
+        },
+        {
+          "from": "QUEUED",
+          "to": "CANCELLED",
+          "actor": "operator",
+          "trigger": "cancel while nothing is running"
+        },
+        {
+          "from": "QUEUED",
+          "to": "INTERRUPTED",
+          "actor": "platform",
+          "trigger": "admission state lost before a lease was taken"
+        },
+        {
+          "from": "RUNNING",
+          "to": "PUBLISHING",
+          "actor": "worker",
+          "trigger": "build produced an image"
+        },
+        {
+          "from": "RUNNING",
+          "to": "FAILED",
+          "actor": "worker",
+          "trigger": "a build step failed"
+        },
+        {
+          "from": "RUNNING",
+          "to": "CANCELLED",
+          "actor": "operator",
+          "trigger": "cancel requested and the whole worker confirmed stopped"
+        },
+        {
+          "from": "RUNNING",
+          "to": "TIMED_OUT",
+          "actor": "platform",
+          "trigger": "configured deadline exceeded"
+        },
+        {
+          "from": "RUNNING",
+          "to": "INTERRUPTED",
+          "actor": "platform",
+          "trigger": "worker died or the lease was lost"
+        },
+        {
+          "from": "PUBLISHING",
+          "to": "SUCCEEDED",
+          "actor": "platform",
+          "trigger": "image verified, logs persisted and the version transaction committed"
+        },
+        {
+          "from": "PUBLISHING",
+          "to": "FAILED",
+          "actor": "platform",
+          "trigger": "push, verification or the version transaction failed"
+        },
+        {
+          "from": "PUBLISHING",
+          "to": "INTERRUPTED",
+          "actor": "platform",
+          "trigger": "the platform lost the attempt mid-publication; reconciliation decides what exists"
+        },
+        {
+          "from": "PUBLISHING",
+          "to": "TIMED_OUT",
+          "actor": "platform",
+          "trigger": "configured deadline exceeded during push or verification; the worker is stopped first, late completion is fenced by lease generation, and any image already pushed becomes an unreferenced artifact for the collector"
+        }
+      ],
+      "deadline_bounded": {
+        "RUNNING": "TIMED_OUT",
+        "PUBLISHING": "TIMED_OUT"
+      }
     }
   },
-
   "invariants": [
     "A content_version row exists only for a SUCCEEDED build, and exactly one per success.",
     "No state transition activates anything. Activation is a separate, explicit, content-scoped operation.",
     "Retention clocks for a build start when it reaches a terminal state, never at creation.",
     "A terminal state is final. Retrying produces a new build_id with retry_of set, not a reopened attempt.",
-    "Cancellation is refused once PUBLISHING has begun; an operator who wants that content gone deletes the version afterwards."
+    "Cancellation is refused once PUBLISHING has begun. Recovery is deleting the CONTENT, which is the only delete the admin API has; there is no version-delete endpoint and this rationale does not create one.",
+    "A deadline that expires during PUBLISHING produces TIMED_OUT and never a late SUCCEEDED: the version transaction is fenced by lease generation, so a worker that finishes after its deadline cannot insert a content_version."
   ]
 }

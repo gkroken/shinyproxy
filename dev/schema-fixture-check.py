@@ -255,8 +255,26 @@ def check_lifecycle_is_consistent():
     print("== lifecycle ==")
     spec = load("spec/lifecycle-v1.json")
     actors = {"platform", "worker", "operator"}
+    required = {"bundle", "build"}
 
-    for name, m in spec["machines"].items():
+    # Require the machines before inspecting them. The loop below reports nothing at all for
+    # an empty map, so deleting the build lifecycle from the file left its own consistency
+    # gate green (finding c4087cd-F2). This is the third checker in this runner to need the
+    # same guard: a loop over supplied data passes vacuously unless something demands the
+    # data first.
+    machines = spec.get("machines") or {}
+    absent = sorted(required - set(machines))
+    if absent:
+        fail("spec/lifecycle-v1.json is missing required machine(s): %s" % ", ".join(absent))
+        return
+
+    for name, m in machines.items():
+        for key in ("initial", "terminal", "states", "transitions", "deadline_bounded"):
+            if not m.get(key):
+                fail("%s: %s is missing or empty" % (name, key))
+                return
+
+    for name, m in machines.items():
         states, terminal = set(m["states"]), set(m["terminal"])
         transitions = m["transitions"]
         froms = {t["from"] for t in transitions}
@@ -300,8 +318,26 @@ def check_lifecycle_is_consistent():
             fail("%s: unreachable state(s) %s" % (name, ", ".join(orphans)))
             return
 
-        print("  ok   %-7s %d states, %d transitions, %d terminal, all reachable"
-              % (name, len(states), len(transitions), len(terminal)))
+        # Every state that waits on something must have a deadline outcome, and the machine
+        # has to say which states those are. Structural checks pass happily over a phase with
+        # no timeout at all: PUBLISHING was reachable and had outgoing edges, and simply had
+        # no defined outcome when a push stalled (finding c4087cd-F1).
+        for state, target in m["deadline_bounded"].items():
+            if state not in states:
+                fail("%s: deadline_bounded names unknown state %s" % (name, state))
+                return
+            if target not in terminal:
+                fail("%s: deadline from %s targets %s, which is not terminal"
+                     % (name, state, target))
+                return
+            if not any(t["from"] == state and t["to"] == target for t in transitions):
+                fail("%s: %s is declared deadline-bounded but has no transition to %s; a phase "
+                     "that can stall with no timeout outcome is a coordinator that hangs"
+                     % (name, state, target))
+                return
+
+        print("  ok   %-7s %d states, %d transitions, %d terminal, %d deadline-bounded, all reachable"
+              % (name, len(states), len(transitions), len(terminal), len(m["deadline_bounded"])))
 
     print()
 

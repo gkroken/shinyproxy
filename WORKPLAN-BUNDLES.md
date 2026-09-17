@@ -387,10 +387,14 @@ descriptions.
 `retry_of`, reusing the same immutable validated bundle. Reopening a terminal attempt would
 mean its logs, its artifacts and its retention clock describe two different executions.
 
-**Cancellation is refused once `PUBLISHING` has begun.** By then a push may already have
-produced a digest, and a cancel that races publication is how an image comes to exist with no
-row describing it. An operator who wants that content gone deletes the version afterwards,
-which is an operation with a transaction behind it.
+**Operator cancellation is refused once `PUBLISHING` has begun, and a deadline is not.** By
+then a push may already have produced a digest, and a cancel that races publication is how an
+image comes to exist with no row describing it. A deadline is different in kind: the worker's
+lifetime bound covers publication too, because a push or a verification can stall after the
+build has finished, so `PUBLISHING` has a `TIMED_OUT` outcome and the lease generation fences
+a late worker out of inserting a version. Recovery from a refused cancellation is deleting the
+*content* — the only delete the admin API has. There is no version-delete endpoint, and this
+rationale does not invent one.
 
 **`INTERRUPTED` is distinct from `FAILED`.** A failure is a build that ran and did not work;
 an interruption is an attempt the platform lost — worker death, lease loss, a restart across
