@@ -688,6 +688,15 @@ bundle id: replaying it re-uploads that bundle rather than creating a second. An
 `POST`, not `DELETE`** — cancelling removes nothing, and it can be refused, which `DELETE`
 would make an odd thing to answer 409 to.
 
+**`PUT` here means "never a second bundle and never rewritten bytes", not "send it again and
+it works".** Once the receipt is committed the bytes are immutable and the bundle has left
+`UPLOADING`, so a repeat is refused with 409 and its current state; a client whose response
+was lost recovers by *reading* status, not by uploading again. Different bytes at the same id
+get the same 409, because a bundle id names particular bytes a build may already have read —
+replacement means a fresh id. The earlier wording promised a replay would "re-upload the same
+bundle", which would have meant either rewriting an immutable object or reopening a terminal
+state.
+
 The CSRF rule is the one to read before adding an endpoint. ShinyProxy protects `POST /login`
 alone, so "accepts no media type an HTML form can produce" *is* the defence for everything
 here — and the obvious way to build a file upload, `multipart/form-data`, is exactly the one a

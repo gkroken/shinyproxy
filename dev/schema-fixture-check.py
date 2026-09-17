@@ -342,14 +342,35 @@ def check_lifecycle_is_consistent():
     print()
 
 
-def check_admin_transport():
-    """The admin surface, checked for the things that are checkable without an implementation.
+# Anchored here, NOT read from the document being checked. An earlier version took the deny
+# list from spec/admin-transport-v1.json itself, so deleting "text/plain" from that list and
+# then accepting text/plain passed (finding 29afb31-F1). What a browser can send is a fact
+# about browsers; a document under review does not get to redefine it.
+FORM_PRODUCIBLE = frozenset({
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "text/plain",
+})
 
-    Chiefly one: no endpoint may accept a media type an HTML form can produce. ShinyProxy
-    enables CSRF protection for POST /login alone, so that content-type rule IS the defence
-    for everything spine #2 adds, and the obvious way to build a file upload --
-    multipart/form-data -- is precisely the one a cross-site form can forge. Nothing else in
-    this repository would notice it being widened.
+BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+def normalise_media_type(value):
+    """Lower-cased type/subtype with parameters stripped.
+
+    `text/plain; charset=UTF-8` and `TEXT/PLAIN` are text/plain to a browser and were not to
+    the string comparison this replaces.
+    """
+    return value.split(";", 1)[0].strip().lower()
+
+
+def check_admin_transport():
+    """The admin surface, checked for what is checkable without an implementation.
+
+    Chiefly one thing: no endpoint may accept a media type an HTML form can produce.
+    ShinyProxy enables CSRF protection for POST /login alone, so that rule IS the defence for
+    everything spine #2 adds, and the obvious way to build a file upload --
+    multipart/form-data -- is exactly what a cross-site form can forge.
     """
     print("== admin transport ==")
     spec = load("spec/admin-transport-v1.json")
@@ -361,15 +382,17 @@ def check_admin_transport():
         fail("spec/admin-transport-v1.json declares no endpoints; every check below would "
              "pass over an empty list")
         return
-    ids = {e["id"] for e in endpoints}
-    absent = sorted(required - ids)
+    absent = sorted(required - {e["id"] for e in endpoints})
     if absent:
         fail("admin transport is missing required endpoint(s): %s" % ", ".join(absent))
         return
 
-    forgeable = set(spec["csrf"]["form_producible"])
-    if not forgeable:
-        fail("csrf.form_producible is empty, so the media-type check below cannot fail")
+    # The document may restate the deny list, but only in full. Understating it there would
+    # otherwise read as a relaxation to anyone consulting the spec rather than this file.
+    declared = {normalise_media_type(t) for t in spec["csrf"]["form_producible"]}
+    if declared != set(FORM_PRODUCIBLE):
+        fail("csrf.form_producible is %s; it must list exactly the three types a browser form "
+             "can send: %s" % (sorted(declared), sorted(FORM_PRODUCIBLE)))
         return
 
     for e in endpoints:
@@ -377,11 +400,23 @@ def check_admin_transport():
             fail("%s is at %s, outside /admin, so it would need its own authorization rule"
                  % (e["id"], e["path"]))
             return
-        bad = sorted(set(e.get("accepts", [])) & forgeable)
-        if bad:
-            fail("%s accepts %s, which an HTML form can produce cross-site"
-                 % (e["id"], ", ".join(bad)))
+
+        accepts = e.get("accepts", [])
+        if e["method"] in BODY_METHODS and not accepts:
+            fail("%s is a %s with no declared accepts; an endpoint that names no media type "
+                 "constrains none" % (e["id"], e["method"]))
             return
+
+        for raw in accepts:
+            media = normalise_media_type(raw)
+            if "*" in media:
+                fail("%s accepts %r; a wildcard admits every form-producible type, so it can "
+                     "never be checked" % (e["id"], raw))
+                return
+            if media in FORM_PRODUCIBLE:
+                fail("%s accepts %r, which an HTML form can produce cross-site"
+                     % (e["id"], raw))
+                return
 
     upload = next(e for e in endpoints if e["id"] == "bundle.upload")
     if upload.get("requires_header") != spec["csrf"]["required_header"]:
@@ -395,9 +430,29 @@ def check_admin_transport():
              "status URL and does not wait for an image" % create["success"])
         return
 
-    # Cancellation has to agree with the lifecycle, or the two specs describe different
-    # products. A state that refuses cancellation must have no transition to CANCELLED.
+    bundle = load("spec/lifecycle-v1.json")["machines"]["bundle"]
     build = load("spec/lifecycle-v1.json")["machines"]["build"]
+
+    # The upload may only be accepted where no receipt is committed, or it would rewrite
+    # immutable bytes or reopen a terminal state (finding 29afb31-F2).
+    accepted_in = upload.get("accepted_in_states") or []
+    if not accepted_in:
+        fail("bundle.upload does not say which bundle states accept it, so nothing stops it "
+             "rewriting committed bytes")
+        return
+    for state in accepted_in:
+        if state not in bundle["states"]:
+            fail("bundle.upload accepted_in_states names unknown bundle state %s" % state)
+            return
+        if state in bundle["terminal"]:
+            fail("bundle.upload is accepted in %s, which is terminal; the bytes are already "
+                 "committed and immutable there" % state)
+            return
+    if not upload.get("conflict"):
+        fail("bundle.upload declares no conflict status, so a replay after the receipt is "
+             "committed has no defined answer")
+        return
+
     refused = spec.get("cancel_refused_states") or []
     if not refused:
         fail("cancel_refused_states is empty; the agreement with the lifecycle below would "
@@ -412,10 +467,12 @@ def check_admin_transport():
                  "CANCELLED transition" % (state, state))
             return
 
-    print("  ok   %d endpoints, all under /admin, none accepting a form-producible type"
+    print("  ok   %d endpoints, all under /admin; no wildcard or form-producible accepts"
           % len(endpoints))
-    print("  ok   upload requires %s; build.create returns 202; cancellation refused in %s, "
-          "matching the lifecycle" % (spec["csrf"]["required_header"], ", ".join(refused)))
+    print("  ok   upload requires %s, accepted only in %s, conflicts with %s"
+          % (spec["csrf"]["required_header"], ", ".join(accepted_in), upload["conflict"]))
+    print("  ok   build.create returns 202; cancellation refused in %s, matching the lifecycle"
+          % ", ".join(refused))
     print()
 
 

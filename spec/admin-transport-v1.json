@@ -1,28 +1,33 @@
 {
   "note": "The admin HTTP surface spine #2 adds. Not a JSON Schema and not under schemas/, for the reason recorded in spec/lifecycle-v1.json. T8 implements and tests this; T1 fixes the shape. dev/schema-fixture-check.py checks the invariants below that can be checked without an implementation — chiefly that nothing here is reachable by a cross-site form, and that cancellation agrees with spec/lifecycle-v1.json.",
   "layout_version": 1,
-
   "authorization": {
     "mechanism": "Inherited, not re-declared. Every path sits under /admin, which UISecurityConfig already gates on userService.isAdmin. Spine #1 task 7 established this: a second matcher is a second place for an authorization rule to drift, and it was proven by moving the controller to /xadmin and watching a non-admin list, create and delete.",
     "audience": "Administrators only. Bundle bytes, build logs and source are NOT reachable by a content viewer: canAccess grants the right to run content, never to read what it was built from.",
     "signed_out": "Redirected to log in, as everywhere else under /admin. Never served."
   },
-
   "csrf": {
     "rule": "No endpoint may accept a media type an HTML form can produce. That is the whole defence, because ShinyProxy enables CSRF protection for POST /login alone, so a session-authenticated admin on a hostile page is otherwise submittable.",
-    "form_producible": ["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"],
-    "consequence": "The bundle upload is a raw application/gzip body and explicitly NOT multipart/form-data, which is the obvious way to build an upload and the one a cross-site form can forge. A non-safelisted content type forces a CORS preflight that this application never grants.",
+    "form_producible": [
+      "application/x-www-form-urlencoded",
+      "multipart/form-data",
+      "text/plain"
+    ],
+    "consequence": "The bundle upload is a raw application/gzip body and explicitly NOT multipart/form-data, which is the obvious way to build an upload and the one a cross-site form can forge. A non-safelisted content type forces a CORS preflight, which is denied for an origin the deployment has not configured. Not 'never granted': ContainerProxy enables CORS when proxy.api-security.cors-allowed-origins is set (WebSecurityConfig.java:126-128), and those origins are mapped with credentials across /**. The guarantee is against unconfigured origins, and a deployment that lists an origin has chosen to trust it.",
     "required_header": "X-Skald-Upload",
     "required_header_rationale": "Belt to the content-type braces. A custom header cannot be set by a cross-site form at all, and setting one from fetch() forces a preflight. It costs one header and does not depend on message-converter configuration that nothing in this repository owns."
   },
-
   "endpoints": [
     {
       "id": "bundle.create",
       "method": "POST",
       "path": "/admin/content/{contentId}/bundles",
-      "accepts": ["application/json"],
-      "produces": ["application/json"],
+      "accepts": [
+        "application/json"
+      ],
+      "produces": [
+        "application/json"
+      ],
       "success": 201,
       "notes": "Creates the bundle row in UPLOADING and returns its id. Metadata travels as JSON here so the byte upload carries none, which keeps the binary endpoint a pure stream."
     },
@@ -30,18 +35,29 @@
       "id": "bundle.upload",
       "method": "PUT",
       "path": "/admin/content/{contentId}/bundles/{bundleId}/content",
-      "accepts": ["application/gzip"],
-      "produces": ["application/json"],
+      "accepts": [
+        "application/gzip"
+      ],
+      "produces": [
+        "application/json"
+      ],
       "requires_header": "X-Skald-Upload",
       "success": 200,
-      "notes": "The bytes. PUT because it is idempotent against one bundle id: replaying it re-uploads the same bundle rather than creating a second. Streamed to object storage under the configured limits and never buffered whole; Content-Length is a claim, checked against the bytes actually read."
+      "notes": "The bytes. Accepted only while the bundle is UPLOADING, which is the only state with no committed receipt. Streamed to object storage under the configured limits and never buffered whole; Content-Length is a claim, checked against the bytes actually read.",
+      "accepted_in_states": [
+        "UPLOADING"
+      ],
+      "conflict": 409,
+      "replay": "PUT is idempotent in the sense that matters -- it never creates a second bundle and never rewrites committed bytes -- and NOT in the sense of 'send it again and it works'. Once the receipt is committed the bytes are immutable and the bundle has left UPLOADING, so a repeat PUT is refused with 409 carrying the bundle's current state. A client whose response was lost recovers with GET bundle.status, not by uploading again: re-reading is the safe recovery and re-writing is not. Different bytes at the same id are the same 409 -- replacing content means a fresh bundle id, because a bundle id names particular bytes that a build may already have read. Concurrent PUTs to one id serialise; the loser gets 409. A PUT abandoned before its receipt leaves the bundle in UPLOADING and its partial object to the one-hour incomplete-upload rule, so a later PUT restarts it cleanly."
     },
     {
       "id": "bundle.status",
       "method": "GET",
       "path": "/admin/content/{contentId}/bundles/{bundleId}",
       "accepts": [],
-      "produces": ["application/json"],
+      "produces": [
+        "application/json"
+      ],
       "success": 200,
       "notes": "Bundle state and, when REJECTED, the named rule that rejected it."
     },
@@ -49,8 +65,12 @@
       "id": "build.create",
       "method": "POST",
       "path": "/admin/content/{contentId}/builds",
-      "accepts": ["application/json"],
-      "produces": ["application/json"],
+      "accepts": [
+        "application/json"
+      ],
+      "produces": [
+        "application/json"
+      ],
       "success": 202,
       "notes": "202, never 200: it returns a build id and a status URL and does not wait for an image. Body names a VALIDATED bundle and an idempotency key; the key stops an HTTP retry becoming a second attempt."
     },
@@ -59,7 +79,9 @@
       "method": "GET",
       "path": "/admin/content/{contentId}/builds/{buildId}",
       "accepts": [],
-      "produces": ["application/json"],
+      "produces": [
+        "application/json"
+      ],
       "success": 200
     },
     {
@@ -67,7 +89,9 @@
       "method": "GET",
       "path": "/admin/content/{contentId}/builds",
       "accepts": [],
-      "produces": ["application/json"],
+      "produces": [
+        "application/json"
+      ],
       "success": 200
     },
     {
@@ -75,7 +99,10 @@
       "method": "GET",
       "path": "/admin/content/{contentId}/builds/{buildId}/logs",
       "accepts": [],
-      "produces": ["text/plain", "application/x-ndjson"],
+      "produces": [
+        "text/plain",
+        "application/x-ndjson"
+      ],
       "success": 200,
       "notes": "Cursor-paginated over committed chunks. text/plain is the curl view and exists so an admin can read a failing build before any UI does. Log text is escaped and terminal control sequences are neutralised; it is never interpolated into HTML."
     },
@@ -84,7 +111,9 @@
       "method": "GET",
       "path": "/admin/content/{contentId}/builds/{buildId}/logs/stream",
       "accepts": [],
-      "produces": ["text/event-stream"],
+      "produces": [
+        "text/event-stream"
+      ],
       "success": 200,
       "notes": "Resumable from a cursor, bounded subscriber queue, keepalive and a terminal event. A slow or vanished client must not stall the build."
     },
@@ -92,14 +121,19 @@
       "id": "build.cancel",
       "method": "POST",
       "path": "/admin/content/{contentId}/builds/{buildId}/cancel",
-      "accepts": ["application/json"],
-      "produces": ["application/json"],
+      "accepts": [
+        "application/json"
+      ],
+      "produces": [
+        "application/json"
+      ],
       "success": 202,
       "refused": 409,
       "notes": "POST, not DELETE: cancelling is not deleting, and nothing is removed. 202 because cancellation during execution completes only once the worker is confirmed stopped."
     }
   ],
-
-  "cancel_refused_states": ["PUBLISHING"],
+  "cancel_refused_states": [
+    "PUBLISHING"
+  ],
   "cancel_refused_rationale": "409 rather than a silent no-op. A push may already have produced a digest, so a cancel racing publication is how an image comes to exist with no row describing it. This list must agree with spec/lifecycle-v1.json: a state named here must have no transition to CANCELLED."
 }
