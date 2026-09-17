@@ -1045,13 +1045,52 @@ below are marked passed by this planning document.
       configuration and the repository set in deployment policy, neither of which a bundle
       declares.
 
-- [ ] **T2. Author the adversarial corpus independently — before extractor code.**
+- [~] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
       without production validation helpers. Store fixture generator, hashes and expectations.
       Test the oracle against a deliberately unsafe disposable extractor and a deliberately
       unbounded variant under outer test limits. **Pass:** the oracle detects outside-root
       changes, duplicate overwrite, limit bypass and unexpected acceptance; it is not a
       collection of negative fixtures that would “pass” because nothing runs.
+
+      **T2(a) done 2026-09-17 — the corpus and its self-check.** The oracle, the sentinels
+      and the deliberately unsafe extractor are T2(b) and are what the Pass line above
+      actually turns on; this is the material they will be pointed at.
+
+      - `dev/fixtures/bundles/generate.py` builds **76 fixtures** across all seven required
+        groups: 11 positive controls, 10 traversal, 5 links, 14 bombs, 12 types and path
+        limits, 7 duplicate/alias, 17 manifest and inventory. Standard library only, no
+        import of any Skald class, and hand-written tar headers wherever a polite writer
+        would refuse — a negative size, a NUL inside a name, a bad checksum, a GNU sparse
+        member. A corpus built solely with a well-behaved library omits exactly the cases
+        worth having.
+      - **Archives are generated, not checked in.** The plan asks for the generator, hashes
+        and expectations; storing 3.4 MB of bombs as well would add a second place for the
+        corpus to drift. Every SHA-256 is recorded and regeneration is byte-identical, so a
+        generator change that alters a fixture fails loudly instead of redefining the test.
+      - Boundary fixtures are parameterised off the configured limits, so N/N+1 pairs still
+        straddle the real value after an operator changes one.
+      - `dev/bundle-corpus-check.py` asserts **every negative fixture exhibits the property
+        its name claims**, with one predicate per fixture rather than per group. This is the
+        part that matters: a corpus of negatives that nothing runs against reports itself as
+        complete forever, and the way it rots is a fixture quietly becoming benign while
+        still being counted. Positive controls are checked to exhibit **none** of seven
+        hostile properties, so "rejects everything" stays distinguishable from "works".
+      - Its tar reader is hand-written rather than `tarfile`-based, because several fixtures
+        are malformed on purpose and a library that refuses to parse them would leave
+        precisely those uninspectable. Decompression is bounded and returns its prefix, so
+        the expansion bombs' headers are readable without materialising two gigabytes.
+      - Mutation-tested: a traversal fixture made benign, a symlink added to a positive
+        control, the setuid fixture losing its bit, the case-alias fixture ceasing to
+        collide, and a fixture's bytes changing without its hash — each reported and failed.
+
+      Two defects in the checker were found by the checker, both of the class this project
+      keeps meeting. Its tar walker could not resolve GNU long names, so every fixture whose
+      point is a long path was being inspected through a `././@LongLink` placeholder — which
+      first surfaced as a *positive* control tripping the traversal check, because the
+      placeholder contains `/./`. And the decompression bound discarded its buffer, so the
+      expansion bombs' headers were invisible and `bomb-expanded-over-limit` appeared not to
+      exhibit its own property.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,
