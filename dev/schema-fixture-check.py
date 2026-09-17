@@ -1,0 +1,198 @@
+# Validates every schema fixture corpus in this repository.
+#
+# Run through dev/validate-manifests.sh, which supplies a container holding a JSON Schema
+# implementation that is NOT the one the server will use. Kept as a file rather than a shell
+# heredoc so that `$schema`, `$defs` and `$ref` are not at the mercy of shell expansion, and
+# so it can be read on its own.
+#
+# Two review findings shaped what this checks, and both are worth knowing before editing it:
+#
+#   dd46cac-F1  A document without `$schema` is still a schema. JSON Schema ignores unknown
+#               keywords, so an "index" placed at a schema path validated null, 42 and every
+#               malformed input. Hence the vacuity probes below: a schema that accepts
+#               anything makes every other assertion here meaningless.
+#   dd46cac-F2  `$` does not mean end-of-string in Python's re or java.util.regex; it matches
+#               before a final newline. Hence the trailing-newline fixtures, and the separate
+#               ECMA-262 cross-check in dev/schema-regex-check.js.
+
+import json
+import pathlib
+import sys
+
+from importlib.metadata import version as _pkg_version
+
+from jsonschema import Draft202012Validator
+
+REPO = pathlib.Path(".")
+
+CORPORA = [
+    {
+        "name": "manifest",
+        "dir": REPO / "dev/fixtures/manifests",
+        # The published path a consumer reads, which must be the same document the version
+        # selects. Absent for corpora that have no published alias.
+        "published": REPO / "schemas/manifest.schema.json",
+    },
+    {
+        "name": "output-descriptor",
+        "dir": REPO / "dev/fixtures/output-descriptors",
+        "published": None,
+    },
+]
+
+ok = True
+
+
+def fail(message):
+    global ok
+    ok = False
+    print("  FAIL " + message)
+
+
+def load(path):
+    return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+
+def vacuity_probe(validator, label):
+    """A schema that accepts anything would make every check below pass for free."""
+    for name, doc in (("null", None), ("42", 42), ("empty object", {})):
+        if validator.is_valid(doc):
+            fail("%s accepts %s; it is not constraining anything" % (label, name))
+
+
+def check_corpus(corpus):
+    print("== %s ==" % corpus["name"])
+    exp = load(corpus["dir"] / "expectations.json")
+    versioned = pathlib.Path(exp["schema"])
+    ver_text = versioned.read_text(encoding="utf-8")
+
+    validators = {}
+    if corpus["published"] is not None:
+        pub_text = corpus["published"].read_text(encoding="utf-8")
+        if pub_text != ver_text:
+            fail("%s and %s differ; the published path could validate something the "
+                 "released version rejects" % (corpus["published"], versioned))
+            return
+        pub = json.loads(pub_text)
+        if "$schema" not in pub:
+            fail("%s is not a JSON Schema document" % corpus["published"])
+        Draft202012Validator.check_schema(pub)
+        validators["published"] = Draft202012Validator(pub)
+
+    ver = json.loads(ver_text)
+    Draft202012Validator.check_schema(ver)
+    validators["versioned"] = Draft202012Validator(ver)
+
+    for label, v in validators.items():
+        vacuity_probe(v, "%s (%s)" % (corpus["name"], label))
+
+    def verdicts(doc):
+        return {k: sorted(v.iter_errors(doc), key=lambda e: e.path) for k, v in validators.items()}
+
+    def report(mark, group, name, detail=""):
+        print("  %-4s %-16s %-38s %s" % (mark, group, name, detail))
+
+    def check(group, folder, name, must_accept, must_reject_everywhere=False):
+        doc = load(corpus["dir"] / folder / (name + ".json"))
+        v = verdicts(doc)
+        if len({bool(errs) for errs in v.values()}) > 1:
+            fail("%s: documents disagree about %s" % (corpus["name"], name))
+            return
+        errs = v["versioned"]
+        if must_accept and errs:
+            fail("%s %s rejected: %s" % (group, name, errs[0].message[:60]))
+        elif must_accept:
+            report("ok", group, name)
+        elif must_reject_everywhere and not errs:
+            fail("%s %s ACCEPTED by the schema" % (group, name))
+        elif must_reject_everywhere:
+            report("ok", group, name, errs[0].message[:55])
+        elif errs:
+            # A semantic-only case. The schema rejecting it would mean the schema is
+            # enforcing something other than what is written, and would hide that the
+            # semantic validator still owes the check.
+            fail("%s %s: schema rejected a semantic-only case" % (group, name))
+        else:
+            report("ok", group, name, "accepted, as specified; owed to the semantic validator")
+
+    for name in exp["valid"]:
+        check("valid", "valid", name, True)
+    for name in exp["schema_invalid"]:
+        check("schema-invalid", "invalid", name, False, must_reject_everywhere=True)
+    for name in exp["semantic_invalid"]:
+        check("semantic-only", "invalid", name, False)
+
+    print("  valid %d | schema-invalid %d | semantic-only %d | documents checked: %s" % (
+        len(exp["valid"]), len(exp["schema_invalid"]), len(exp["semantic_invalid"]),
+        ", ".join(sorted(validators))))
+    print()
+
+
+def check_path_rules_have_not_drifted():
+    """An output path and an input path face the same hostile input.
+
+    The two definitions are duplicated rather than $ref'd across files, because a released
+    schema that resolves a reference to another file is a schema whose meaning depends on
+    what that other file says later. Duplication is the safer trade only while something
+    notices divergence, which is this.
+    """
+    print("== path rules ==")
+    manifest = load("schemas/manifest/v1.schema.json")["$defs"]["payloadPath"]
+    descriptor = load("schemas/output-descriptor/v1.schema.json")["$defs"]["renditionPath"]
+    for key in ("pattern", "minLength", "maxLength", "type"):
+        if manifest.get(key) != descriptor.get(key):
+            fail("payloadPath.%s and renditionPath.%s have drifted: %r vs %r"
+                 % (key, key, manifest.get(key), descriptor.get(key)))
+            return
+    print("  ok   payloadPath and renditionPath agree on type, pattern and bounds")
+    print()
+
+
+def check_descriptor_round_trip():
+    """Names that need URL encoding must survive being written and read again.
+
+    Not a test of S3 or of a URL builder, neither of which exists yet: a test that the
+    descriptor carries such names literally, so that whatever encodes them later does it at
+    one boundary rather than inheriting something already mangled.
+
+    The comparison is against `url_encoding_expected_paths` in expectations.json, not against
+    the fixture's own re-serialisation. `json.loads(json.dumps(x)) == x` is true whatever the
+    fixture contains, and a check that cannot fail is worse than no check.
+    """
+    print("== descriptor round-trip ==")
+    corpus = pathlib.Path("dev/fixtures/output-descriptors")
+    exp = load(corpus / "expectations.json")
+    expected = exp["url_encoding_expected_paths"]
+    src = corpus / "valid" / (exp["url_encoding_fixture"] + ".json")
+
+    original = json.loads(src.read_text(encoding="utf-8"))
+    actual = [f["path"] for f in original["files"]]
+    if actual != expected:
+        fail("descriptor paths differ from the stated expectation:\n       file:     %r\n"
+             "       expected: %r" % (actual, expected))
+        return
+
+    # Both encodings a writer might choose must parse back to the same code points.
+    for label, text in (("escaped ASCII", json.dumps(original, ensure_ascii=True)),
+                        ("UTF-8", json.dumps(original, ensure_ascii=False))):
+        back = [f["path"] for f in json.loads(text)["files"]]
+        if back != expected:
+            fail("a %s round-trip changed the names" % label)
+            return
+
+    print("  ok   %d awkward names match the stated expectation and survive both an "
+          "escaped-ASCII and a UTF-8 round-trip" % len(expected))
+    for p in expected:
+        print("       %s" % p)
+    print()
+
+
+print("validator: python jsonschema %s | dialect 2020-12" % _pkg_version("jsonschema"))
+print()
+for corpus in CORPORA:
+    check_corpus(corpus)
+check_path_rules_have_not_drifted()
+check_descriptor_round_trip()
+
+print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")
+sys.exit(0 if ok else 1)

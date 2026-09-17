@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skald:output-descriptor:v1",
+  "title": "Skald rendition output descriptor, version 1",
+  "description": "The last object written for a rendition, at v1/content/C/versions/V/renditions/R/descriptor.json. Its presence is what makes a rendition complete: files are written first, this last, so a reader that finds a descriptor can rely on every file it lists existing. A reader follows descriptors rather than listing the bucket or trusting an object named 'latest', which is why this document has to be readable by an R or Python helper with no Java classes and no Connect board protocol. Reserved and specified now, in spine #2; rendering, current-rendition publication and downloads belong to #5, #6 and #8. Released and immutable: changed meaning requires a new layout_version, not an edit here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "layout_version",
+    "content_id",
+    "version_id",
+    "rendition_id",
+    "content_version",
+    "producer",
+    "created_at",
+    "files"
+  ],
+  "properties": {
+    "layout_version": {
+      "description": "Exactly 1. A reader that does not know a higher number must stop rather than guess, because the key layout and this document's meaning move together.",
+      "type": "integer",
+      "const": 1
+    },
+    "content_id": {
+      "description": "The content UUID, C in the key layout. Immutable, and unrelated to the content's path: a rename must not move or rewrite an artifact.",
+      "$ref": "#/$defs/uuid"
+    },
+    "version_id": {
+      "description": "The content_version UUID, V. Distinct from the display version number below; both appear because the key uses one and humans use the other.",
+      "$ref": "#/$defs/uuid"
+    },
+    "rendition_id": {
+      "description": "The rendition UUID, R. One version can have several renditions -- a scheduled re-render produces a new one -- so this, not the version, is what a download URL ultimately resolves to.",
+      "$ref": "#/$defs/uuid"
+    },
+    "content_version": {
+      "description": "The version's display number, the n in a spec id's --v<n>. Recorded for humans and for cross-checking against the database; it is never the key.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "producer": {
+      "description": "What made this rendition. Recorded so that a rendition can be traced back to the attempt that produced it without consulting the database, and so a later producer kind cannot be mistaken for a build.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "description": "'build' is spine #2's. 'render' is reserved for the scheduled renders of spine #6 and is listed now only so that adding it later is not a layout change.",
+          "type": "string",
+          "enum": ["build", "render"]
+        },
+        "id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "created_at": {
+      "description": "When the rendition was completed, RFC 3339 with an explicit offset. A local time without an offset is ambiguous and is rejected.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})(?![\\s\\S])",
+      "maxLength": 64
+    },
+    "files": {
+      "description": "Every file in the rendition, each stored at files/<path> beneath the rendition prefix. May be empty: a render that legitimately produced nothing is a complete rendition with no files, and is not the same as an incomplete one, which has no descriptor at all.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size", "sha256", "media_type"],
+        "properties": {
+          "path": { "$ref": "#/$defs/renditionPath" },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "description": "Of the stored bytes, so a reader can verify what it fetched. Never an S3 ETag, which is not a content hash for a multipart object.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "media_type": {
+            "description": "What to serve the file as. Recorded at write time rather than guessed from the extension at read time, so that serving is a lookup and not a decision.",
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+-]{0,126}(?![\\s\\S])",
+            "maxLength": 255
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "description": "Lower-case canonical form. Upper case is rejected rather than normalised, so that a key built from this string is the key that was written.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "renditionPath": {
+      "description": "A relative, slash-separated path beneath the rendition's files/ prefix. Byte-identical in rule to the bundle manifest's payloadPath, and dev/validate-manifests.sh asserts the two definitions have not drifted: an output path and an input path face the same hostile input and must not diverge by accident. Containment, '.' and '..' segments, empty segments, NFC normalisation and case collisions are the writer's to enforce, exactly as on the input side.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^/\\\\\\u0000-\\u001f][^\\\\\\u0000-\\u001f]*(?![\\s\\S])"
+    }
+  }
+}

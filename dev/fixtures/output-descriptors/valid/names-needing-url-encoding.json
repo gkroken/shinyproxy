@@ -1,0 +1,62 @@
+{
+  "layout_version": 1,
+  "content_id": "11111111-1111-4111-8111-111111111111",
+  "version_id": "aaaaaaa1-0000-4000-8000-000000000002",
+  "rendition_id": "bbbbbbb1-0000-4000-8000-000000000002",
+  "content_version": 2,
+  "producer": {
+    "kind": "build",
+    "id": "ccccccc1-0000-4000-8000-000000000001"
+  },
+  "created_at": "2026-09-17T17:20:31Z",
+  "files": [
+    {
+      "path": "a file with spaces.html",
+      "size": 12,
+      "sha256": "73060c4e66bb824cd0c4aeecba626f383e74a135083020a988c5e2d311809df3",
+      "media_type": "text/html"
+    },
+    {
+      "path": "report#1.html",
+      "size": 11,
+      "sha256": "78ab87cd2380b94b867d9c66a4d6157d00eed81fa4a5515817ce91e883edc076",
+      "media_type": "text/html"
+    },
+    {
+      "path": "100%25.html",
+      "size": 22,
+      "sha256": "0a93ca008e8d5ec33a4de3eaa0201d253d190c3e0d19c81ef3f2f25d697c9a53",
+      "media_type": "text/html"
+    },
+    {
+      "path": "100%.html",
+      "size": 14,
+      "sha256": "bb2f6f8817ae1125ba0fe7d23b9939158667cc859f547e721365351205bf1fc7",
+      "media_type": "text/html"
+    },
+    {
+      "path": "résumé.pdf",
+      "size": 8,
+      "sha256": "e16fa5d9b51928755db85b917f0297babaf22c7a47e97d9212adab56e61ba04e",
+      "media_type": "application/pdf"
+    },
+    {
+      "path": "日本語/ページ.html",
+      "size": 9,
+      "sha256": "5453d9874fc9ac3faa5a50dd67353b104b41de5eca438946b58ac81bb6d6d46f",
+      "media_type": "text/html"
+    },
+    {
+      "path": "plus+and&amp.html",
+      "size": 11,
+      "sha256": "4aca6f20a520def224c642a7968ddb6a682c6c9f1857afb2202d501a996586f9",
+      "media_type": "text/html"
+    },
+    {
+      "path": "quote'apostrophe.html",
+      "size": 8,
+      "sha256": "1fc19cb4a8d9fc80d9e9aae7afc4d12ca2cf9bab9329e11ae662a31a9cbbd41c",
+      "media_type": "text/html"
+    }
+  ]
+}

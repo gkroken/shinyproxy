@@ -764,6 +764,48 @@ below are marked passed by this planning document.
       - Q4: no Maven dependency added. networknt remains a candidate for the server side;
         the fixture runner is a container-only dev tool and ships nothing.
 
+      **T1(b) done 2026-09-17 — the output descriptor.** Reserved and specified now, as this
+      plan requires, while rendering, current-rendition publication and downloads stay with
+      #5, #6 and #8. Nothing writes or reads a rendition yet.
+
+      - `schemas/output-descriptor/v1.schema.json` carries the field list decision 3 fixes:
+        `layout_version`, content/version/rendition UUIDs, the version's display number,
+        producer kind and id, RFC 3339 creation time with a mandatory offset, and a file list
+        of relative path, size, SHA-256 and media type. 25 fixtures — 4 valid, 21 invalid —
+        including `producer.kind = render`, reserved for #6 so that adding it later is not a
+        layout change, and an **empty** file list, since a render that legitimately produced
+        nothing is a complete rendition and is not the same as an incomplete one, which has
+        no descriptor at all.
+      - **The input and output path rules are checked for drift.** `payloadPath` and
+        `renditionPath` are duplicated rather than `$ref`'d across files — a released schema
+        that resolves a reference into another file has a meaning that depends on what that
+        file says later — so the runner asserts they agree on type, pattern and both bounds.
+        An output path and an input path face the same hostile input and must not diverge by
+        accident.
+      - **Names needing URL encoding are pinned**: spaces, `#`, a literal `%`, a literal
+        `%25`, accented and Japanese characters, `+`, `&` and an apostrophe. The descriptor
+        carries them literally, so that whatever encodes them for an S3 key or a URL does it
+        at one boundary rather than inheriting something already mangled.
+      - The ECMA-262 cross-check now covers the descriptor's UUID, timestamp, media-type and
+        path patterns too, and rejects **CR and CRLF** as well as LF — a value from a
+        Windows-authored file carries those, and `$` is not the only lenient anchor.
+      - Guards mutation-tested: widening `renditionPath.maxLength` reports the drift;
+        percent-encoding one fixture filename reports the mismatch against the stated
+        expectation; stripping `type`/`required` from the descriptor schema trips the vacuity
+        probe on `null`, `42` and `{}`.
+      - The round-trip check compares the parsed fixture against `url_encoding_expected_paths`
+        in `expectations.json`, not against its own re-serialisation. An earlier draft did the
+        latter, which is true whatever the fixture contains — a check that cannot fail is
+        worse than no check, and this project has shipped two of those already.
+      - The two fixture runners moved out of shell heredocs into `dev/schema-fixture-check.py`
+        and `dev/schema-regex-check.js`, so `$schema`, `$defs` and `$ref` are not exposed to
+        shell expansion and each can be read on its own.
+
+      **Still open in T1:** the ID/state vocabulary, admin transport, image layout wording,
+      the semantic validator specification, and the literal safe launch arguments — the last
+      of which waits on Q2, since T0 found this host has no AppArmor and delegates only
+      `memory pids`, so a rootless worker cannot currently bound CPU at all.
+
       **Not frozen.** Q3 is unconfirmed, so the format is not yet released and durable bundles
       are not yet accepted against it — which is the plan's own precondition for freezing.
 
