@@ -75,7 +75,9 @@
       "registry.internal",
       "registry.internal:5000",
       "registry.example.com",
-      "10.0.0.5:5000"
+      "10.0.0.5:5000",
+      "registry.internal:65535",
+      "registry:1"
     ],
     "invalid_authorities": {
       "registry": "a bare label is a Docker Hub path component, not a host",
@@ -84,7 +86,9 @@
       "registry:99999": "port above 65535",
       "-registry.internal": "label starts with a hyphen",
       "registry..internal": "empty label",
-      "registry.internal:": "colon with no port"
+      "registry.internal:": "colon with no port",
+      "registry:65536": "one past the highest port; the boundary the port alternation exists to enforce",
+      "registry.internal:065535": "leading zero; not a canonical port and not accepted by the alternation"
     },
     "valid_oci_tags": [
       "build-22222222-2222-4222-8222-222222222222",
