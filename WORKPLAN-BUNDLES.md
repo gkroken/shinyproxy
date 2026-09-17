@@ -253,7 +253,7 @@ specified in the extractor contract below, not delegated implicitly to library d
 | `schema_version` | Required integer `1`; unknown versions fail before execution |
 | `type` | Required registered content type; must equal the target `content.type` and be enabled by the reviewed recipe matrix |
 | `runtime` | Required for executable source: `language` (`r` or `python`) and exact `version`; no `latest`, ranges or download URL |
-| `entrypoint` | Recipe-specific validated path relative to `app/`; R Shiny uses an application directory (`.` allowed here only); Python Shiny uses a `.py` application file; no shell command/import expression |
+| `entrypoint` | Recipe-specific validated path relative to `app/`. **Python Shiny names a regular `.py` file; R Shiny names a directory** (`.`, meaning the payload root, allowed here only). Never a shell command or import expression. A directory entrypoint is never itself an inventory member — see the resolution rule below |
 | `dependencies` | Required `{format, path}`; `renv` + `renv.lock` for R, `pip-hashed` + `requirements.lock` for Python; semantics below |
 | `files` | Required inventory of every regular payload file: relative `path`, integer `size`, lowercase hex SHA-256, boolean `executable` default false; excludes `manifest.json` |
 
@@ -262,7 +262,31 @@ privilege, mounts, network, build flags or secrets. Those belong to authenticate
 or server policy. All objects reject unknown keys. Reject duplicate JSON keys, invalid
 UTF-8, non-integer sizes, overflow, deep nesting, duplicate inventory paths and manifest
 type/runtime disagreement. Schema validation alone does not prove filesystem containment.
-Entrypoint and lockfile must exist in the verified inventory with the expected type.
+**Resolving the entrypoint against the inventory.** `files` lists regular payload files
+only, so a directory entrypoint can never appear in it. Requiring every entrypoint to be an
+inventory member would make a valid root-level R application unrepresentable — entrypoint
+`.` with `app/app.R` and `app/renv.lock` — and the only way to satisfy it would be to put a
+directory into a regular-file inventory, which this same table forbids. The rule is
+therefore split by what the entrypoint denotes:
+
+- **`dependencies.path`**, for both languages, names a regular file that must be present in
+  the verified inventory. No exception.
+- **A file entrypoint** (Python Shiny) must be present in the verified inventory and end in
+  `.py`. An entrypoint that resolves to a directory is rejected for this language.
+- **A directory entrypoint** (R Shiny) is validated *through* the inventory rather than by
+  its own entry. It must be `.` or a contained relative directory path, and the inventory
+  must carry, relative to it, either `app.R`, or **both** `ui.R` and `server.R` — the two
+  layouts `shiny::runApp` accepts. Exact lower-case names: payload paths are
+  case-preserving, case collisions are already rejected, and the runtime container is
+  case-sensitive. An entrypoint that resolves to a regular file is rejected for this
+  language.
+
+**Implicit directories are sufficient, and are the expected case.** Directory headers are
+optional in the archive, so a directory exists for validation purposes exactly when the
+inventory contains a file beneath it. A directory header neither satisfies this rule nor is
+required by it, and an entrypoint whose only evidence is a directory header with no
+qualifying files beneath it is rejected. Do not add directory objects to `files` to make a
+validator simpler; that changes an irreversible contract to avoid writing one predicate.
 
 The first enabled branches are `shiny` + `r` + `renv` and `shiny` + `python` +
 `pip-hashed`. Include Python Core and Express application fixtures; do not silently
@@ -422,7 +446,7 @@ validated tree before handing it to a worker. Delete it on all failure/cancellat
 | Bombs and malformed sizes | Entry cap N/N+1; expanded cap N/N+1; tiny compressed huge expansion; huge PAX field; sparse claimed file; negative/overflow size; truncated gzip/tar; many empty entries; concatenated members. Reject within measured memory/time/disk bounds. |
 | Paths and types | Segment/path/depth boundary pairs; invalid UTF-8/NUL/control; device/FIFO/socket; setuid/setgid/sticky. Reject with typed error; never materialize a device or privileged mode. |
 | Duplicate/alias ordering | Duplicate regular entries, duplicate manifest, file→directory and directory→file, repeated directories, case/Unicode aliases, file before its conflicting parent. Reject; no last-entry-wins overwrite. |
-| Manifest/inventory | Missing/late/duplicate manifest, duplicate JSON keys, unsupported schema/type/runtime, missing/extra file, hash/size mismatch, missing lockfile/entrypoint, remote `$ref`. No queued job and no network schema lookup. |
+| Manifest/inventory | Missing/late/duplicate manifest, duplicate JSON keys, unsupported schema/type/runtime, missing/extra file, hash/size mismatch, missing lockfile/entrypoint, remote `$ref`. Entrypoint kind mismatches both ways: R naming a file, Python naming a directory, an R directory with neither accepted layout, and one evidenced only by a directory header. No queued job and no network schema lookup. |
 
 For every negative case assert both rejection **and** no version, no worker, bounded
 temporary state and unchanged sentinels. Each case has a positive control proving the
@@ -678,6 +702,14 @@ below are marked passed by this planning document.
       rejection and compatibility fixtures. Flag dependency licenses before adding them.
       **Pass:** producer examples for both languages from independent tooling validate;
       invalid examples fail the named rule; no unresolved one-way door is hidden in code.
+      Entrypoint resolution is acceptance-tested in both directions, because the first draft
+      of this contract made a valid R application unrepresentable (finding `00a1b2d-F1`):
+      positives — root R app at `.`, nested R app, single-file `app.R` and two-file
+      `ui.R` + `server.R`, each with and without optional directory headers, plus the Python
+      file entrypoint as a control; negatives — R entrypoint whose directory has neither
+      layout, R entrypoint naming a regular file, Python entrypoint naming a directory,
+      entrypoint evidenced only by a directory header with no files beneath it, and a
+      directory smuggled into `files`.
 
 - [ ] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
