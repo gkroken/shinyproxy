@@ -676,8 +676,24 @@ under ADR-0001 instead of labelling the build sandbox as a runtime guarantee.
 ### Status, logs, admin transport and cleanup
 
 #2 adds admin-only endpoints under `/admin/content/{id}` for upload, build creation,
-status/list, log replay/tail and cancellation. Exact request/response shapes are reviewed
-in task 1; `/__api__/v1`, API keys and owner/editor publishing remain #3. Shared services
+status/list, log replay/tail and cancellation. **The exact shapes are now fixed, in
+`spec/admin-transport-v1.json`**, and are not restated here. `/__api__/v1`, API keys and
+owner/editor publishing remain #3.
+
+Three of those shapes are choices rather than transcription. **Upload is two steps** — a JSON
+create that returns a bundle id, then a raw `PUT` of the bytes — so the binary endpoint
+carries no metadata and stays a pure stream, and so the bundle exists in `UPLOADING` before
+any byte arrives. **The upload is `PUT`, not `POST`**, because it is idempotent against one
+bundle id: replaying it re-uploads that bundle rather than creating a second. And **cancel is
+`POST`, not `DELETE`** — cancelling removes nothing, and it can be refused, which `DELETE`
+would make an odd thing to answer 409 to.
+
+The CSRF rule is the one to read before adding an endpoint. ShinyProxy protects `POST /login`
+alone, so "accepts no media type an HTML form can produce" *is* the defence for everything
+here — and the obvious way to build a file upload, `multipart/form-data`, is exactly the one a
+cross-site form can forge. `dev/schema-fixture-check.py` refuses any endpoint that accepts a
+form-producible type, any endpoint outside `/admin`, an upload without its custom header, and
+a `cancel_refused_states` entry that disagrees with the lifecycle. Shared services
 take explicit actor/target/policy inputs so #3 does not need to copy the pipeline.
 
 Upload is a bounded raw `application/gzip` body with a required custom upload header,

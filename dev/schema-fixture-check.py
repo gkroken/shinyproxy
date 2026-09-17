@@ -342,6 +342,83 @@ def check_lifecycle_is_consistent():
     print()
 
 
+def check_admin_transport():
+    """The admin surface, checked for the things that are checkable without an implementation.
+
+    Chiefly one: no endpoint may accept a media type an HTML form can produce. ShinyProxy
+    enables CSRF protection for POST /login alone, so that content-type rule IS the defence
+    for everything spine #2 adds, and the obvious way to build a file upload --
+    multipart/form-data -- is precisely the one a cross-site form can forge. Nothing else in
+    this repository would notice it being widened.
+    """
+    print("== admin transport ==")
+    spec = load("spec/admin-transport-v1.json")
+    required = {"bundle.create", "bundle.upload", "build.create", "build.cancel",
+                "build.logs.replay"}
+
+    endpoints = spec.get("endpoints") or []
+    if not endpoints:
+        fail("spec/admin-transport-v1.json declares no endpoints; every check below would "
+             "pass over an empty list")
+        return
+    ids = {e["id"] for e in endpoints}
+    absent = sorted(required - ids)
+    if absent:
+        fail("admin transport is missing required endpoint(s): %s" % ", ".join(absent))
+        return
+
+    forgeable = set(spec["csrf"]["form_producible"])
+    if not forgeable:
+        fail("csrf.form_producible is empty, so the media-type check below cannot fail")
+        return
+
+    for e in endpoints:
+        if not e["path"].startswith("/admin/"):
+            fail("%s is at %s, outside /admin, so it would need its own authorization rule"
+                 % (e["id"], e["path"]))
+            return
+        bad = sorted(set(e.get("accepts", [])) & forgeable)
+        if bad:
+            fail("%s accepts %s, which an HTML form can produce cross-site"
+                 % (e["id"], ", ".join(bad)))
+            return
+
+    upload = next(e for e in endpoints if e["id"] == "bundle.upload")
+    if upload.get("requires_header") != spec["csrf"]["required_header"]:
+        fail("the upload endpoint does not require %s; a raw body with no custom header "
+             "leans entirely on the content type" % spec["csrf"]["required_header"])
+        return
+
+    create = next(e for e in endpoints if e["id"] == "build.create")
+    if create["success"] != 202:
+        fail("build.create returns %s; it must be 202, because it returns a build id and a "
+             "status URL and does not wait for an image" % create["success"])
+        return
+
+    # Cancellation has to agree with the lifecycle, or the two specs describe different
+    # products. A state that refuses cancellation must have no transition to CANCELLED.
+    build = load("spec/lifecycle-v1.json")["machines"]["build"]
+    refused = spec.get("cancel_refused_states") or []
+    if not refused:
+        fail("cancel_refused_states is empty; the agreement with the lifecycle below would "
+             "then be vacuous")
+        return
+    for state in refused:
+        if state not in build["states"]:
+            fail("cancel_refused_states names unknown build state %s" % state)
+            return
+        if any(t["from"] == state and t["to"] == "CANCELLED" for t in build["transitions"]):
+            fail("%s refuses cancellation in the transport but the lifecycle has a %s -> "
+                 "CANCELLED transition" % (state, state))
+            return
+
+    print("  ok   %d endpoints, all under /admin, none accepting a form-producible type"
+          % len(endpoints))
+    print("  ok   upload requires %s; build.create returns 202; cancellation refused in %s, "
+          "matching the lifecycle" % (spec["csrf"]["required_header"], ", ".join(refused)))
+    print()
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -388,6 +465,7 @@ for corpus in CORPORA:
 check_path_rules_have_not_drifted()
 check_semantic_fixtures_have_an_owning_rule()
 check_lifecycle_is_consistent()
+check_admin_transport()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")
