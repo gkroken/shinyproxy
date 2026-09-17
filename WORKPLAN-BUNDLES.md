@@ -1055,10 +1055,12 @@ below are marked passed by this planning document.
 
       **T2(a) done 2026-09-17 — the corpus and its self-check.** The oracle, the sentinels
       and the deliberately unsafe extractor are T2(b) and are what the Pass line above
-      actually turns on; this is the material they will be pointed at.
+      actually turns on; this is the material they will be pointed at. Counts below are as
+      of the limits slice (2026-09-18): 90 fixtures, 19 accepted, 80 predicates, 18 hostile
+      properties.
 
-      - `dev/fixtures/bundles/generate.py` builds **86 fixtures** across all seven required
-        groups: 14 positive controls, 10 traversal, 6 links, 16 bombs, 13 types and path
+      - `dev/fixtures/bundles/generate.py` builds **90 fixtures** across all seven required
+        groups: 14 positive controls, 10 traversal, 6 links, 20 bombs, 13 types and path
         limits, 8 duplicate/alias, 19 manifest and inventory. Standard library only, no
         import of any Skald class, and hand-written tar headers wherever a polite writer
         would refuse — a negative size, a NUL inside a name, a bad checksum, a GNU sparse
@@ -1083,8 +1085,8 @@ below are marked passed by this planning document.
         complete forever, and the way it rots is a fixture quietly becoming benign while
         still being counted. Accepted fixtures are checked to exhibit **none** of fifteen
         hostile properties, so "rejects everything" stays distinguishable from "works".
-        Eight of the fifteen are about size and shape against the configured limits.
-      - A sweep can only say what a fixture is **not**, so seven accepted fixtures also
+        Eleven of the eighteen are about size and shape against the configured limits.
+      - A sweep can only say what a fixture is **not**, so nine accepted fixtures also
         carry a predicate of their own: each boundary half proves it sits *at* its limit,
         and the PAX control proves its override resolves to a member really present. They
         are marked `pins` in the generator and the checker refuses to run without a
@@ -1125,6 +1127,35 @@ below are marked passed by this planning document.
       in silence — the same pair failing to pin anything, from the other side. The lesson
       is recorded here because it recurs: a checker inherits the blind spots of whoever
       wrote the thing it checks.
+
+      **T2(b) in progress — the bounds, then the oracle.**
+
+      - **Every documented bound is now configuration and every one has a fixture**
+        (2026-09-18). Three were missing from `LIMITS`: 256 MiB compressed, 64 KiB per
+        extended header, and the 60-second extraction deadline. Two of them had already
+        produced the defect this corpus keeps finding — `bomb-huge-pax-field` compared
+        against a literal `64 * 1024`, and `manifest-over-limit` against a literal 4 MiB
+        with a 60000-entry fixture that a raised cap would have made benign while the
+        predicate still called it covered. The deadline is not expressible in archive
+        bytes; it lives in `LIMITS` because Q3 requires one home for the defaults, and the
+        oracle meters it.
+      - Four fixtures: compressed cap N/N+1 and extended-header cap N/N+1, all four
+        parameterised. The compressed pair is the expensive one — 256 MiB of deterministic
+        incompressible payload each — and it takes the suite from 47s to ~115s. Worth it:
+        the compressed cap is the first bound anything hits, checked on the uploaded byte
+        count before a header is parsed, and it was the only documented bound with no
+        fixture at all.
+      - Hitting the cap **exactly** needs two levers. The tar body only moves in 512-byte
+        blocks and deflate's output on incompressible data jitters a few bytes either side
+        of the trend, so a search on payload size oscillates and never lands (measured:
+        consecutive sizes gave 268435459, 268435461, 268435460). The remainder is taken up
+        by the gzip member's stored original filename, which is outside the deflate stream
+        and costs exactly its own length. The N+1 half is the same payload with one more
+        byte of filename, which is what makes it a true pair.
+
+      Still owed for T2(b): the oracle, the outside-root sentinel harness, the deliberately
+      unsafe disposable extractor and the unbounded variant. That is what the Pass line
+      turns on.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,

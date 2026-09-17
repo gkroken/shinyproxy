@@ -25,6 +25,7 @@ import io
 import json
 import os
 import pathlib
+import random
 import sys
 import tarfile
 import unicodedata
@@ -33,6 +34,7 @@ import unicodedata
 # these rather than hard-coding 20000, so an operator who changes a limit regenerates a
 # corpus whose N/N+1 pairs still straddle the real value.
 LIMITS = {
+    "max_compressed_bytes": 256 * 1024 * 1024,
     "max_entries": 20000,
     "max_expanded_bytes": 2 * 1024 * 1024 * 1024,
     "max_file_bytes": 512 * 1024 * 1024,
@@ -40,6 +42,12 @@ LIMITS = {
     "max_segment_bytes": 255,
     "max_depth": 32,
     "max_manifest_bytes": 4 * 1024 * 1024,
+    "max_extended_header_bytes": 64 * 1024,
+    # Not expressible in archive bytes, so no fixture pins it and the oracle meters it in
+    # T2(b). It lives here anyway because Q3 requires the documented defaults to have one
+    # home that the plan and the code agree on; a bound with nowhere configured to read
+    # from is how a literal ends up in a predicate.
+    "extraction_deadline_seconds": 60,
 }
 
 R_APP = b'library(shiny)\nshinyApp(ui = fluidPage("hi"), server = function(input, output) {})\n'
@@ -120,7 +128,7 @@ class Builder:
         self.tar.offset += len(header) + len(payload) + ((512 - len(payload) % 512) % 512)
         return self
 
-    def bytes(self, truncate_tar=False, skip_gzip=False, append=b""):
+    def bytes(self, truncate_tar=False, skip_gzip=False, append=b"", gzip_name=""):
         if not self.closed:
             self.tar.close()
             self.closed = True
@@ -131,7 +139,10 @@ class Builder:
             return body + append
         out = io.BytesIO()
         # mtime=0 so the gzip header is byte-stable and the recorded hash means something.
-        with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as gz:
+        # gzip_name is the member's stored original filename -- ordinary gzip metadata,
+        # what the gzip CLI writes by default. It is used by one fixture pair as a
+        # byte-exact size lever; see _compressed_exact.
+        with gzip.GzipFile(fileobj=out, mode="wb", mtime=0, filename=gzip_name) as gz:
             gz.write(body)
         return out.getvalue() + append
 
@@ -207,9 +218,83 @@ def _pax_record(key, value):
     return str(n + len(str(n))).encode() + body
 
 
+def _pax_record_of_length(key, total):
+    """A PAX record whose complete encoded length is exactly `total` bytes.
+
+    The length field counts itself, so the value length is solved rather than guessed;
+    the assert is what makes this fixture an at-limit control rather than an
+    approximately-at-limit one.
+    """
+    for value in range(total, 0, -1):
+        rec = _pax_record(key, "x" * value)
+        if len(rec) == total:
+            return rec
+    raise AssertionError("no PAX record of exactly %d bytes" % total)
+
+
 def entry(path, data):
     return {"path": path, "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest()}
+
+
+_RANDOM = b""
+
+
+def _incompressible(n):
+    """`n` bytes of deterministic pseudo-random data, generated once and sliced.
+
+    Deterministic because every recorded SHA-256 depends on it, and incompressible
+    because the compressed cap is the one limit a compressible payload cannot reach.
+    """
+    global _RANDOM
+    if len(_RANDOM) < n:
+        r = random.Random(20260917)
+        _RANDOM = b"".join(r.randbytes(1 << 22) for _ in range((n >> 22) + 2))
+    return _RANDOM[:n]
+
+
+def _fill_compressed(b, size):
+    pad = _incompressible(size)
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   entry("www/pad.bin", pad)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV).add("app/www/pad.bin", pad)
+
+
+def _compressed_bytes(size, gzip_name):
+    b = Builder()
+    _fill_compressed(b, size)
+    return b.bytes(gzip_name=gzip_name)
+
+
+_SOLVED = {}
+
+
+def _compressed_solution(target):
+    """(payload size, filename length) for a bundle of exactly `target` gzipped bytes.
+
+    Two levers, because one cannot do it. The tar body only moves in 512-byte blocks, and
+    deflate's output on incompressible data jitters a few bytes either side of the trend
+    as the payload slides -- measured, not assumed: consecutive payload sizes near the cap
+    produced 268435459, 268435461, 268435460, so a search on payload size alone oscillates
+    and never lands. The remainder is taken up by the gzip member's stored original
+    filename, which sits OUTSIDE the deflate stream and therefore costs exactly its own
+    length plus a terminator.
+
+    Exactness is the point: an at-limit fixture that is merely near the limit pins nothing
+    (finding 3438045-F1), and this is the bound where off-by-one costs a publisher a
+    legitimate upload.
+    """
+    if target in _SOLVED:
+        return _SOLVED[target]
+    size = target - 320 * 1024
+    for _ in range(8):
+        room = target - len(_compressed_bytes(size, ""))
+        if 2 <= room <= 4096:
+            _SOLVED[target] = (size, room - 1)
+            return _SOLVED[target]
+        # Aim to land a little short, so the filename always has room to make up the rest.
+        size += room - 64
+    raise AssertionError("compressed size did not converge on %d" % target)
 
 
 def zero_entry(path, size):
@@ -555,7 +640,7 @@ def _(b):
          "a PAX extended header far past the per-header cap, which a parser that buffers "
          "the whole record reads into memory before deciding anything")
 def _(b):
-    value = b"x" * (256 * 1024)
+    value = b"x" * (4 * LIMITS["max_extended_header_bytes"])
     record = b"%d comment=%s\n" % (len(b" comment=\n") + len(value) + 7, value)
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
@@ -696,6 +781,54 @@ def _(b):
     info.size = size
     info.mtime = 0
     b.tar.addfile(info, _ZeroStream(size))
+
+
+# The compressed pair is emitted through SPECIAL: the property is the size of the finished
+# file, so the archive has to be assembled and weighed rather than described.
+
+@fixture("bomb-compressed-at-limit", "bombs", "accept", "-",
+         "an upload of exactly max_compressed_bytes. The compressed cap is the first bound "
+         "anything hits -- it is checked on the uploaded byte count, before a single header "
+         "is parsed -- and it was the one documented bound with no fixture at all. The "
+         "payload is incompressible on purpose: nothing else in this corpus reaches "
+         "256 MiB on disk",
+         pins=True)
+def _(b):
+    pass
+
+
+@fixture("bomb-compressed-over-limit", "bombs", "reject", "-",
+         "one byte past the compressed cap. Sharing the at-limit fixture's payload and "
+         "differing only by a single byte of gzip filename is what makes this a true N/N+1 "
+         "pair, so an extractor comparing with >= instead of > is caught")
+def _(b):
+    pass
+
+
+@fixture("bomb-extended-header-at-limit", "bombs", "accept", "-",
+         "a PAX extended header of exactly max_extended_header_bytes. The contract allows "
+         "innocuous metadata to be ignored UNDER BOUNDS, so the bound needs an accepted "
+         "half or 'ignored' and 'rejected' are indistinguishable",
+         pins=True)
+def _(b):
+    record = _pax_record_of_length("comment", LIMITS["max_extended_header_bytes"])
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   entry("www/after.txt", b"x")]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    b.add_raw(raw_header("app/big-comment.txt", b"%011o\0" % len(record), typeflag=b"x"),
+              record)
+    b.add("app/www/after.txt", b"x")
+
+
+@fixture("bomb-extended-header-over-limit", "bombs", "reject", "-",
+         "one byte past the extended-header cap, the rejected half of that pair")
+def _(b):
+    record = _pax_record_of_length("comment", LIMITS["max_extended_header_bytes"] + 1)
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    b.add_raw(raw_header("app/big-comment.txt", b"%011o\0" % len(record), typeflag=b"x"),
+              record)
+    b.add("app/www/after.txt", b"x")
 
 
 # --------------------------------------------------------------------- paths and types
@@ -1038,14 +1171,38 @@ def _(b):
          "a manifest past its own cap, so a parser that reads before bounding allocates it")
 def _(b):
     doc = manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)])
-    doc["files"] += [entry("www/f%07d.txt" % i, b"") for i in range(60000)]
+    # Sized off the cap, not a literal 60000. Raising max_manifest_bytes past whatever
+    # 60000 entries happened to weigh would have left this fixture benign while its
+    # predicate, comparing against its own literal 4 MiB, still called it covered.
+    per = len(json.dumps(entry("www/f0000000.txt", b"")).encode()) + 2
+    doc["files"] += [entry("www/f%07d.txt" % i, b"")
+                     for i in range(LIMITS["max_manifest_bytes"] // per + 1000)]
     b.add_manifest(doc)
+    assert len(json.dumps(doc, indent=2).encode()) > LIMITS["max_manifest_bytes"]
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
 
 
 # --------------------------------------------------------------------- emit
 
+def _at_compressed_cap():
+    target = LIMITS["max_compressed_bytes"]
+    size, namelen = _compressed_solution(target)
+    data = _compressed_bytes(size, "p" * namelen)
+    assert len(data) == target, (len(data), target)
+    return data
+
+
+def _over_compressed_cap():
+    target = LIMITS["max_compressed_bytes"]
+    size, namelen = _compressed_solution(target)
+    data = _compressed_bytes(size, "p" * (namelen + 1))
+    assert len(data) == target + 1, (len(data), target + 1)
+    return data
+
+
 SPECIAL = {
+    "bomb-compressed-at-limit": lambda b: _at_compressed_cap(),
+    "bomb-compressed-over-limit": lambda b: _over_compressed_cap(),
     "bomb-truncated-gzip": lambda b: b.bytes()[:len(b.bytes()) // 2],
     "bomb-truncated-tar": lambda b: gzip_of(b.bytes(skip_gzip=True)[:1024]),
     "bomb-concatenated-members": lambda b: b.bytes() + b.bytes(),

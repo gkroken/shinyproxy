@@ -64,6 +64,9 @@ def _skip(fh, n):
     return True
 
 
+# A checker-side memory bound, not the contract's max_extended_header_bytes. Predicates
+# about the size of an extended header read the DECLARED header size, so capturing less
+# than a record cannot mask an oversized one.
 PAX_CAPTURE = 64 * 1024
 
 
@@ -337,8 +340,24 @@ PREDICATES = {
     "bomb-declared-size-negative": has_member(lambda m: m["size_field"].startswith(b"-")),
     "bomb-declared-size-overflow": has_member(lambda m: m["size_field"] == b"77777777777"),
     "bomb-bad-checksum": lambda ctx: b"9999999" in ctx["raw"],
+    "bomb-compressed-at-limit": lambda ctx: (
+        ctx["compressed"] == ctx["limits"]["max_compressed_bytes"]),
+    "bomb-compressed-over-limit": lambda ctx: (
+        ctx["compressed"] == ctx["limits"]["max_compressed_bytes"] + 1),
+    "bomb-extended-header-at-limit": lambda ctx: any(
+        m["type"] in (b"x", b"g")
+        and (m["size"] or 0) == ctx["limits"]["max_extended_header_bytes"]
+        for m in ctx["members"]),
+    "bomb-extended-header-over-limit": lambda ctx: any(
+        m["type"] in (b"x", b"g")
+        and (m["size"] or 0) == ctx["limits"]["max_extended_header_bytes"] + 1
+        for m in ctx["members"]),
+    # The gross case, distinct from the N+1 one above: a parser that buffers the whole
+    # record before deciding anything. Several times the bound, never a literal.
     "bomb-huge-pax-field": lambda ctx: any(
-        m["type"] == b"x" and (m["size"] or 0) > 64 * 1024 for m in ctx["members"]),
+        m["type"] == b"x"
+        and (m["size"] or 0) > 2 * ctx["limits"]["max_extended_header_bytes"]
+        for m in ctx["members"]),
     "bomb-sparse-claimed": typeflag(b"S"),
     "bomb-many-empty-entries": lambda ctx: len(ctx["members"]) > ctx["limits"]["max_entries"],
     "bomb-truncated-gzip": lambda ctx: ctx["gzip_error"] is not None,
@@ -404,8 +423,11 @@ PREDICATES = {
         _manifest(ctx).get("runtime", {}).get("language") == "r"
         and _manifest(ctx).get("dependencies", {}).get("format") == "pip-hashed"),
     "unsupported-type": lambda ctx: _manifest(ctx).get("type") == "quarto_static",
-    "manifest-over-limit": lambda ctx: len(_manifest_body(ctx) or b"") > 4 * 1024 * 1024
-                                       or len(_manifest(ctx).get("files", [])) > 50000,
+    # One question, read off the limit. The old form also accepted "more than 50000 file
+    # entries", which is not a documented bound and let the fixture satisfy the predicate
+    # without being over the cap it is named for.
+    "manifest-over-limit": lambda ctx: (
+        len(_manifest_body(ctx) or b"") > ctx["limits"]["max_manifest_bytes"]),
 }
 
 
@@ -574,6 +596,14 @@ HOSTILE = {
         len(ctx["members"]) > ctx["limits"]["max_entries"]),
     "more expanded bytes than the configured limit": lambda ctx: (
         ctx["declared_total"] > ctx["limits"]["max_expanded_bytes"]),
+    "more compressed bytes than the configured limit": lambda ctx: (
+        ctx["compressed"] > ctx["limits"]["max_compressed_bytes"]),
+    "an extended header over the configured limit": lambda ctx: any(
+        m["type"] in (b"x", b"g")
+        and (m["size"] or 0) > ctx["limits"]["max_extended_header_bytes"]
+        for m in ctx["members"]),
+    "a manifest over the configured limit": lambda ctx: (
+        len(_manifest_body(ctx) or b"") > ctx["limits"]["max_manifest_bytes"]),
     "a payload file the manifest never declares": lambda ctx: _inventory_vs_payload(ctx)[0],
     "a declared file the payload never ships": lambda ctx: _inventory_vs_payload(ctx)[1],
 }
@@ -608,6 +638,7 @@ def context(data, limits):
     trailing = len(data) - pos if pos < len(data) else 0
     return {"raw": body or b"", "members": members, "note": note, "limits": limits,
             "gzip_error": gzip_error,
+            "compressed": len(data),
             "declared_total": sum(max(size_of(m), 0) for m in members),
             "gzip_members": gzip_members, "trailing": trailing}
 
