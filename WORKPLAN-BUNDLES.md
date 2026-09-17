@@ -191,6 +191,11 @@ them merely because they are “source”. Reject unsupported local/VCS dependen
 clearly rather than caching an incomplete key. Full build provenance additionally binds
 the validated bundle inventory, generated recipe and effective isolation/limit policy.
 
+**Repository policy is configuration (Q3).** The "repository/mirror policy revision" in the
+cache key is the identity of the *configured* repository set, not a fixed list: changing
+which mirror a deployment resolves against must miss the cache, because the same lockfile
+can resolve differently against a different mirror.
+
 **Rejected:** a bare lockfile hash as a global cache key, caller-supplied cache refs, and
 claiming equal lockfiles guarantee byte-identical images. R/package repositories and
 install scripts can change behavior or disappear. Save resolved package checksums and
@@ -403,12 +408,24 @@ check fixture hashes and a machine-readable expectation table into `dev/fixtures
 The independent reviewer adds withheld cases at T5. A fixture generated through the same
 normalizer being tested does not establish containment.
 
-Initial **proposed operator limits** (Q3 confirms sizing, not the need for limits):
-256 MiB compressed, 2 GiB expanded across all members, 512 MiB per regular file, 20,000
-physical headers/entries including metadata, 4 MiB manifest, 64 KiB per extended header,
-1,024 UTF-8 bytes per path, 255 per segment and 32 levels. Bounded parser memory and
-60-second extraction deadline. Check totals against **actual streamed bytes**, as well as
-declared sizes; arithmetic must be overflow-safe. Limits apply to ignored metadata too.
+**Limits are operator configuration, not constants (Q3, decided 2026-09-17).** A laptop and
+a build host do not want the same ceilings, so every bound below is a configured property
+with the documented default beside it, and the extractor reads them rather than embedding
+them. Two consequences the implementation owes: a configured value is itself untrusted
+input and is validated at startup — positive, within a sane absolute maximum, and refused
+rather than silently clamped — and the defaults must appear in one place that the
+documentation and the code agree on, or they will drift.
+
+Defaults: 256 MiB compressed, 2 GiB expanded across all members, 512 MiB per regular file,
+20,000 physical headers/entries including metadata, 4 MiB manifest, 64 KiB per extended
+header, 1,024 UTF-8 bytes per path, 255 per segment and 32 levels, bounded parser memory
+and a 60-second extraction deadline. Check totals against **actual streamed bytes** as well
+as declared sizes; arithmetic must be overflow-safe. Limits apply to ignored metadata too.
+
+Making them configurable does not make them optional. A deployment may raise a ceiling; it
+may not remove one. The corpus in T2 therefore parameterises the boundary cases off the
+configured values rather than hard-coding 20,000, so that the N/N+1 pairs still straddle
+the real limit after an operator changes it.
 
 Accept only regular files and directories. Reject all symlinks and hardlinks, even ones
 apparently pointing inside the tree; there is no build functionality requiring them in
@@ -828,8 +845,12 @@ below are marked passed by this planning document.
       of which waits on Q2, since T0 found this host has no AppArmor and delegates only
       `memory pids`, so a rootless worker cannot currently bound CPU at all.
 
-      **Not frozen.** Q3 is unconfirmed, so the format is not yet released and durable bundles
-      are not yet accepted against it — which is the plan's own precondition for freezing.
+      **Not frozen, but no longer blocked on a decision.** Q3 closed on 2026-09-17, so the
+      remaining precondition is T1's own contract review — the ID/state vocabulary, admin
+      transport, image layout wording and semantic validator specification. Nothing about
+      those answers changed the manifest or descriptor schemas: the limits live in
+      configuration and the repository set in deployment policy, neither of which a bundle
+      declares.
 
 - [ ] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
@@ -916,8 +937,8 @@ below are marked passed by this planning document.
 | Question/risk | Recommendation, decision owner and stop condition |
 |---|---|
 | **Q1 — CLOSED: runnable breadth** | User selected **R and Python Shiny now**. Both are required end to end. T1 selects exact maintained language/tool versions and freezes the two manifest branches; additional version support is an additive catalog choice. Static/API/data behavior remains with its owning track. |
-| **Q2 — OPEN: rootless BuildKit deployment profile** | Recommendation to the user: require T3 on the real host with process isolation and quotas intact, followed by independent review. The fail-closed gate is in this plan; no concrete host relaxation is authorized. If the proof fails, bring back evidence and options. Privileged mode or a disabled process sandbox is not an accepted implementation; changing that would require an explicit scope/security decision. |
-| **Q3 — quotas, retention, dependency repositories and OS package catalog** | Proposed limits above are a starting deployment profile, not measured capacity. User/operator confirms them in T0/T1. Approve a finite repository list and base system-package set; an app needing more gets an explicit unsupported-dependency error, not arbitrary network/apt permission. |
+| **Q2 — DECIDED 2026-09-17, verification pending** | The user takes the systemd route: a `Delegate=cpu cpuset io memory pids` drop-in for `user@.service`, so the user manager can enforce a CPU bound on a rootless worker. T0 found the host delegating only `memory pids`, and the parent slice offering `cpuset cpu io memory hugetlb pids rdma`, so the mechanism exists and was merely switched off. **Not yet verified, and the configuration check is not the proof:** `cgroup.controllers` listing `cpu` says the delegation happened; `systemd-run --user --scope -p CPUQuota=50% sleep 1` succeeding says a limit can actually be applied, which is the property the contract needs. Record both outputs against this gate before T3 relies on it. AppArmor remains unavailable on this host — a fact, not a decision: the profile is confined by user namespaces, seccomp and cgroups, and the write-up must say that rather than listing AppArmor. Privileged mode and a disabled process sandbox remain unaccepted. |
+| **Q3 — CLOSED 2026-09-17** | Four answers, and two of them change the design rather than filling in a number. **(1) Sizes, counts and timeouts are configurable per deployment** with the documented defaults above, so an operator sizes them to their own host; a configured value is validated at startup and a limit may be raised but not removed. **(2) Retention:** build logs 90 days, failed-build artifacts 30 days, and every *published* version's bundle and image kept until the content itself is deleted. **(3) Package sources are configurable** — default CRAN and PyPI, an operator may point at their own Nexus, Artifactory, Posit Package Manager or a forge-style proxy. The egress rule therefore becomes **deny all except the configured repository hosts**, which is stricter to state and easier to implement than a hard-coded allowlist, and it is what lets a private mirror work without special-casing. R and Python remain the only languages in v1. **(4) System packages are the administrator's**, installed into the base images; a build never installs one. A build that fails for a missing system library **surfaces the build log** and stops there — the publisher takes it to their administrator. A curated error-to-package-name mapping was considered and **rejected as scope**: it can never be complete, and a half-complete lookup that confidently names the wrong package is worse than the compiler's own message. |
 | **Q4 — dependencies and base-image licensing** | Candidate Java additions: Commons Compress (Apache-2.0), networknt JSON Schema Validator (Apache-2.0), AWS SDK for Java v2 S3 (Apache-2.0); BuildKit (Apache-2.0). Flag exact versions/transitives before adding. Check base-image/package license inventory too; R/toolchain images contain their own licenses. Any new GPL/AGPL dependency follows CLAUDE.md's explicit sign-off rule; the presence of dev MinIO is not blanket approval for an AGPL SDK. |
 | Existing ACL decision cache | Keep ACL/visibility mutations out of #2; don't introduce viewer-to-builder authorization via cached `canAccess`. Admin gating remains centralized. #4 still owns revocation/fork question. Test warm sessions as well as fresh ones. |
 | Runtime isolation vs build isolation | The engine exposes user/CPU/memory/volume/network settings, but this is not evidence for every sandbox guarantee. T9 tests what the launched image actually gets; missing required engine support is escalated under ADR-0001. |
