@@ -24,6 +24,8 @@ const cases = [
   ["descriptor.path",      descriptor.$defs.renditionPath.pattern,                    "assets/logo.png"],
   ["descriptor.created",   descriptor.properties.created_at.pattern,                  "2026-09-17T17:20:31Z"],
   ["descriptor.media",     descriptor.properties.files.items.properties.media_type.pattern, "text/html"],
+  ["image.authority",      images.authority.pattern,       "registry.internal:5000"],
+  ["image.ocitag",         images.tag.oci_tag_pattern,     "build-22222222-2222-4222-8222-222222222222"],
   ["image.tag",            images.tag.pattern,             "build-22222222-2222-4222-8222-222222222222"],
   ["image.repository",     images.repository.pattern,      "skald/content/11111111-1111-4111-8111-111111111111"],
   ["image.execution",      images.execution_reference.pattern,

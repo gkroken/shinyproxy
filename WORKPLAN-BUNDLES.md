@@ -327,6 +327,16 @@ builder is the builder's own loopback, and a Compose service name is not resolva
 host daemon unless the host is on that network. T5 and T7 prove a push *and a cold pull* with
 the configured string, not two strings that each work in their own context.
 
+**A bare name is not an authority**, and this is the trap with this repository's name on it.
+Docker reads the first path component as a registry domain only when it contains `.` or `:`
+or is exactly `localhost`; otherwise it is a repository path on Docker Hub. Verified against
+Docker 27.1.2: `docker pull registry/skald/content/<uuid>@sha256:<digest>` answers *"pull
+access denied … may require 'docker login'"*, and the configured registry is never contacted,
+while `registry:5000/…` resolves the host as intended. The dev stack's Compose service is
+named `registry`, so the bare form is the first string an implementer would reach for — and
+the grammar refuses it, rather than leaving T5's cold-pull proof as the only thing that would
+notice.
+
 ### Semantic validation, and what the schema deliberately does not do
 
 JSON Schema decides the *shape* of a manifest. It cannot decide whether a path stays inside

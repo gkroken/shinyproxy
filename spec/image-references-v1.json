@@ -3,8 +3,8 @@
   "layout_version": 1,
   "authority": {
     "source": "Deployment configuration. Never a bundle field, never derived from a content path or title.",
-    "requirement": "ONE authority string that both the build exporter and the host Docker daemon resolve to the same registry. This is the trap decision 5 names: `localhost:5000` inside a rootless builder is the builder's own loopback, and a Compose service name like `registry:5000` is not resolvable by the host daemon unless the host is on that network. T5 and T7 must prove a push and a COLD pull using the configured string, not two strings that happen to work in their own contexts.",
-    "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(:[0-9]{1,5})?(?![\\s\\S])"
+    "requirement": "ONE authority string that both the build exporter and the host Docker daemon resolve to the same registry. This is the trap decision 5 names: `localhost:5000` inside a rootless builder is the builder's own loopback, and a Compose service name like `registry:5000` is not resolvable by the host daemon unless the host is on that network. T5 and T7 must prove a push and a COLD pull using the configured string, not two strings that happen to work in their own contexts. The grammar enforces Docker's own rule for what counts as an authority at all: the first path component is read as a registry domain only when it contains '.' or ':' or is exactly 'localhost'. A bare label does not qualify. Verified against Docker 27.1.2 -- `docker pull registry/skald/content/<uuid>@sha256:<digest>` answers 'pull access denied ... may require docker login', which is Docker Hub, and the configured registry is never contacted; `registry:5000/...` resolves the host as intended. This matters here rather than in the abstract: the dev stack's Compose service is named `registry` (docker-compose.dev.yml:109), so the bare form is the first string an implementer would reach for (finding 9f37a60-F1).",
+    "pattern": "^(?:localhost(?::(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))(?![\\s\\S])"
   },
   "repository": {
     "template": "skald/content/{contentId}",
@@ -22,7 +22,7 @@
     "template": "{authority}/skald/content/{contentId}@sha256:{digest}",
     "stored_in": "content_version.image",
     "rationale": "Digest-pinned, and this is not a preference. DockerEngineBackend's default pull policy is IfNotPresent, so a tag whose meaning changed would never be re-pulled and a host would keep running whatever it happened to have cached. A digest names one manifest for ever. It is also what makes rollback a pointer move rather than a rebuild.",
-    "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(:[0-9]{1,5})?/skald/content/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@sha256:[0-9a-f]{64}(?![\\s\\S])",
+    "pattern": "^(?:localhost(?::(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))/skald/content/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@sha256:[0-9a-f]{64}(?![\\s\\S])",
     "must_not_match": [
       "a tag reference, because IfNotPresent would not re-pull it",
       "anything containing 'latest'"
@@ -56,7 +56,9 @@
       "registry:5000/skald/content/not-a-uuid@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": "repository path is not a content UUID",
       "/skald/content/11111111-1111-4111-8111-111111111111@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": "no authority, so the daemon would resolve it against its default registry",
       "registry:5000/skald/content/11111111-1111-4111-8111-111111111111": "no digest and no tag at all; an unpinned reference resolves to whatever the daemon has or fetches, which is the failure a digest pin exists to prevent",
-      "registry:5000/skald/content/11111111-1111-4111-8111-111111111111@sha512:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "sha512; the recorded algorithm is sha256 and a reference the daemon cannot match is a pull failure at run time"
+      "registry:5000/skald/content/11111111-1111-4111-8111-111111111111@sha512:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "sha512; the recorded algorithm is sha256 and a reference the daemon cannot match is a pull failure at run time",
+      "registry/skald/content/11111111-1111-4111-8111-111111111111@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "a bare single-label authority. Docker reads this as a Docker Hub repository path, not as a host, so the configured registry is never contacted -- the same failure as the leading-slash form below, in the spelling that actually occurs",
+      "registry:99999/skald/content/11111111-1111-4111-8111-111111111111@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": "port above 65535"
     },
     "valid_tags": [
       "build-22222222-2222-4222-8222-222222222222"
@@ -65,6 +67,38 @@
       "latest": "not an attempt id, and never used for execution",
       "build-22222222-2222-4222-8222-22222222222Z": "not a UUID",
       "Build-22222222-2222-4222-8222-222222222222": "upper case in the prefix"
+    },
+    "valid_authorities": [
+      "localhost",
+      "localhost:5000",
+      "registry:5000",
+      "registry.internal",
+      "registry.internal:5000",
+      "registry.example.com",
+      "10.0.0.5:5000"
+    ],
+    "invalid_authorities": {
+      "registry": "a bare label is a Docker Hub path component, not a host",
+      "registry:": "colon with no port",
+      "registry:0": "port zero",
+      "registry:99999": "port above 65535",
+      "-registry.internal": "label starts with a hyphen",
+      "registry..internal": "empty label",
+      "registry.internal:": "colon with no port"
+    },
+    "valid_oci_tags": [
+      "build-22222222-2222-4222-8222-222222222222",
+      "v1",
+      "A_b.c-d",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    ],
+    "invalid_oci_tags": {
+      "-leading-hyphen": "an OCI tag may not begin with a hyphen",
+      ".leading-dot": "an OCI tag may not begin with a dot",
+      "": "empty",
+      "has space": "space is not permitted",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": "129 characters, one past the OCI limit",
+      "tag/with/slash": "slash is a path separator, not a tag character"
     }
   }
 }

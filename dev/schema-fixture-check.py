@@ -501,6 +501,27 @@ def check_image_references():
     exec_re = re.compile(spec["execution_reference"]["pattern"])
     tag_re = re.compile(spec["tag"]["pattern"])
     oci_tag_re = re.compile(spec["tag"]["oci_tag_pattern"])
+    authority_re = re.compile(spec["authority"]["pattern"])
+
+    # authority.pattern and tag.oci_tag_pattern were declared and then exercised by nothing:
+    # one had no fixture at all, the other saw only values already known to be valid Skald
+    # tags, so both could be loosened to anything without a single check objecting
+    # (finding 9f37a60-F2). A pattern nothing tries to break is a comment.
+    for label, regex, good, bad in (
+            ("authority", authority_re, ex["valid_authorities"], ex["invalid_authorities"]),
+            ("oci tag", oci_tag_re, ex["valid_oci_tags"], ex["invalid_oci_tags"])):
+        if not good or not bad:
+            fail("%s examples are incomplete; a pattern with no negatives cannot be shown to "
+                 "constrain anything" % label)
+            return
+        for value in good:
+            if not regex.match(value):
+                fail("%s pattern rejected %r, which the spec calls valid" % (label, value))
+                return
+        for value, why in bad.items():
+            if regex.match(value):
+                fail("%s pattern accepted %r, which it must not: %s" % (label, value, why))
+                return
 
     for group, values in (("valid_execution_references", ex["valid_execution_references"]),
                           ("valid_tags", ex["valid_tags"])):
@@ -542,6 +563,9 @@ def check_image_references():
         fail("an example presented as valid contains `latest`")
         return
 
+    print("  ok   %d/%d authorities and %d/%d OCI tags behaved as labelled"
+          % (len(ex["valid_authorities"]), len(ex["invalid_authorities"]),
+             len(ex["valid_oci_tags"]), len(ex["invalid_oci_tags"])))
     print("  ok   %d valid and %d invalid execution references, %d valid and %d invalid tags"
           % (len(ex["valid_execution_references"]), len(ex["invalid_execution_references"]),
              len(ex["valid_tags"]), len(ex["invalid_tags"])))
