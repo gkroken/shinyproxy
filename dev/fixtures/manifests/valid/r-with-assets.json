@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "type": "shiny",
+  "runtime": {
+    "language": "r",
+    "version": "4.4.1"
+  },
+  "entrypoint": ".",
+  "dependencies": {
+    "format": "renv",
+    "path": "renv.lock"
+  },
+  "files": [
+    {
+      "path": "app.R",
+      "size": 83,
+      "sha256": "3371981da0d876b5801f2e9161ebd3642034112e000edda973747a229f5bb962"
+    },
+    {
+      "path": "renv.lock",
+      "size": 50,
+      "sha256": "756ef51a4ec9bb2dee039e595a4f252603da186f5ddebedc17a0d7be632058c4"
+    },
+    {
+      "path": "www/logo.png",
+      "size": 8,
+      "sha256": "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6"
+    },
+    {
+      "path": "docs/a file with spaces.md",
+      "size": 19,
+      "sha256": "21856937ab2556d69195a79ad4dd83a97230e79184d4893e79513bbf325c6cd3"
+    },
+    {
+      "path": "docs/résumé.md",
+      "size": 19,
+      "sha256": "21856937ab2556d69195a79ad4dd83a97230e79184d4893e79513bbf325c6cd3"
+    },
+    {
+      "path": "bin/run.sh",
+      "size": 18,
+      "sha256": "299001868fb8c02fd431c336c6d058f5558c5dff5b5af5e6fe04b870a6a9cbba",
+      "executable": true
+    }
+  ]
+}

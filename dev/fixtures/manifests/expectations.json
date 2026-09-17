@@ -1,0 +1,50 @@
+{
+  "note": "Machine-readable expectations for schemas/manifest/v1.schema.json. 'schema_invalid' cases must be rejected by JSON Schema validation alone. 'semantic_invalid' cases are structurally valid ON PURPOSE: the schema must ACCEPT them and the semantic validator must reject them, because containment, inventory membership and entrypoint resolution are not expressible in JSON Schema. A run reporting a semantic case as schema-rejected means the schema is doing something other than what is written here.",
+  "schema": "schemas/manifest/v1.schema.json",
+  "valid": [
+    "python-nested",
+    "python-root",
+    "r-nested",
+    "r-nested-two-file",
+    "r-root-single-file",
+    "r-root-two-file",
+    "r-with-assets"
+  ],
+  "schema_invalid": [
+    "dependencies-unknown-format",
+    "entrypoint-absolute",
+    "entrypoint-empty",
+    "files-empty",
+    "files-item-missing-sha256",
+    "files-item-unknown-key",
+    "future-schema-version",
+    "missing-schema-version",
+    "path-absolute",
+    "path-backslash",
+    "path-control-character",
+    "runtime-unknown-key",
+    "runtime-unknown-language",
+    "runtime-version-latest",
+    "runtime-version-range",
+    "schema-version-as-string",
+    "sha256-uppercase",
+    "sha256-wrong-length",
+    "size-fractional",
+    "size-negative",
+    "unknown-top-level-key",
+    "unregistered-type"
+  ],
+  "semantic_invalid": [
+    "duplicate-inventory-path",
+    "language-format-disagreement",
+    "lockfile-absent-from-inventory",
+    "path-dot-segment",
+    "path-traversal",
+    "python-entrypoint-absent",
+    "python-entrypoint-names-a-directory",
+    "r-directory-without-layout",
+    "r-entrypoint-names-a-file",
+    "r-only-ui-no-server",
+    "registered-but-unsupported-type"
+  ]
+}

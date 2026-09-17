@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "type": "shiny",
+  "runtime": {
+    "language": "r",
+    "version": "4.4.1",
+    "download_url": "http://x/"
+  },
+  "entrypoint": ".",
+  "dependencies": {
+    "format": "renv",
+    "path": "renv.lock"
+  },
+  "files": [
+    {
+      "path": "app.R",
+      "size": 83,
+      "sha256": "3371981da0d876b5801f2e9161ebd3642034112e000edda973747a229f5bb962"
+    },
+    {
+      "path": "renv.lock",
+      "size": 50,
+      "sha256": "756ef51a4ec9bb2dee039e595a4f252603da186f5ddebedc17a0d7be632058c4"
+    }
+  ]
+}

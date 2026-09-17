@@ -1,0 +1,7 @@
+{
+  "note": "This file is an index, deliberately NOT a validation schema. A validator selects a schema by the manifest's schema_version and loads the matching immutable document from schemas/manifest/. Nothing loads this file to validate a bundle, so editing it cannot change what a version-1 manifest means. WORKPLAN-BUNDLES.md decision 2 calls this path both 'the authoritative JSON Schema' and 'the convenience file'; the operative requirement is the second, since a released format whose meaning can be edited later is not a released format. Making this an index rather than a copy removes the choice: there is no second schema document to drift.",
+  "current_version": 1,
+  "versions": {
+    "1": "schemas/manifest/v1.schema.json"
+  }
+}

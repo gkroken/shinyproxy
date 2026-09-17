@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "type": "shiny",
+  "runtime": {
+    "language": "python",
+    "version": "3.12"
+  },
+  "entrypoint": "src/app.py",
+  "dependencies": {
+    "format": "pip-hashed",
+    "path": "requirements.lock"
+  },
+  "files": [
+    {
+      "path": "src/app.py",
+      "size": 64,
+      "sha256": "c73fc664770959948386530243171cd1edad5920cbec0ca0a506c6616a3ea487"
+    },
+    {
+      "path": "requirements.lock",
+      "size": 92,
+      "sha256": "a90fad52960e422a3af972b4d4bac10ede25016ea5253f1dc8ca5600e2abc69e"
+    }
+  ]
+}

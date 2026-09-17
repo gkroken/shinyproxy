@@ -711,6 +711,44 @@ below are marked passed by this planning document.
       entrypoint evidenced only by a directory header with no files beneath it, and a
       directory smuggled into `files`.
 
+      **T1(a) done 2026-09-17 — the manifest contract only.** T1 covers several contracts;
+      this is the first and most irreversible of them. Still open within T1: the output
+      descriptor, ID/state vocabulary, admin transport, object/image layout wording, literal
+      safe launch arguments, and the semantic validator specification.
+
+      - `schemas/manifest/v1.schema.json` — authoritative and immutable, dialect 2020-12,
+        `additionalProperties: false` throughout, `schema_version` pinned by `const`.
+      - `schemas/manifest.schema.json` is an **index, not a schema**. Decision 2 calls that
+        path both "the authoritative JSON Schema" and "the convenience file"; those cannot
+        both hold, because a released format whose meaning can be edited later is not
+        released. Making it an index satisfies the operative half and removes the choice —
+        there is no second schema document to drift from the first. Flagged rather than
+        silently resolved; if the intent was a byte-identical copy, say so and it changes.
+      - 40 fixtures in `dev/fixtures/manifests/`, split three ways by
+        `expectations.json`: **7 valid**, **22 schema-invalid**, **11 semantic-invalid**.
+        The third group is the load-bearing one. Those manifests are structurally valid on
+        purpose — `../escape.txt` in the inventory, a duplicate path, an R entrypoint naming
+        a file, a Python entrypoint naming a directory, `renv` declared under a Python
+        runtime — and the schema **must accept them**, because containment, inventory
+        membership and entrypoint resolution are not expressible in JSON Schema. Recording
+        them as expected-accepted is what stops a later reader mistaking the gap for a hole,
+        and what keeps the debt visible for the semantic validator in T5.
+      - `dev/validate-manifests.sh` runs the fixtures through **python `jsonschema` 4.26.0
+        in a container** — deliberately not networknt, which the server will use. One
+        implementation agreeing with itself is not evidence that a document says what it is
+        meant to say. Result: all 40 behaved as specified.
+      - The runner also asserts the index is not a schema and points at the schema under
+        test. Both assertions were mutation-tested: restoring a schema copy at the index path
+        fails with "is a schema; it must be an index", and repointing it fails with "does not
+        point at the schema under test".
+      - Positive fixtures carry **real** sizes and SHA-256 values of the payload bytes they
+        describe, so T2 can build archives from them rather than inventing a second set.
+      - Q4: no Maven dependency added. networknt remains a candidate for the server side;
+        the fixture runner is a container-only dev tool and ships nothing.
+
+      **Not frozen.** Q3 is unconfirmed, so the format is not yet released and durable bundles
+      are not yet accepted against it — which is the plan's own precondition for freezing.
+
 - [ ] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
       without production validation helpers. Store fixture generator, hashes and expectations.
