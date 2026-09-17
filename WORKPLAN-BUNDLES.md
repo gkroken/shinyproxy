@@ -608,14 +608,40 @@ success. Reaching the log cap stops execution with a typed limit error and a tru
 marker. Do not expose registry/S3 credentials in process arguments, audit details or logs.
 
 Cleanup uses the artifact ledger, grace periods and repeatable mark/recheck/delete steps.
-Proposed defaults: abort incomplete uploads after one hour; collect unreferenced failed
-artifacts after 24 hours; retain failed attempt logs for 30 days; expire unused dependency
-caches after 14 days. Retain successful version source/provenance/logs with the version.
-These operator retention defaults are Q3; the safety rule is not optional: never collect
-retained versions, live-proxy images, nonterminal attempts, leased work or in-flight
-publication. Recheck pins before destructive work and pause publication during registry
-maintenance. Keep referenced digest tags so registry `delete-untagged` cannot silently
-erase DB-referenced images. Never GC external/direct-image admin repositories.
+
+**Retention policy, decided in Q3 on 2026-09-17. This table is the only authoritative
+statement; earlier proposals elsewhere in this document are superseded.** The earlier draft
+said failed artifacts were collectable after 24 hours, which would have destroyed evidence
+28 days before the decided policy allows, and let a successful build's logs live forever
+by attaching them to the version. A collector cannot be written against two policies.
+
+| Artifact | Retained | Clock starts |
+|---|---|---|
+| Incomplete upload (no committed receipt) | 1 hour | last write to the multipart upload |
+| Bundle of a **published** version | until the content is deleted | — |
+| Image of a **published** version | until the content is deleted | — |
+| Artifacts of a failed, cancelled or timed-out attempt | **30 days** | attempt reached its terminal status |
+| Logs of a failed, cancelled or timed-out attempt | **30 days** | attempt reached its terminal status |
+| Logs of a **successful** build | **90 days** | attempt reached its terminal status |
+| Unused dependency cache | 14 days | last cache hit |
+
+Two consequences of splitting those rows, both deliberate. A published version's **image
+and bundle are pinned indefinitely** while **its logs expire at 90 days**: the artifacts are
+what rollback needs and the logs are diagnostics, and treating them as one thing is what
+made the earlier draft retain logs forever. And a failed attempt's logs and artifacts expire
+**together at 30 days**, because a log that outlives the artifacts it describes invites
+someone to conclude the build is still recoverable.
+
+Every retention clock starts at a **terminal status**, never at creation: a build that runs
+for six hours must not have its logs aged out from under it while it is still running.
+
+The safety rule is not optional and is not a retention period: never collect retained
+versions, live-proxy images, nonterminal attempts, leased work or in-flight publication,
+whatever the table says. An expiry is permission to collect, not an instruction to collect
+something still referenced. Recheck pins before destructive work and pause publication
+during registry maintenance. Keep referenced digest tags so registry `delete-untagged`
+cannot silently erase DB-referenced images. Never GC external/direct-image admin
+repositories.
 
 Registry manifest deletion and blob reclamation are different operations. The selected
 registry's GC runs with writes stopped/read-only, with a dry-run report first. Object
@@ -926,7 +952,12 @@ below are marked passed by this planning document.
       Depends all above. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and
       asserted cleanup, described in Done when. Include restart during build, failed build
       retry, log retention, orphan/multipart cleanup and real registry GC with a referenced
-      old image protected. Re-run the extraction and isolation suite against the final
+      old image protected. **Retention is asserted per row of the policy table above, on both
+      sides of each boundary** — a failed attempt's artifacts and logs still present at 29
+      days and collected at 31; a successful build's logs present at 89 and collected at 91;
+      a published version's image and bundle still present after both; a nonterminal attempt
+      never collected however old its clock would make it. "Cleanup ran" is not the assertion;
+      "cleanup collected exactly what the policy names, and nothing it protects" is. Re-run the extraction and isolation suite against the final
       integrated artifact; independent reviewer signs off changes since T5. Run
       `make build`, `make dev`, smoke, ACL, bundle live tests and `make test` anew.
       **Pass:** actual output and named failed mutations, no vacuous deny cases, no
@@ -937,8 +968,8 @@ below are marked passed by this planning document.
 | Question/risk | Recommendation, decision owner and stop condition |
 |---|---|
 | **Q1 — CLOSED: runnable breadth** | User selected **R and Python Shiny now**. Both are required end to end. T1 selects exact maintained language/tool versions and freezes the two manifest branches; additional version support is an additive catalog choice. Static/API/data behavior remains with its owning track. |
-| **Q2 — DECIDED 2026-09-17, verification pending** | The user takes the systemd route: a `Delegate=cpu cpuset io memory pids` drop-in for `user@.service`, so the user manager can enforce a CPU bound on a rootless worker. T0 found the host delegating only `memory pids`, and the parent slice offering `cpuset cpu io memory hugetlb pids rdma`, so the mechanism exists and was merely switched off. **Not yet verified, and the configuration check is not the proof:** `cgroup.controllers` listing `cpu` says the delegation happened; `systemd-run --user --scope -p CPUQuota=50% sleep 1` succeeding says a limit can actually be applied, which is the property the contract needs. Record both outputs against this gate before T3 relies on it. AppArmor remains unavailable on this host — a fact, not a decision: the profile is confined by user namespaces, seccomp and cgroups, and the write-up must say that rather than listing AppArmor. Privileged mode and a disabled process sandbox remain unaccepted. |
-| **Q3 — CLOSED 2026-09-17** | Four answers, and two of them change the design rather than filling in a number. **(1) Sizes, counts and timeouts are configurable per deployment** with the documented defaults above, so an operator sizes them to their own host; a configured value is validated at startup and a limit may be raised but not removed. **(2) Retention:** build logs 90 days, failed-build artifacts 30 days, and every *published* version's bundle and image kept until the content itself is deleted. **(3) Package sources are configurable** — default CRAN and PyPI, an operator may point at their own Nexus, Artifactory, Posit Package Manager or a forge-style proxy. The egress rule therefore becomes **deny all except the configured repository hosts**, which is stricter to state and easier to implement than a hard-coded allowlist, and it is what lets a private mirror work without special-casing. R and Python remain the only languages in v1. **(4) System packages are the administrator's**, installed into the base images; a build never installs one. A build that fails for a missing system library **surfaces the build log** and stops there — the publisher takes it to their administrator. A curated error-to-package-name mapping was considered and **rejected as scope**: it can never be complete, and a half-complete lookup that confidently names the wrong package is worse than the compiler's own message. |
+| **Q2 — DECIDED 2026-09-17, verification pending** | The user takes the systemd route: a `Delegate=cpu cpuset io memory pids` drop-in for `user@.service`, so the user manager can enforce a CPU bound on a rootless worker. T0 found the host delegating only `memory pids`, and the parent slice offering `cpuset cpu io memory hugetlb pids rdma`, so the mechanism exists and was merely switched off. **Not yet verified, and the configuration check is not the proof:** `cgroup.controllers` listing `cpu` says the delegation happened; `systemd-run --user --scope -p CPUQuota=50% sleep 1` succeeding says a quota can be *applied* to a scope. Neither measures **enforcement**, and a sleeping process consumes no CPU, so that command is a preflight and nothing more. T3 still owes a CPU-burning probe against the real worker *and its descendants*, and T5 repeats it independently; a successful preflight does not satisfy either. Record both outputs against this gate before T3 relies on it, labelled as preflight. AppArmor remains unavailable on this host — a fact, not a decision: the profile is confined by user namespaces, seccomp and cgroups, and the write-up must say that rather than listing AppArmor. Privileged mode and a disabled process sandbox remain unaccepted. |
+| **Q3 — CLOSED 2026-09-17** | Four answers, and two of them change the design rather than filling in a number. **(1) Sizes, counts and timeouts are configurable per deployment** with the documented defaults above, so an operator sizes them to their own host; a configured value is validated at startup and a limit may be raised but not removed. **(2) Retention** is decided, and the per-artifact table in "Status, logs, admin transport and cleanup" is the only authoritative statement of it — this row deliberately does not repeat the numbers, because restating them in two places is exactly what produced finding `d4f5baf-F1`. In summary: a published version's bundle and image are pinned until the content is deleted, while logs and failed-attempt artifacts expire. **(3) Package sources are configurable** — default CRAN and PyPI, an operator may point at their own Nexus, Artifactory, Posit Package Manager or a forge-style proxy. The egress rule therefore becomes **deny all except the configured repository hosts**, which is stricter to state and easier to implement than a hard-coded allowlist, and it is what lets a private mirror work without special-casing. R and Python remain the only languages in v1. **(4) System packages are the administrator's**, installed into the base images; a build never installs one. A build that fails for a missing system library **surfaces the build log** and stops there — the publisher takes it to their administrator. A curated error-to-package-name mapping was considered and **rejected as scope**: it can never be complete, and a half-complete lookup that confidently names the wrong package is worse than the compiler's own message. |
 | **Q4 — dependencies and base-image licensing** | Candidate Java additions: Commons Compress (Apache-2.0), networknt JSON Schema Validator (Apache-2.0), AWS SDK for Java v2 S3 (Apache-2.0); BuildKit (Apache-2.0). Flag exact versions/transitives before adding. Check base-image/package license inventory too; R/toolchain images contain their own licenses. Any new GPL/AGPL dependency follows CLAUDE.md's explicit sign-off rule; the presence of dev MinIO is not blanket approval for an AGPL SDK. |
 | Existing ACL decision cache | Keep ACL/visibility mutations out of #2; don't introduce viewer-to-builder authorization via cached `canAccess`. Admin gating remains centralized. #4 still owns revocation/fork question. Test warm sessions as well as fresh ones. |
 | Runtime isolation vs build isolation | The engine exposes user/CPU/memory/volume/network settings, but this is not evidence for every sandbox guarantee. T9 tests what the launched image actually gets; missing required engine support is escalated under ADR-0001. |
