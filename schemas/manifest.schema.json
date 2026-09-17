@@ -1,7 +1,96 @@
 {
-  "note": "This file is an index, deliberately NOT a validation schema. A validator selects a schema by the manifest's schema_version and loads the matching immutable document from schemas/manifest/. Nothing loads this file to validate a bundle, so editing it cannot change what a version-1 manifest means. WORKPLAN-BUNDLES.md decision 2 calls this path both 'the authoritative JSON Schema' and 'the convenience file'; the operative requirement is the second, since a released format whose meaning can be edited later is not a released format. Making this an index rather than a copy removes the choice: there is no second schema document to drift.",
-  "current_version": 1,
-  "versions": {
-    "1": "schemas/manifest/v1.schema.json"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skald:manifest:v1",
+  "title": "Skald bundle manifest, version 1",
+  "description": "Defines version 1 of the bundle manifest. Released and immutable: changed meaning requires a new version, not an edit here. This exact document is served at two paths -- schemas/manifest/v1.schema.json, selected by a manifest's schema_version, and schemas/manifest.schema.json, the published path a consumer reads. dev/validate-manifests.sh asserts the two are identical and puts every fixture through BOTH, so the published path can never validate something the released version rejects. Structure only: this schema cannot express path containment, inventory membership or entrypoint resolution, which the semantic validator owns and which dev/fixtures/manifests/expectations.json labels as semantic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "runtime", "entrypoint", "dependencies", "files"],
+  "properties": {
+    "schema_version": {
+      "description": "Exactly 1. A higher number is a newer format this validator must refuse rather than guess at.",
+      "type": "integer",
+      "const": 1
+    },
+    "type": {
+      "description": "A content type the registry recognises, mirroring content_type_known in V1__content_registry.sql. Being listed here is not a promise that a bundle of this type can be built: the recipe matrix decides that, and an unsupported one is refused with an explicit unsupported-type error rather than a schema violation.",
+      "type": "string",
+      "enum": ["shiny", "quarto_static", "rmarkdown_static", "plumber", "fastapi", "data"]
+    },
+    "runtime": {
+      "description": "The language and its exact version. No range, no 'latest', no download URL: the server picks a digest-pinned base from this, and a moving target cannot be pinned.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "version"],
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": ["r", "python"]
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?(?![\\s\\S])",
+          "maxLength": 32
+        }
+      }
+    },
+    "entrypoint": {
+      "description": "A path relative to app/, or '.' for the payload root. What it must denote depends on the language and is checked semantically: Python names a regular .py file present in files; R names a directory, validated through the files beneath it rather than by an entry of its own. This schema only constrains the string's shape.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(\\.|[^/\\\\\\u0000-\\u001f][^\\\\\\u0000-\\u001f]*)(?![\\s\\S])"
+    },
+    "dependencies": {
+      "description": "Always a regular file in files. format and the file it names are checked against the language by the semantic validator; a renv.lock declared under a Python runtime is a manifest disagreement, not a schema error.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "path"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["renv", "pip-hashed"]
+        },
+        "path": { "$ref": "#/$defs/payloadPath" }
+      }
+    },
+    "files": {
+      "description": "Every regular payload file under app/, and nothing else. Directories are never members, which is why an R entrypoint is resolved through this list rather than found in it. manifest.json itself is excluded. The server verifies these hashes against the bytes it received; a publisher's hash is a declaration, not proof.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size", "sha256"],
+        "properties": {
+          "path": { "$ref": "#/$defs/payloadPath" },
+          "size": {
+            "description": "Bytes, as an integer. Bounds are operator policy and are enforced against the actual streamed bytes as well as this declaration.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "executable": {
+            "description": "The only file mode a publisher may influence. Ownership, timestamps, setuid/setgid/sticky bits and extended attributes are stripped.",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "payloadPath": {
+      "description": "A relative, slash-separated path under app/. The pattern rejects an absolute path, a backslash and any control character; '.' and '..' segments, empty segments, NFC normalisation, case collisions and containment are the semantic validator's, because a regular expression cannot decide them.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^/\\\\\\u0000-\\u001f][^\\\\\\u0000-\\u001f]*(?![\\s\\S])"
+    }
   }
 }

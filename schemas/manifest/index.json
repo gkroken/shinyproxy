@@ -1,0 +1,7 @@
+{
+  "note": "Version selection for the bundle manifest. Not a schema, and not at a schema path: an earlier revision put a document like this at schemas/manifest.schema.json, on the mistaken belief that a file without $schema cannot be used as one. JSON Schema ignores unknown keywords, so that document was a schema that accepted null, 42 and every malformed manifest. Anything that validates must load a file from versions below.",
+  "current_version": 1,
+  "versions": {
+    "1": "schemas/manifest/v1.schema.json"
+  }
+}

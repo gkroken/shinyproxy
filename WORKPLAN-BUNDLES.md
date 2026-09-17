@@ -718,14 +718,20 @@ below are marked passed by this planning document.
 
       - `schemas/manifest/v1.schema.json` — authoritative and immutable, dialect 2020-12,
         `additionalProperties: false` throughout, `schema_version` pinned by `const`.
-      - `schemas/manifest.schema.json` is an **index, not a schema**. Decision 2 calls that
-        path both "the authoritative JSON Schema" and "the convenience file"; those cannot
-        both hold, because a released format whose meaning can be edited later is not
-        released. Making it an index satisfies the operative half and removes the choice —
-        there is no second schema document to drift from the first. Flagged rather than
-        silently resolved; if the intent was a byte-identical copy, say so and it changes.
-      - 40 fixtures in `dev/fixtures/manifests/`, split three ways by
-        `expectations.json`: **7 valid**, **22 schema-invalid**, **11 semantic-invalid**.
+      - `schemas/manifest.schema.json` carries the **real schema**, byte-identical to
+        `schemas/manifest/v1.schema.json`, and every fixture is validated through both with
+        identical verdicts required.
+
+        *An earlier revision of this commit put a non-schema "index" there and claimed the
+        two requirements in decision 2 could not both hold. That was wrong, and instructive.*
+        JSON Schema ignores unknown keywords, so the index **was** a schema — one that
+        accepted `null`, `42`, `{}` and every malformed manifest. Anything loading the
+        published path would have validated literally anything, and the runner's assertion
+        that the file "must not be a schema" locked the bypass in. There is no tension to
+        resolve: a published copy and immutable versioned documents coexist by being equal
+        and checked for equality (finding `dd46cac-F1`).
+      - 46 fixtures in `dev/fixtures/manifests/`, split three ways by
+        `expectations.json`: **7 valid**, **28 schema-invalid**, **11 semantic-invalid**.
         The third group is the load-bearing one. Those manifests are structurally valid on
         purpose — `../escape.txt` in the inventory, a duplicate path, an R entrypoint naming
         a file, a Python entrypoint naming a directory, `renv` declared under a Python
@@ -737,10 +743,22 @@ below are marked passed by this planning document.
         in a container** — deliberately not networknt, which the server will use. One
         implementation agreeing with itself is not evidence that a document says what it is
         meant to say. Result: all 40 behaved as specified.
-      - The runner also asserts the index is not a schema and points at the schema under
-        test. Both assertions were mutation-tested: restoring a schema copy at the index path
-        fails with "is a schema; it must be an index", and repointing it fails with "does not
-        point at the schema under test".
+      - **Patterns are anchored with `(?![\s\S])`, not `$`.** `$` does not mean end of
+        string in either implementation this schema will meet: Python's `re` and
+        `java.util.regex` both let it match immediately before a final newline. Appending one
+        `U+000A` to `sha256`, `runtime.version`, `entrypoint`, `files[].path` or
+        `dependencies.path` was therefore accepted — a **65-character SHA-256** passed, and
+        paths carried the very control character their description says is rejected
+        (finding `dd46cac-F2`). Six fixtures now cover trailing and leading newlines, and
+        `sha256` additionally carries `minLength`/`maxLength` 64 so the digest is bounded
+        even if a pattern is later loosened.
+      - The runner cross-checks the raw patterns against **ECMA-262 via node**, because the
+        anchors have to hold in the server's engine too and one implementation agreeing with
+        itself proves nothing about the other.
+      - Guards mutation-tested rather than assumed: restoring the bare `$` anchor makes
+        `trailing-newline-in-file-path` and `-dependency-path` report "ACCEPTED by the
+        schema"; putting the index back at the published path fails with "…differ; the
+        published path could validate something the released version rejects".
       - Positive fixtures carry **real** sizes and SHA-256 values of the payload bytes they
         describe, so T2 can build archives from them rather than inventing a second set.
       - Q4: no Maven dependency added. networknt remains a candidate for the server side;
