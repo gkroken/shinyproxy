@@ -1057,32 +1057,47 @@ below are marked passed by this planning document.
       and the deliberately unsafe extractor are T2(b) and are what the Pass line above
       actually turns on; this is the material they will be pointed at.
 
-      - `dev/fixtures/bundles/generate.py` builds **76 fixtures** across all seven required
-        groups: 11 positive controls, 10 traversal, 5 links, 14 bombs, 12 types and path
-        limits, 7 duplicate/alias, 17 manifest and inventory. Standard library only, no
+      - `dev/fixtures/bundles/generate.py` builds **86 fixtures** across all seven required
+        groups: 14 positive controls, 10 traversal, 6 links, 16 bombs, 13 types and path
+        limits, 8 duplicate/alias, 19 manifest and inventory. Standard library only, no
         import of any Skald class, and hand-written tar headers wherever a polite writer
         would refuse — a negative size, a NUL inside a name, a bad checksum, a GNU sparse
-        member. A corpus built solely with a well-behaved library omits exactly the cases
-        worth having.
+        member, an undefined typeflag. A corpus built solely with a well-behaved library
+        omits exactly the cases worth having.
+      - Seventeen fixtures are marked **accept**, not fourteen: three boundary halves live
+        in the bombs group because that is where their pair is. The suite keys the hostile
+        sweep on the fixture's expected decision rather than on its group name, so a
+        boundary half cannot escape it by being filed elsewhere.
       - **Archives are generated, not checked in.** The plan asks for the generator, hashes
         and expectations; storing 3.4 MB of bombs as well would add a second place for the
         corpus to drift. Every SHA-256 is recorded and regeneration is byte-identical, so a
         generator change that alters a fixture fails loudly instead of redefining the test.
-      - Boundary fixtures are parameterised off the configured limits, so N/N+1 pairs still
-        straddle the real value after an operator changes one.
+      - Boundary fixtures **and the predicates that police them** are parameterised off the
+        configured limits, so an N/N+1 pair still straddles the real value after an operator
+        changes one. Verified by reconfiguring all six limits at once (entries 20000→500,
+        expanded 2 GiB→64 MiB, per-file 512 MiB→16 MiB, path 1024→256, segment 255→64,
+        depth 32→8) and re-running the whole suite green.
       - `dev/bundle-corpus-check.py` asserts **every negative fixture exhibits the property
         its name claims**, with one predicate per fixture rather than per group. This is the
         part that matters: a corpus of negatives that nothing runs against reports itself as
         complete forever, and the way it rots is a fixture quietly becoming benign while
-        still being counted. Positive controls are checked to exhibit **none** of seven
+        still being counted. Accepted fixtures are checked to exhibit **none** of fifteen
         hostile properties, so "rejects everything" stays distinguishable from "works".
+        Eight of the fifteen are about size and shape against the configured limits, and an
+        accepted fixture also keeps its own predicate: a boundary half has to prove it is
+        *at* the limit as well as over none of the others.
       - Its tar reader is hand-written rather than `tarfile`-based, because several fixtures
         are malformed on purpose and a library that refuses to parse them would leave
-        precisely those uninspectable. Decompression is bounded and returns its prefix, so
-        the expansion bombs' headers are readable without materialising two gigabytes.
+        precisely those uninspectable. It walks a **stream**: a member declaring two
+        gigabytes has its header read and its payload skipped at constant memory, so the
+        total expanded size and any later oversized member are still measurable. A bounded
+        in-memory prefix is kept alongside it for the questions that are about raw bytes.
       - Mutation-tested: a traversal fixture made benign, a symlink added to a positive
         control, the setuid fixture losing its bit, the case-alias fixture ceasing to
-        collide, and a fixture's bytes changing without its hash — each reported and failed.
+        collide, a fixture's bytes changing without its hash, and — added with the F1–F4
+        corrections — an at-limit control pushed over the limit, an over-limit negative
+        pulled inside it, an accepted fixture shipping a file its manifest never declares,
+        and the streaming walker reverted to a bounded buffer. Each reported and failed.
 
       Two defects in the checker were found by the checker, both of the class this project
       keeps meeting. Its tar walker could not resolve GNU long names, so every fixture whose
@@ -1091,6 +1106,16 @@ below are marked passed by this planning document.
       placeholder contains `/./`. And the decompression bound discarded its buffer, so the
       expansion bombs' headers were invisible and `bomb-expanded-over-limit` appeared not to
       exhibit its own property.
+
+      Review of 29857f7 found four more, and they share a single shape: **the checker had no
+      predicate for the limits, so nothing policed the fixtures that are only about limits.**
+      The one at-limit positive control was four bytes over the segment cap and invisible;
+      three predicates compared against a literal rather than the configured limit, one of
+      them against the 100-byte tar name field instead of `max_path_bytes`; and several
+      required cases were absent, including any positive control with a PAX filename, which
+      let an extractor that rejects every PAX header pass the whole corpus. The corrections
+      are in the commit that references those findings. The lesson is recorded here because
+      it recurs: a checker inherits the blind spots of whoever wrote the thing it checks.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,

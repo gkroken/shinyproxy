@@ -173,9 +173,47 @@ def manifest(language="r", entrypoint=".", files=None, **over):
     return doc
 
 
+def _path_of_length(total):
+    """A payload-relative path of exactly `total` bytes, from segments within the cap.
+
+    The segment length is bounded by max_segment_bytes, not by a literal 100: lowering
+    the segment cap would otherwise turn this path into one that is over that cap, which
+    matters because the caller uses it for an ACCEPTED fixture.
+    """
+    seg = "s" * min(100, LIMITS["max_segment_bytes"])
+    parts = []
+    while len("/".join(parts + [seg])) < total:
+        parts.append(seg)
+    used = len("/".join(parts)) + 1 if parts else 0
+    parts.append("x" * (total - used))
+    assert len("/".join(parts)) == total
+    return "/".join(parts)
+
+
+def _pax_record(key, value):
+    """A PAX record, whose length field counts the record including itself."""
+    body = (" %s=%s\n" % (key, value)).encode()
+    n = len(body)
+    while len(str(n + len(str(n)))) != len(str(n)):
+        n += 1
+    return str(n + len(str(n))).encode() + body
+
+
 def entry(path, data):
     return {"path": path, "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def zero_entry(path, size):
+    """An inventory entry for `size` zero bytes, hashed without allocating them."""
+    h = hashlib.sha256()
+    block = b"\0" * (1 << 20)
+    left = size
+    while left > 0:
+        take = min(left, len(block))
+        h.update(block[:take])
+        left -= take
+    return {"path": path, "size": size, "sha256": h.hexdigest()}
 
 
 # --------------------------------------------------------------------- positive controls
@@ -272,15 +310,68 @@ def _(b):
     b.add("app/sub/app.R", R_APP).add("app/renv.lock", RENV)
 
 
-@fixture("pos-exact-limit-path", "positive", "accept", "-",
-         "a path exactly at the segment and depth limits, the accepted half of the "
-         "boundary pair")
+# Depth is counted in segments of the payload-relative path: "x.txt" is 1, "a/x.txt" is 2.
+# The "app/" prefix is not part of it, and neither is anything a checker happens to see in
+# the member name.
+
+@fixture("pos-exact-limit-segment", "positive", "accept", "-",
+         "one segment of exactly max_segment_bytes, the ACCEPTED half of that pair. The "
+         "suffix is inside the segment, not appended to it: an earlier version built "
+         "'s' * 255 + '.txt' and produced a 259-byte segment, so the only at-limit positive "
+         "control in the corpus was over the limit and would have forced a correct extractor "
+         "to fail the suite (finding 29857f7-F1)")
 def _(b):
-    seg = "s" * LIMITS["max_segment_bytes"]
-    path = "www/" + seg + ".txt"
+    seg = "s" * (LIMITS["max_segment_bytes"] - len(".txt")) + ".txt"
+    assert len(seg.encode()) == LIMITS["max_segment_bytes"], len(seg.encode())
+    path = "www/" + seg
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
                                    entry(path, b"x")]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV).add("app/" + path, b"x")
+
+
+@fixture("pos-exact-limit-depth", "positive", "accept", "-",
+         "a payload-relative path of exactly max_depth segments, the accepted half of the "
+         "depth pair")
+def _(b):
+    path = "/".join("d%d" % i for i in range(LIMITS["max_depth"] - 1)) + "/x.txt"
+    assert len(path.split("/")) == LIMITS["max_depth"]
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   entry(path, b"x")]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV).add("app/" + path, b"x")
+
+
+@fixture("pos-exact-limit-total-path", "positive", "accept", "-",
+         "a payload-relative path of exactly max_path_bytes, assembled from legal segments, "
+         "the accepted half of the total-path pair")
+def _(b):
+    path = _path_of_length(LIMITS["max_path_bytes"])
+    assert len(path.encode()) == LIMITS["max_path_bytes"], len(path.encode())
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   entry(path, b"x")]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV).add("app/" + path, b"x")
+
+
+@fixture("pos-pax-filename", "positive", "accept", "-",
+         "a PAX extended header carrying a legitimate long UTF-8 filename. The plan lists "
+         "this as a required positive control for a reason: without it, an extractor that "
+         "rejects every PAX header passes the whole corpus, since PAX otherwise appears only "
+         "in negatives. Innocuous PAX metadata is allowed under bounds, and this is what "
+         "proves the difference between allowed and ignored (finding 29857f7-F4)")
+def _(b):
+    # Long, but sized off the caps: a fixed 71-byte segment is over the limit as soon as
+    # an operator lowers max_segment_bytes, and this fixture is one the corpus accepts.
+    unit, tail = "\u00e9t\u00e9-", "rapport.txt"
+    room = min(LIMITS["max_segment_bytes"], LIMITS["max_path_bytes"] - len("www/")) - len(tail)
+    seg = unit * (room // len(unit.encode())) + tail
+    name = "app/www/" + seg
+    assert len(seg.encode()) <= LIMITS["max_segment_bytes"], len(seg.encode())
+    record = _pax_record("path", name)
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   entry(name[len("app/"):], b"pax\n")]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    b.add_raw(raw_header("app/www/shortname.txt", b"%011o\0" % len(record), typeflag=b"x"),
+              record)
+    b.add(name, b"pax\n")
 
 
 # --------------------------------------------------------------------- traversal
@@ -529,6 +620,76 @@ class _ZeroStream(io.RawIOBase):
         return True
 
 
+@fixture("link-hardlink-inside", "links", "reject", "-",
+         "a hardlink whose target IS inside the tree. The plan asks for both directions, and "
+         "the inside case is the one that looks harmless: two names for one inode means a "
+         "file validated once can be reached under a path that was never checked")
+def _(b):
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    b.add("app/also-app.R", typ=tarfile.LNKTYPE, linkname="app/app.R")
+
+
+@fixture("bomb-expanded-at-limit", "bombs", "accept", "-",
+         "total expanded bytes exactly at the cap, split across members that each stay "
+         "within the per-file cap: the accepted half the plan asks for. A single 2 GiB "
+         "member would have been over max_file_bytes, so a correct extractor would have "
+         "had to reject a fixture marked accept -- 29857f7-F1 in the size dimension. "
+         "Costly to extract on purpose: an off-by-one that rejects a legitimate bundle at "
+         "the cap is a real failure for a publisher, and only this fixture catches it")
+def _(b):
+    head = [entry("app.R", R_APP), entry("renv.lock", RENV)]
+    overhead = len(R_APP) + len(RENV)
+    chunk = LIMITS["max_file_bytes"]
+    # The manifest counts against the expanded total, and its own length depends on the
+    # sizes it declares, so the two have to be settled together. Iterate against a
+    # placeholder digest: a SHA-256 hex digest is always 64 characters, so only the sizes
+    # and the number of entries can move the manifest's length.
+    sizes, body = None, None
+    for _attempt in range(8):
+        files = head + [{"path": "www/zeros%d.bin" % i, "size": n, "sha256": "0" * 64}
+                        for i, n in enumerate(sizes if sizes is not None else [chunk])]
+        body = json.dumps(manifest(files=files), indent=2).encode()
+        left, nxt = LIMITS["max_expanded_bytes"] - overhead - len(body), []
+        while left > 0:
+            nxt.append(min(left, chunk))
+            left -= nxt[-1]
+        if nxt == sizes:
+            break
+        sizes = nxt
+    else:
+        raise AssertionError("manifest length and member sizes did not settle")
+    doc = manifest(files=head + [zero_entry("www/zeros%d.bin" % i, n)
+                                 for i, n in enumerate(sizes)])
+    real = json.dumps(doc, indent=2).encode()
+    assert len(real) == len(body), (len(real), len(body))
+    assert overhead + len(real) + sum(sizes) == LIMITS["max_expanded_bytes"]
+    assert max(sizes) <= LIMITS["max_file_bytes"]
+    b.add_manifest(doc)
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    for i, n in enumerate(sizes):
+        info = tarfile.TarInfo("app/www/zeros%d.bin" % i)
+        info.size = n
+        info.mtime = 0
+        b.tar.addfile(info, _ZeroStream(n))
+
+
+@fixture("bomb-file-at-limit", "bombs", "accept", "-",
+         "one member exactly at the per-file cap, the accepted half of that pair. The "
+         "member is declared in the inventory: an accepted fixture that ships a payload "
+         "file its manifest never mentions exhibits inventory-extra-file, which is a "
+         "rejection elsewhere in this corpus")
+def _(b):
+    size = LIMITS["max_file_bytes"]
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
+                                   zero_entry("www/big.bin", size)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    info = tarfile.TarInfo("app/www/big.bin")
+    info.size = size
+    info.mtime = 0
+    b.tar.addfile(info, _ZeroStream(size))
+
+
 # --------------------------------------------------------------------- paths and types
 
 @fixture("type-device", "types", "reject", "-",
@@ -568,24 +729,35 @@ _mode_fixture("type-setgid", 0o2755, "a setgid bit")
 _mode_fixture("type-sticky", 0o1755, "a sticky bit")
 
 
-@fixture("path-segment-over-limit", "types", "reject", "-",
-         "one segment past the cap: the rejected half of the boundary pair whose accepted "
-         "half is pos-exact-limit-path")
+@fixture("type-unknown-typeflag", "types", "reject", "-",
+         "a typeflag no standard defines. The extraction contract requires rejecting unknown "
+         "tar types rather than guessing, and a reader that treats anything unrecognised as "
+         "a regular file materialises attacker-chosen bytes under an attacker-chosen name")
 def _(b):
-    seg = "s" * (LIMITS["max_segment_bytes"] + 1)
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
-    b.add("app/www/" + seg + ".txt", b"x")
+    b.add_raw(raw_header("app/mystery.bin", b"00000000004\0", typeflag=b"Z"), b"oops")
+
+
+@fixture("path-segment-over-limit", "types", "reject", "-",
+         "one segment past the cap: the rejected half of the boundary pair whose accepted "
+         "half is pos-exact-limit-segment")
+def _(b):
+    seg = "s" * (LIMITS["max_segment_bytes"] + 1 - len(".txt")) + ".txt"
+    assert len(seg.encode()) == LIMITS["max_segment_bytes"] + 1
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+    b.add("app/www/" + seg, b"x")
 
 
 @fixture("path-total-over-limit", "types", "reject", "-",
          "a path past the total cap, assembled from legal segments")
 def _(b):
-    seg = "s" * 100
-    depth = LIMITS["max_path_bytes"] // 101 + 2
+    path = _path_of_length(LIMITS["max_path_bytes"] + 1)
+    assert len(path.encode()) == LIMITS["max_path_bytes"] + 1
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
-    b.add("app/" + "/".join([seg] * depth) + "/x.txt", b"x")
+    b.add("app/" + path, b"x")
 
 
 @fixture("path-depth-over-limit", "types", "reject", "-",
@@ -593,7 +765,9 @@ def _(b):
 def _(b):
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
-    b.add("app/" + "/".join("d%d" % i for i in range(LIMITS["max_depth"] + 1)) + "/x.txt", b"x")
+    path = "/".join("d%d" % i for i in range(LIMITS["max_depth"])) + "/x.txt"
+    assert len(path.split("/")) == LIMITS["max_depth"] + 1
+    b.add("app/" + path, b"x")
 
 
 @fixture("path-nul", "types", "reject", "-",
@@ -689,6 +863,34 @@ def _(b):
 
 
 # --------------------------------------------------------------------- manifest/inventory
+
+@fixture("dup-repeated-directory", "duplicates", "reject", "-",
+         "the same directory header twice; repeated metadata still counts against the entry "
+         "cap and still makes two members claim one path")
+def _(b):
+    b.add_manifest(manifest(entrypoint="sub",
+                            files=[entry("sub/app.R", R_APP), entry("renv.lock", RENV)]))
+    b.add_dir("app/sub").add_dir("app/sub")
+    b.add("app/sub/app.R", R_APP).add("app/renv.lock", RENV)
+
+
+@fixture("manifest-unsupported-schema-version", "manifest", "reject", "-",
+         "schema_version 2: a newer format this validator must refuse rather than guess at")
+def _(b):
+    doc = manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)])
+    doc["schema_version"] = 2
+    b.add_manifest(doc)
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+
+
+@fixture("manifest-unsupported-language", "manifest", "reject", "-",
+         "a runtime language outside the enabled matrix")
+def _(b):
+    doc = manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)])
+    doc["runtime"] = {"language": "julia", "version": "1.11"}
+    b.add_manifest(doc)
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+
 
 @fixture("manifest-missing", "manifest", "reject", "-", "no manifest at all")
 def _(b):

@@ -101,13 +101,40 @@
       "bytes": 508
     },
     {
-      "name": "pos-exact-limit-path",
+      "name": "pos-exact-limit-segment",
       "group": "positive",
       "expect": "accept",
       "rule": "-",
-      "why": "a path exactly at the segment and depth limits, the accepted half of the boundary pair",
-      "sha256": "2c22bdb241f6b1a378b407f2e36c6a623ae7b5bdae82128eb26ac973e6a3ae24",
-      "bytes": 632
+      "why": "one segment of exactly max_segment_bytes, the ACCEPTED half of that pair. The suffix is inside the segment, not appended to it: an earlier version built 's' * 255 + '.txt' and produced a 259-byte segment, so the only at-limit positive control in the corpus was over the limit and would have forced a correct extractor to fail the suite (finding 29857f7-F1)",
+      "sha256": "85a1bd1e6e2701d3218cc443dddd40a0e07b9e007f56302713569df69e90b672",
+      "bytes": 631
+    },
+    {
+      "name": "pos-exact-limit-depth",
+      "group": "positive",
+      "expect": "accept",
+      "rule": "-",
+      "why": "a payload-relative path of exactly max_depth segments, the accepted half of the depth pair",
+      "sha256": "5e9ae0e908daab41a1463bb5633f0a882b88598e414f036e1c9f2759cf2758c6",
+      "bytes": 688
+    },
+    {
+      "name": "pos-exact-limit-total-path",
+      "group": "positive",
+      "expect": "accept",
+      "rule": "-",
+      "why": "a payload-relative path of exactly max_path_bytes, assembled from legal segments, the accepted half of the total-path pair",
+      "sha256": "a368690322f86bedd93ebc6e731a468aca632cd47d280c0d81dab07b3f8ec685",
+      "bytes": 638
+    },
+    {
+      "name": "pos-pax-filename",
+      "group": "positive",
+      "expect": "accept",
+      "rule": "-",
+      "why": "a PAX extended header carrying a legitimate long UTF-8 filename. The plan lists this as a required positive control for a reason: without it, an extractor that rejects every PAX header passes the whole corpus, since PAX otherwise appears only in negatives. Innocuous PAX metadata is allowed under bounds, and this is what proves the difference between allowed and ignored (finding 29857f7-F4)",
+      "sha256": "162abcac04974dae30261254d591ea8c7f9e4b13f057711547b693a1802f78ae",
+      "bytes": 701
     },
     {
       "name": "trav-dotdot",
@@ -371,6 +398,33 @@
       "bytes": 534
     },
     {
+      "name": "link-hardlink-inside",
+      "group": "links",
+      "expect": "reject",
+      "rule": "-",
+      "why": "a hardlink whose target IS inside the tree. The plan asks for both directions, and the inside case is the one that looks harmless: two names for one inode means a file validated once can be reached under a path that was never checked",
+      "sha256": "a5cedd352e2ec3034047239eb51a9e34a4e282934bb1b7227fb9c0de46022752",
+      "bytes": 537
+    },
+    {
+      "name": "bomb-expanded-at-limit",
+      "group": "bombs",
+      "expect": "accept",
+      "rule": "-",
+      "why": "total expanded bytes exactly at the cap, split across members that each stay within the per-file cap: the accepted half the plan asks for. A single 2 GiB member would have been over max_file_bytes, so a correct extractor would have had to reject a fixture marked accept -- 29857f7-F1 in the size dimension. Costly to extract on purpose: an off-by-one that rejects a legitimate bundle at the cap is a real failure for a publisher, and only this fixture catches it",
+      "sha256": "5711b76be854ba99b1c1cfc62cc67552d231434c713e3c9b13855fe83f25d71b",
+      "bytes": 2088174
+    },
+    {
+      "name": "bomb-file-at-limit",
+      "group": "bombs",
+      "expect": "accept",
+      "rule": "-",
+      "why": "one member exactly at the per-file cap, the accepted half of that pair. The member is declared in the inventory: an accepted fixture that ships a payload file its manifest never mentions exhibits inventory-extra-file, which is a rejection elsewhere in this corpus",
+      "sha256": "9bd2762fa2cb9e601a932a9705d7961e91d488a2391ac480ad462b1b6b8322ea",
+      "bytes": 522460
+    },
+    {
       "name": "type-device",
       "group": "types",
       "expect": "reject",
@@ -425,13 +479,22 @@
       "bytes": 543
     },
     {
+      "name": "type-unknown-typeflag",
+      "group": "types",
+      "expect": "reject",
+      "rule": "-",
+      "why": "a typeflag no standard defines. The extraction contract requires rejecting unknown tar types rather than guessing, and a reader that treats anything unrecognised as a regular file materialises attacker-chosen bytes under an attacker-chosen name",
+      "sha256": "a4c3cfd67e631150b10ecc691c1aab64ba6534760970e62dbb8caf8e33ca3e17",
+      "bytes": 544
+    },
+    {
       "name": "path-segment-over-limit",
       "group": "types",
       "expect": "reject",
       "rule": "-",
-      "why": "one segment past the cap: the rejected half of the boundary pair whose accepted half is pos-exact-limit-path",
-      "sha256": "61d937f662de14c8c8e1b0f3a05fd90a08ecd89356036459895007b91a75cdc4",
-      "bytes": 571
+      "why": "one segment past the cap: the rejected half of the boundary pair whose accepted half is pos-exact-limit-segment",
+      "sha256": "dec989761c358c93d65e8aed248266f5593811f67299e021c7a83608f0bc267c",
+      "bytes": 572
     },
     {
       "name": "path-total-over-limit",
@@ -439,8 +502,8 @@
       "expect": "reject",
       "rule": "-",
       "why": "a path past the total cap, assembled from legal segments",
-      "sha256": "56daabf8f4e9131befb79d45c2a9ffa63e12681073de964d4dfc12410eac35c8",
-      "bytes": 581
+      "sha256": "e5975f95d8308e4e3fa82ae6c14fd92abe42d043829bfcb32ee6abdeb184a836",
+      "bytes": 576
     },
     {
       "name": "path-depth-over-limit",
@@ -448,8 +511,8 @@
       "expect": "reject",
       "rule": "-",
       "why": "one level past the depth cap",
-      "sha256": "e5517feee3dc8a8c7e984c5b4e9521ba714498069540ce63963159c50f16f37d",
-      "bytes": 635
+      "sha256": "75c7986695953f28cc4845a6c43dffe1de7f7df504d1fa0833f4b707455aa4e2",
+      "bytes": 634
     },
     {
       "name": "path-nul",
@@ -540,6 +603,33 @@
       "why": "a file, then a regular file where its parent directory must be; ordering decides whether an extractor notices",
       "sha256": "dcb436e288472128e35626e207f9b2b4cd3142ab7bdf94a4342cb06eb8ab7797",
       "bytes": 564
+    },
+    {
+      "name": "dup-repeated-directory",
+      "group": "duplicates",
+      "expect": "reject",
+      "rule": "-",
+      "why": "the same directory header twice; repeated metadata still counts against the entry cap and still makes two members claim one path",
+      "sha256": "67776c92290fe76fe6270e87b00d1fcf780cec570be8e0052b70f6705ec32af6",
+      "bytes": 537
+    },
+    {
+      "name": "manifest-unsupported-schema-version",
+      "group": "manifest",
+      "expect": "reject",
+      "rule": "-",
+      "why": "schema_version 2: a newer format this validator must refuse rather than guess at",
+      "sha256": "2f69caa9e34f3989688654fb9d72c767e706aa44f1ef56748a5f58c2842731cd",
+      "bytes": 512
+    },
+    {
+      "name": "manifest-unsupported-language",
+      "group": "manifest",
+      "expect": "reject",
+      "rule": "-",
+      "why": "a runtime language outside the enabled matrix",
+      "sha256": "862eeaa7e3259507ed893609f922ed9e6987d2a415e268a00bccc28e1f06b8b9",
+      "bytes": 517
     },
     {
       "name": "manifest-missing",

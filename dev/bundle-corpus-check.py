@@ -10,8 +10,10 @@
 #      trav-dotdot that contains no traversing member is the corpus equivalent of a check
 #      that cannot fail, and it is the specific way a corpus rots: someone edits the
 #      generator, the fixture becomes benign, and the suite still reports it as covered.
-#   3. Positive controls exhibit none of the hostile properties, so "reject everything" is
-#      distinguishable from "works".
+#   3. Every fixture the corpus says to ACCEPT exhibits none of the hostile properties --
+#      including being over any configured limit -- so "reject everything" is
+#      distinguishable from "works", and a boundary fixture marked accept cannot quietly
+#      drift past the boundary it is the accepted half of.
 #
 # The tar walker below is deliberately hand-written rather than tarfile-based. Several
 # fixtures are malformed on purpose -- truncated, bad checksum, NUL in a name -- and a
@@ -41,57 +43,98 @@ def fail(msg):
 
 # ----------------------------------------------------------------- a minimal tar reader
 
-def walk(raw):
-    """Yield header dicts from raw tar bytes, tolerating malformation.
+def _read_exactly(fh, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = fh.read(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def _skip(fh, n):
+    """Consume n bytes without keeping them. Returns False if the stream ran out."""
+    left = n
+    while left > 0:
+        chunk = fh.read(min(left, 1 << 20))
+        if not chunk:
+            return False
+        left -= len(chunk)
+    return True
+
+
+def walk(source):
+    """Yield header dicts from a tar byte STREAM, tolerating malformation.
+
+    `source` is raw bytes or anything with read(n). Streaming rather than slicing a
+    buffer is what makes the expansion bombs inspectable at all: a member declaring two
+    gigabytes only has to have its header read, and its payload is skipped at constant
+    memory. Walking a bounded prefix instead stopped at the first such member, so every
+    property that depends on a LATER header -- the total expanded size, a second oversized
+    member -- was invisible to a check written to measure exactly those things.
 
     Returns (members, note). `note` records why walking stopped, which is itself an
     observable property for the truncated and bad-checksum fixtures.
     """
-    members, off, note = [], 0, None
+    fh = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+    members, note = [], None
     pending_name = None      # from a GNU long-name (L) header
     pending_link = None      # from a GNU long-linkname (K) header
-    while off + 512 <= len(raw):
-        block = raw[off:off + 512]
-        if block == b"\0" * 512:
-            note = "end-marker"
-            break
-        name = block[0:100].rstrip(b"\0")
-        typeflag = block[156:157]
-        linkname = block[157:257].rstrip(b"\0")
-        mode_field = block[100:108].rstrip(b"\0 ")
-        size_field = block[124:136].rstrip(b"\0 ")
-        try:
-            size = int(size_field, 8) if size_field else 0
-        except ValueError:
-            size = None  # negative, overflowing or otherwise not octal
-        try:
-            mode = int(mode_field, 8) if mode_field else 0
-        except ValueError:
-            mode = 0
-        # GNU long name/linkname: the real value is this header's PAYLOAD and belongs to
-        # the member that follows. Without resolving them, every fixture whose point is a
-        # long path is inspected through a placeholder called "././@LongLink" -- which is
-        # also why the positive control at the segment limit first tripped the traversal
-        # check: the placeholder contains "/./" and the actual name was never read.
-        if typeflag in (b"L", b"K"):
-            payload = raw[off + 512:off + 512 + (size or 0)].rstrip(b"\0")
-            if typeflag == b"L":
-                pending_name = payload
-            else:
-                pending_link = payload
-            off += 512 + (((size or 0) + 511) // 512) * 512
-            continue
+    try:
+        while True:
+            block = _read_exactly(fh, 512)
+            if len(block) < 512:
+                note = "truncated"
+                break
+            if block == b"\0" * 512:
+                note = "end-marker"
+                break
+            name = block[0:100].rstrip(b"\0")
+            typeflag = block[156:157]
+            linkname = block[157:257].rstrip(b"\0")
+            mode_field = block[100:108].rstrip(b"\0 ")
+            size_field = block[124:136].rstrip(b"\0 ")
+            try:
+                size = int(size_field, 8) if size_field else 0
+            except ValueError:
+                size = None  # negative, overflowing or otherwise not octal
+            try:
+                mode = int(mode_field, 8) if mode_field else 0
+            except ValueError:
+                mode = 0
+            padded = (((size or 0) + 511) // 512) * 512
+            # GNU long name/linkname: the real value is this header's PAYLOAD and belongs to
+            # the member that follows. Without resolving them, every fixture whose point is a
+            # long path is inspected through a placeholder called "././@LongLink" -- which is
+            # also why the positive control at the segment limit first tripped the traversal
+            # check: the placeholder contains "/./" and the actual name was never read.
+            if typeflag in (b"L", b"K"):
+                payload = _read_exactly(fh, padded)
+                if len(payload) < padded:
+                    note = "truncated"
+                    break
+                payload = payload[:size or 0].rstrip(b"\0")
+                if typeflag == b"L":
+                    pending_name = payload
+                else:
+                    pending_link = payload
+                continue
 
-        if pending_name is not None:
-            name, pending_name = pending_name, None
-        if pending_link is not None:
-            linkname, pending_link = pending_link, None
+            if pending_name is not None:
+                name, pending_name = pending_name, None
+            if pending_link is not None:
+                linkname, pending_link = pending_link, None
 
-        members.append({"name": name, "type": typeflag, "linkname": linkname,
-                        "mode": mode, "size": size, "size_field": size_field})
-        off += 512 + (((size or 0) + 511) // 512) * 512
-    else:
-        note = note or "truncated"
+            members.append({"name": name, "type": typeflag, "linkname": linkname,
+                            "mode": mode, "size": size, "size_field": size_field})
+            if not _skip(fh, padded):
+                note = "truncated"
+                break
+    except Exception as e:
+        # A broken gzip stream ends the walk; the members read before it are still real,
+        # and `gzip_error` is where that failure is reported as a property.
+        note = note or ("stream-error:" + type(e).__name__)
     return members, note
 
 
@@ -123,6 +166,33 @@ def gunzip(data, limit=64 * 1024 * 1024):
     except Exception as e:
         error = type(e).__name__
     return b"".join(chunks), error, False
+
+
+PAYLOAD_ROOT = b"app/"
+
+# Every tar type this corpus knows about, so "unknown" is a real question rather than a
+# list of the three flags someone happened to think of. L and K are consumed by the
+# walker and never reach a member.
+KNOWN_TYPEFLAGS = {b"0", b"\0", b"1", b"2", b"3", b"4", b"5", b"6", b"7",
+                   b"x", b"g", b"S"}
+
+
+def payload_path(m):
+    """The member's path inside the payload root, which is what the limits apply to.
+
+    The "app/" prefix is the bundle's own wrapper, not something a publisher chose, so
+    counting it makes every limit four bytes and one level tighter than documented.
+    """
+    n = m["name"]
+    return n[len(PAYLOAD_ROOT):] if n.startswith(PAYLOAD_ROOT) else n
+
+
+def segments(m):
+    return payload_path(m).rstrip(b"/").split(b"/")
+
+
+def longest_segment(m):
+    return max((len(s) for s in segments(m)), default=0)
 
 
 def names(members):
@@ -178,12 +248,22 @@ def duplicate_names(normalise=lambda s: s):
     return check
 
 
-def entry_count(op):
-    return lambda ctx: op(len(ctx["members"]))
+def over_limit(measure, key):
+    """A member measuring past a CONFIGURED limit.
+
+    Reading ctx["limits"] rather than repeating the number is the whole point: a
+    predicate that hard-codes 255 or 20000 stops policing its fixture the moment an
+    operator changes that limit, and then accuses the fixture of being the stale one.
+    """
+    return lambda ctx: any(measure(m) > ctx["limits"][key] for m in ctx["members"])
 
 
-def declared_size(pred):
-    return has_member(lambda m: pred(m))
+def at_limit(measure, key):
+    return lambda ctx: any(measure(m) == ctx["limits"][key] for m in ctx["members"])
+
+
+def size_of(m):
+    return m["size"] or 0
 
 
 PREDICATES = {
@@ -209,23 +289,38 @@ PREDICATES = {
     "link-chained": lambda ctx: sum(1 for m in ctx["members"] if m["type"] == b"2") >= 2,
     "link-hardlink-outside": has_member(lambda m: m["type"] == b"1" and m["linkname"].startswith(b"/")),
     "link-symlink-inside": has_member(lambda m: m["type"] == b"2" and not m["linkname"].startswith(b"/")),
+    "link-hardlink-inside": has_member(
+        lambda m: m["type"] == b"1" and m["linkname"].startswith(PAYLOAD_ROOT)
+        and b".." not in m["linkname"]),
 
     # bombs -- the excess must be real, not merely asserted in the name
     "bomb-entries-at-limit": lambda ctx: len(ctx["members"]) == ctx["limits"]["max_entries"],
     "bomb-entries-over-limit": lambda ctx: len(ctx["members"]) == ctx["limits"]["max_entries"] + 1,
-    "bomb-expanded-over-limit": declared_size(
-        lambda m: (m["size"] or 0) > 2 * 1024 * 1024 * 1024),
-    "bomb-file-over-limit": declared_size(
-        lambda m: 512 * 1024 * 1024 < (m["size"] or 0) <= 2 * 1024 * 1024 * 1024),
+    # The expanded caps are asked of the TOTAL, which is what "expanded" means and what an
+    # extractor has to keep a running count of. Only a streaming walk can answer it: the
+    # last of these members sits two gigabytes into the stream.
+    "bomb-expanded-at-limit": lambda ctx: (
+        ctx["declared_total"] == ctx["limits"]["max_expanded_bytes"]
+        and max((size_of(m) for m in ctx["members"]), default=0)
+        <= ctx["limits"]["max_file_bytes"]),
+    "bomb-expanded-over-limit": lambda ctx: (
+        ctx["declared_total"] > ctx["limits"]["max_expanded_bytes"]),
+    "bomb-file-at-limit": at_limit(size_of, "max_file_bytes"),
+    "bomb-file-over-limit": lambda ctx: (
+        over_limit(size_of, "max_file_bytes")(ctx)
+        and ctx["declared_total"] <= ctx["limits"]["max_expanded_bytes"]),
     "bomb-declared-size-negative": has_member(lambda m: m["size_field"].startswith(b"-")),
     "bomb-declared-size-overflow": has_member(lambda m: m["size_field"] == b"77777777777"),
     "bomb-bad-checksum": lambda ctx: b"9999999" in ctx["raw"],
     "bomb-huge-pax-field": lambda ctx: any(
         m["type"] == b"x" and (m["size"] or 0) > 64 * 1024 for m in ctx["members"]),
     "bomb-sparse-claimed": typeflag(b"S"),
-    "bomb-many-empty-entries": entry_count(lambda n: n > 20000),
+    "bomb-many-empty-entries": lambda ctx: len(ctx["members"]) > ctx["limits"]["max_entries"],
     "bomb-truncated-gzip": lambda ctx: ctx["gzip_error"] is not None,
-    "bomb-truncated-tar": lambda ctx: ctx["note"] == "truncated" and not ctx["capped"],
+    # No "and not capped" guard any more: that existed because a truncated walk could be
+    # an artifact of our own decompression bound. The streaming walk reads to the archive's
+    # end, so truncation is now a property of the fixture and nothing else.
+    "bomb-truncated-tar": lambda ctx: ctx["note"] == "truncated",
     "bomb-concatenated-members": lambda ctx: ctx["gzip_members"] >= 2,
     "bomb-trailing-garbage": lambda ctx: ctx["trailing"] > 0,
 
@@ -236,10 +331,10 @@ PREDICATES = {
     "type-setuid": mode_bit(0o4000),
     "type-setgid": mode_bit(0o2000),
     "type-sticky": mode_bit(0o1000),
-    "path-segment-over-limit": has_member(
-        lambda m: any(len(s) > 255 for s in m["name"].split(b"/"))),
-    "path-total-over-limit": has_member(lambda m: len(m["name"]) > 100),
-    "path-depth-over-limit": has_member(lambda m: m["name"].count(b"/") > 32),
+    "type-unknown-typeflag": has_member(lambda m: m["type"] not in KNOWN_TYPEFLAGS),
+    "path-segment-over-limit": over_limit(longest_segment, "max_segment_bytes"),
+    "path-total-over-limit": over_limit(lambda m: len(payload_path(m)), "max_path_bytes"),
+    "path-depth-over-limit": over_limit(lambda m: len(segments(m)), "max_depth"),
     "path-nul": lambda ctx: b"app/ok.txt\0../../escape.txt" in ctx["raw"],
     "path-control-char": has_member(lambda m: any(c < 0x20 for c in m["name"])),
     "path-invalid-utf8": has_member(
@@ -252,12 +347,17 @@ PREDICATES = {
     "dup-dir-then-file": duplicate_names(),
     "dup-case-alias": duplicate_names(str.lower),
     "dup-nfc-alias": duplicate_names(lambda s: unicodedata.normalize("NFC", s)),
+    "dup-repeated-directory": lambda ctx: _repeated_directory(ctx),
     "dup-file-before-parent": lambda ctx: (
         any(m["name"] == b"app/parent/child.txt" for m in ctx["members"])
         and any(m["name"] == b"app/parent" and m["type"] == b"0" for m in ctx["members"])),
 
     # manifest and inventory
     "manifest-missing": lambda ctx: b"manifest.json" not in names(ctx["members"]),
+    "manifest-unsupported-schema-version": lambda ctx: (
+        _manifest(ctx).get("schema_version") != 1),
+    "manifest-unsupported-language": lambda ctx: (
+        _manifest(ctx).get("runtime", {}).get("language") not in ("r", "python")),
     "manifest-late": lambda ctx: _manifest_index(ctx) > 0,
     "manifest-not-json": lambda ctx: _manifest_body(ctx) is not None and not _is_json(ctx),
     "manifest-duplicate-json-key": lambda ctx: (_manifest_body(ctx) or b"").count(b'"type"') == 2,
@@ -282,6 +382,17 @@ PREDICATES = {
     "manifest-over-limit": lambda ctx: len(_manifest_body(ctx) or b"") > 4 * 1024 * 1024
                                        or len(_manifest(ctx).get("files", [])) > 50000,
 }
+
+
+def _repeated_directory(ctx):
+    seen = set()
+    for m in ctx["members"]:
+        if m["type"] == b"5":
+            k = m["name"].rstrip(b"/")
+            if k in seen:
+                return True
+            seen.add(k)
+    return False
 
 
 def _not_utf8(raw):
@@ -356,7 +467,12 @@ def _size_mismatch(ctx):
     return False
 
 
-# Positive controls must exhibit NONE of these, or "rejects everything" looks like "works".
+# An ACCEPTED fixture must exhibit NONE of these, or "rejects everything" looks like
+# "works". The limit entries are here because of finding 29857f7-F1: the only at-limit
+# positive control in the corpus was four bytes OVER the segment cap, and nothing noticed,
+# because every hostile property was about the shape of a member and none about its size.
+# A positive control that violates a documented limit forces a correct extractor to fail
+# the suite, which is the worst outcome this corpus can produce.
 HOSTILE = {
     "a traversing or absolute name": lambda ctx: any(
         b".." in m["name"] or m["name"].startswith(b"/") or b"\\" in m["name"]
@@ -370,15 +486,37 @@ HOSTILE = {
     "a non-UTF-8 name": lambda ctx: any(_not_utf8(m["name"]) for m in ctx["members"]),
     "a control character in a name": lambda ctx: any(
         any(c < 0x20 for c in m["name"]) for m in ctx["members"]),
+    "a segment over the configured limit": over_limit(longest_segment, "max_segment_bytes"),
+    "a path over the configured length limit": over_limit(
+        lambda m: len(payload_path(m)), "max_path_bytes"),
+    "a path deeper than the configured limit": over_limit(
+        lambda m: len(segments(m)), "max_depth"),
+    "a member over the configured per-file limit": over_limit(size_of, "max_file_bytes"),
+    "more entries than the configured limit": lambda ctx: (
+        len(ctx["members"]) > ctx["limits"]["max_entries"]),
+    "more expanded bytes than the configured limit": lambda ctx: (
+        ctx["declared_total"] > ctx["limits"]["max_expanded_bytes"]),
+    "a payload file the manifest never declares": lambda ctx: _inventory_vs_payload(ctx)[0],
+    "a declared file the payload never ships": lambda ctx: _inventory_vs_payload(ctx)[1],
 }
 
 
 def context(data, limits):
     trailing, gzip_members = 0, 0
-    body, gzip_error, capped = gunzip(data)
-    members, note = walk(body) if body else ([], None)
-    if capped:
-        note = "capped"
+    body, gzip_error, _capped = gunzip(data)
+    # Two passes over the same bytes, deliberately. `body` is a bounded prefix, held in
+    # memory, and answers the questions that are about raw bytes rather than headers
+    # ("does a PAX record say path=app/../.."). The members come from a second, streaming
+    # pass that reads every header to the end of the archive at constant memory, so a
+    # fixture whose point is the FOURTH half-gigabyte member is still fully inspected.
+    gz = gzip.GzipFile(fileobj=io.BytesIO(data))
+    try:
+        members, note = walk(gz)
+    finally:
+        try:
+            gz.close()
+        except Exception:
+            pass
     # Count gzip members and any bytes after the last one, without decompressing twice.
     pos, count = 0, 0
     while pos < len(data) and data[pos:pos + 2] == b"\x1f\x8b":
@@ -391,7 +529,8 @@ def context(data, limits):
     gzip_members = count
     trailing = len(data) - pos if pos < len(data) else 0
     return {"raw": body or b"", "members": members, "note": note, "limits": limits,
-            "gzip_error": gzip_error, "capped": capped,
+            "gzip_error": gzip_error,
+            "declared_total": sum(max(size_of(m), 0) for m in members),
             "gzip_members": gzip_members, "trailing": trailing}
 
 
@@ -443,35 +582,42 @@ def main():
         print()
 
         print("== each fixture exhibits its claimed property ==")
+        # Keyed on `expect`, not on `group`. Three accepted fixtures live in the bombs
+        # group because they are boundary halves, and keying on the group name silently
+        # exempted them from both halves of this check: no predicate was demanded, and the
+        # hostile sweep that keeps an accepted fixture honest never ran over them.
         missing = [f["name"] for f in exp["fixtures"]
-                   if f["group"] != "positive" and f["name"] not in PREDICATES]
+                   if f["expect"] != "accept" and f["name"] not in PREDICATES]
         if missing:
             fail("no property predicate for: %s" % ", ".join(sorted(missing)))
             return 1
 
-        checked = 0
+        asserted, swept = 0, 0
         for f in exp["fixtures"]:
             data = (pathlib.Path(tmp) / (f["name"] + ".tar.gz")).read_bytes()
             ctx = context(data, limits)
-            if f["group"] == "positive":
-                for label, hostile in HOSTILE.items():
-                    if hostile(ctx):
-                        fail("positive control %s contains %s" % (f["name"], label))
-                        return 1
-                if not ctx["members"]:
-                    fail("positive control %s has no members" % f["name"])
-                    return 1
-            else:
+            # A predicate and the hostile sweep are not alternatives. An accepted boundary
+            # fixture wants both: that it really sits AT the limit, and that it is over
+            # none of the others.
+            if f["name"] in PREDICATES:
                 if not PREDICATES[f["name"]](ctx):
                     fail("%s does not exhibit the property it is named for: %s"
                          % (f["name"], f["why"]))
                     return 1
-            checked += 1
+                asserted += 1
+            if f["expect"] == "accept":
+                for label, hostile in HOSTILE.items():
+                    if hostile(ctx):
+                        fail("accepted fixture %s contains %s" % (f["name"], label))
+                        return 1
+                if not ctx["members"]:
+                    fail("accepted fixture %s has no members" % f["name"])
+                    return 1
+                swept += 1
 
-        positives = sum(1 for f in exp["fixtures"] if f["group"] == "positive")
-        print("  ok   %d negatives each carry their claimed property" % (checked - positives))
-        print("  ok   %d positive controls carry none of the %d hostile properties"
-              % (positives, len(HOSTILE)))
+        print("  ok   %d fixtures each carry their claimed property" % asserted)
+        print("  ok   %d accepted fixtures carry none of the %d hostile properties"
+              % (swept, len(HOSTILE)))
         print()
 
     by_group = {}
