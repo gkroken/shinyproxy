@@ -53,7 +53,11 @@
       "deadline_bounded": {
         "UPLOADING": "REJECTED",
         "VALIDATING": "REJECTED"
-      }
+      },
+      "upload_admissible_states": [
+        "UPLOADING"
+      ],
+      "upload_admissible_rationale": "The states in which raw bytes may still be accepted: exactly those with NO committed receipt. UPLOADING is the only one. VALIDATING is not terminal and is not admissible either -- its own description says the bytes are complete and the receipt is committed -- which is why this is declared rather than derived from terminality. A checker that used 'not terminal' as a synonym for 'still writable' accepted VALIDATING and would have permitted exactly the committed-byte replacement the transport forbids (finding 2b01e24-F1)."
     },
     "build": {
       "description": "One execution attempt. Every terminal state is final: no terminal attempt returns to running, and a retry is a different build_id.",

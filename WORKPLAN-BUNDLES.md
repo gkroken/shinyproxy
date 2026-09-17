@@ -684,7 +684,7 @@ Three of those shapes are choices rather than transcription. **Upload is two ste
 create that returns a bundle id, then a raw `PUT` of the bytes — so the binary endpoint
 carries no metadata and stays a pure stream, and so the bundle exists in `UPLOADING` before
 any byte arrives. **The upload is `PUT`, not `POST`**, because it is idempotent against one
-bundle id: replaying it re-uploads that bundle rather than creating a second. And **cancel is
+bundle id — in the sense set out below, which is narrower than it first sounds. And **cancel is
 `POST`, not `DELETE`** — cancelling removes nothing, and it can be refused, which `DELETE`
 would make an odd thing to answer 409 to.
 

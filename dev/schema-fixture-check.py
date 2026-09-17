@@ -435,18 +435,27 @@ def check_admin_transport():
 
     # The upload may only be accepted where no receipt is committed, or it would rewrite
     # immutable bytes or reopen a terminal state (finding 29afb31-F2).
+    # Against the lifecycle's declaration of where bytes are still writable, NOT against
+    # terminality. VALIDATING is non-terminal and has a committed receipt, so a terminal-state
+    # test accepted it and would have permitted the committed-byte replacement the replay
+    # contract forbids (finding 2b01e24-F1). Not terminal is not a synonym for still writable.
     accepted_in = upload.get("accepted_in_states") or []
+    admissible = bundle.get("upload_admissible_states") or []
     if not accepted_in:
         fail("bundle.upload does not say which bundle states accept it, so nothing stops it "
              "rewriting committed bytes")
         return
+    if not admissible:
+        fail("the bundle machine declares no upload_admissible_states, so the check below "
+             "would have nothing to compare against")
+        return
+    if sorted(accepted_in) != sorted(admissible):
+        fail("bundle.upload is accepted in %s but the bundle machine says bytes are writable "
+             "only in %s" % (sorted(accepted_in), sorted(admissible)))
+        return
     for state in accepted_in:
         if state not in bundle["states"]:
             fail("bundle.upload accepted_in_states names unknown bundle state %s" % state)
-            return
-        if state in bundle["terminal"]:
-            fail("bundle.upload is accepted in %s, which is terminal; the bytes are already "
-                 "committed and immutable there" % state)
             return
     if not upload.get("conflict"):
         fail("bundle.upload declares no conflict status, so a replay after the receipt is "
