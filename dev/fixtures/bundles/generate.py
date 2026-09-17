@@ -53,12 +53,20 @@ REQS = b"shiny==1.2.1 --hash=sha256:" + b"0" * 64 + b"\n"
 FIXTURES = []
 
 
-def fixture(name, group, expect, rule, why):
-    """Register a fixture. `build` receives a Builder and adds members to it."""
+def fixture(name, group, expect, rule, why, pins=False):
+    """Register a fixture. `build` receives a Builder and adds members to it.
+
+    `pins` marks an ACCEPTED fixture that exists to hold one specific property -- a
+    boundary half, or the PAX control. The checker demands a predicate for every rejected
+    fixture, but an accepted one is otherwise only swept for hostile properties, and a
+    sweep can only say what a fixture is NOT. Without this flag an accepted boundary half
+    can be edited until it no longer straddles anything and the suite stays green
+    (finding 3438045-F1). A plain positive control pins nothing and stays False.
+    """
     def register(build):
         FIXTURES.append({
             "name": name, "group": group, "expect": expect, "rule": rule,
-            "why": why, "build": build,
+            "why": why, "pins": pins, "build": build,
         })
         return build
     return register
@@ -319,7 +327,7 @@ def _(b):
          "suffix is inside the segment, not appended to it: an earlier version built "
          "'s' * 255 + '.txt' and produced a 259-byte segment, so the only at-limit positive "
          "control in the corpus was over the limit and would have forced a correct extractor "
-         "to fail the suite (finding 29857f7-F1)")
+         "to fail the suite (finding 29857f7-F1)", pins=True)
 def _(b):
     seg = "s" * (LIMITS["max_segment_bytes"] - len(".txt")) + ".txt"
     assert len(seg.encode()) == LIMITS["max_segment_bytes"], len(seg.encode())
@@ -331,7 +339,7 @@ def _(b):
 
 @fixture("pos-exact-limit-depth", "positive", "accept", "-",
          "a payload-relative path of exactly max_depth segments, the accepted half of the "
-         "depth pair")
+         "depth pair", pins=True)
 def _(b):
     path = "/".join("d%d" % i for i in range(LIMITS["max_depth"] - 1)) + "/x.txt"
     assert len(path.split("/")) == LIMITS["max_depth"]
@@ -342,7 +350,7 @@ def _(b):
 
 @fixture("pos-exact-limit-total-path", "positive", "accept", "-",
          "a payload-relative path of exactly max_path_bytes, assembled from legal segments, "
-         "the accepted half of the total-path pair")
+         "the accepted half of the total-path pair", pins=True)
 def _(b):
     path = _path_of_length(LIMITS["max_path_bytes"])
     assert len(path.encode()) == LIMITS["max_path_bytes"], len(path.encode())
@@ -356,7 +364,7 @@ def _(b):
          "this as a required positive control for a reason: without it, an extractor that "
          "rejects every PAX header passes the whole corpus, since PAX otherwise appears only "
          "in negatives. Innocuous PAX metadata is allowed under bounds, and this is what "
-         "proves the difference between allowed and ignored (finding 29857f7-F4)")
+         "proves the difference between allowed and ignored (finding 29857f7-F4)", pins=True)
 def _(b):
     # Long, but sized off the caps: a fixed 71-byte segment is over the limit as soon as
     # an operator lowers max_segment_bytes, and this fixture is one the corpus accepts.
@@ -466,7 +474,7 @@ def _(b):
 # --------------------------------------------------------------------- bombs and sizes
 
 @fixture("bomb-entries-at-limit", "bombs", "accept", "-",
-         "exactly the configured entry cap: the accepted half of the N/N+1 pair")
+         "exactly the configured entry cap: the accepted half of the N/N+1 pair", pins=True)
 def _(b):
     files = [entry("app.R", R_APP), entry("renv.lock", RENV)]
     n = LIMITS["max_entries"] - len(files) - 1  # -1 for manifest.json itself
@@ -636,7 +644,7 @@ def _(b):
          "member would have been over max_file_bytes, so a correct extractor would have "
          "had to reject a fixture marked accept -- 29857f7-F1 in the size dimension. "
          "Costly to extract on purpose: an off-by-one that rejects a legitimate bundle at "
-         "the cap is a real failure for a publisher, and only this fixture catches it")
+         "the cap is a real failure for a publisher, and only this fixture catches it", pins=True)
 def _(b):
     head = [entry("app.R", R_APP), entry("renv.lock", RENV)]
     overhead = len(R_APP) + len(RENV)
@@ -678,7 +686,7 @@ def _(b):
          "one member exactly at the per-file cap, the accepted half of that pair. The "
          "member is declared in the inventory: an accepted fixture that ships a payload "
          "file its manifest never mentions exhibits inventory-extra-file, which is a "
-         "rejection elsewhere in this corpus")
+         "rejection elsewhere in this corpus", pins=True)
 def _(b):
     size = LIMITS["max_file_bytes"]
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV),
@@ -1064,7 +1072,7 @@ def build_all(outdir):
         path.write_bytes(data)
         produced.append({
             "name": f["name"], "group": f["group"], "expect": f["expect"],
-            "rule": f["rule"], "why": f["why"],
+            "rule": f["rule"], "why": f["why"], "pins": f["pins"],
             "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
         })
     return produced

@@ -64,6 +64,9 @@ def _skip(fh, n):
     return True
 
 
+PAX_CAPTURE = 64 * 1024
+
+
 def walk(source):
     """Yield header dicts from a tar byte STREAM, tolerating malformation.
 
@@ -127,7 +130,20 @@ def walk(source):
                 linkname, pending_link = pending_link, None
 
             members.append({"name": name, "type": typeflag, "linkname": linkname,
-                            "mode": mode, "size": size, "size_field": size_field})
+                            "mode": mode, "size": size, "size_field": size_field,
+                            "pax": b""})
+            # A PAX header's payload IS its content, so it is kept rather than skipped --
+            # bounded, because one fixture's whole point is a 256 KiB record. Without it
+            # a PAX override can only be substring-matched in the raw prefix, which says
+            # some bytes are present, not that an override resolves to anything.
+            if typeflag in (b"x", b"g") and padded:
+                take = min(padded, PAX_CAPTURE)
+                head = _read_exactly(fh, take)
+                if len(head) < take:
+                    note = "truncated"
+                    break
+                members[-1]["pax"] = head[:size or 0]
+                padded -= take
             if not _skip(fh, padded):
                 note = "truncated"
                 break
@@ -267,6 +283,15 @@ def size_of(m):
 
 
 PREDICATES = {
+    # accepted fixtures that pin a property. A hostile sweep can only say what a fixture
+    # is NOT; these say what it IS, so a boundary half cannot be edited until it stops
+    # straddling its limit while the suite stays green (finding 3438045-F1).
+    "pos-exact-limit-segment": at_limit(longest_segment, "max_segment_bytes"),
+    "pos-exact-limit-depth": at_limit(lambda m: len(segments(m)), "max_depth"),
+    "pos-exact-limit-total-path": at_limit(
+        lambda m: len(payload_path(m)), "max_path_bytes"),
+    "pos-pax-filename": lambda ctx: _pax_path_resolves(ctx),
+
     # traversal -- the member name itself must carry the escape
     "trav-dotdot": name_contains("app/../.."),
     "trav-embedded": name_contains("../../../.."),
@@ -382,6 +407,59 @@ PREDICATES = {
     "manifest-over-limit": lambda ctx: len(_manifest_body(ctx) or b"") > 4 * 1024 * 1024
                                        or len(_manifest(ctx).get("files", [])) > 50000,
 }
+
+
+def _pax_records(m):
+    """The key/value records in a PAX extended header payload.
+
+    Each record is "<length> <key>=<value>\n", where length counts the whole record
+    including its own digits. Parsed rather than substring-matched, because the question
+    a PAX fixture has to answer is what the override RESOLVES to.
+    """
+    out, buf, off = {}, m.get("pax") or b"", 0
+    while off < len(buf):
+        sp = buf.find(b" ", off)
+        if sp < 0:
+            break
+        try:
+            n = int(buf[off:sp])
+        except ValueError:
+            break
+        if n <= sp - off or off + n > len(buf):
+            break
+        key, _, value = buf[sp + 1:off + n].rstrip(b"\n").partition(b"=")
+        out[key] = value
+        off += n
+    return out
+
+
+def _pax_path_resolves(ctx):
+    """A PAX path override naming a member that is really there, under a UTF-8 name.
+
+    This fixture exists so that an extractor mishandling PAX cannot pass the corpus, so
+    the record itself is what has to be asserted. Emptying it leaves the GNU long name
+    behind and the archive still looks right from the outside: the fixture degrades from
+    "a long UTF-8 filename carried in a PAX override" to "a long name beside an empty PAX
+    header", which is the silent rot this suite exists to catch.
+
+    Length is deliberately not asserted. Whether the name exceeds the 100-byte ustar
+    field depends on max_segment_bytes, and a predicate that stops holding when an
+    operator lowers a limit is the defect this corpus keeps finding in itself.
+    """
+    present = set(names(ctx["members"]))
+    for m in ctx["members"]:
+        if m["type"] != b"x":
+            continue
+        value = _pax_records(m).get(b"path")
+        if not value or value not in present:
+            continue
+        try:
+            text = value.decode()
+        except UnicodeDecodeError:
+            continue
+        if any(ord(c) > 127 for c in text):
+            return True
+    return False
 
 
 def _repeated_directory(ctx):
@@ -582,12 +660,14 @@ def main():
         print()
 
         print("== each fixture exhibits its claimed property ==")
-        # Keyed on `expect`, not on `group`. Three accepted fixtures live in the bombs
-        # group because they are boundary halves, and keying on the group name silently
-        # exempted them from both halves of this check: no predicate was demanded, and the
-        # hostile sweep that keeps an accepted fixture honest never ran over them.
+        # Keyed on `expect` and `pins`, not on `group`. Three accepted fixtures live in
+        # the bombs group because that is where their pair is, and keying on the group
+        # name silently exempted them from both halves of this check. `pins` then covers
+        # the other direction: an accepted fixture that exists to hold one property must
+        # assert it, or the sweep can only report what it is not.
         missing = [f["name"] for f in exp["fixtures"]
-                   if f["expect"] != "accept" and f["name"] not in PREDICATES]
+                   if (f["expect"] != "accept" or f.get("pins"))
+                   and f["name"] not in PREDICATES]
         if missing:
             fail("no property predicate for: %s" % ", ".join(sorted(missing)))
             return 1

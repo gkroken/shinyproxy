@@ -16,6 +16,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "the ordinary case: a root R app, entrypoint '.', app.R and renv.lock",
+      "pins": false,
       "sha256": "b4f00fd49c3713b2a94af7b25500c183e3e5772d01626df2b8e5d5c221dd72a5",
       "bytes": 512
     },
@@ -25,6 +26,7 @@
       "expect": "accept",
       "rule": "S5",
       "why": "the other layout shiny::runApp accepts: ui.R plus server.R",
+      "pins": false,
       "sha256": "063116b4020561949fa59bd8b4cc36e319939c1c16c3edfc74d5bf9fe69a4771",
       "bytes": 563
     },
@@ -34,6 +36,7 @@
       "expect": "accept",
       "rule": "S5",
       "why": "an R app in a subdirectory, addressed by a nested entrypoint",
+      "pins": false,
       "sha256": "0d0a4931c17852bc7d42644f16a8d42dcd10bcad7179b027c8f2291cbce29141",
       "bytes": 524
     },
@@ -43,6 +46,7 @@
       "expect": "accept",
       "rule": "S4",
       "why": "Python Shiny Core, entrypoint naming a .py file",
+      "pins": false,
       "sha256": "fe2485ab0c74beb493a3231fd6f8f6e1f689b9df13349701777b56dcfa8b9b5d",
       "bytes": 510
     },
@@ -52,6 +56,7 @@
       "expect": "accept",
       "rule": "S4",
       "why": "Python Shiny Express, which the plan requires alongside Core so a Core-only import wrapper is not mistaken for general Shiny behaviour",
+      "pins": false,
       "sha256": "bc80d196970777ed66a670f8ad6b29e88e140c0413a31f28c0baaa83a79c1231",
       "bytes": 490
     },
@@ -61,6 +66,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "names a naive path handler mangles: spaces, accents, CJK",
+      "pins": false,
       "sha256": "30f5f2fe3322c9b7d285054989eba127ea157722307d8319eb5cbb92de6e7fd4",
       "bytes": 798
     },
@@ -70,6 +76,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "a zero-byte member, which off-by-one size handling drops or rejects",
+      "pins": false,
       "sha256": "9dec1f2e63011a33477df2654b8cb1a3c451c171c05b3d027b1a160895384883",
       "bytes": 592
     },
@@ -79,6 +86,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "the one mode a publisher may influence, declared and set",
+      "pins": false,
       "sha256": "7537293e8bacb3c01f009151c2623b1dbfe77e7b6f698681498f8475548fd481",
       "bytes": 620
     },
@@ -88,6 +96,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "directory headers present; they are optional and must not be required",
+      "pins": false,
       "sha256": "66a1512caa246944c86c421e2c1d4ffcfce86bf4103a755bc042e1320766b5ce",
       "bytes": 546
     },
@@ -97,6 +106,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "no directory headers at all; directories exist only via member paths, which is the common shape and the one the entrypoint rule is written against",
+      "pins": false,
       "sha256": "46b840897264d2eb95580cacef62be0078b11c357d5bfad6c2a4b05379cc6380",
       "bytes": 508
     },
@@ -106,6 +116,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "one segment of exactly max_segment_bytes, the ACCEPTED half of that pair. The suffix is inside the segment, not appended to it: an earlier version built 's' * 255 + '.txt' and produced a 259-byte segment, so the only at-limit positive control in the corpus was over the limit and would have forced a correct extractor to fail the suite (finding 29857f7-F1)",
+      "pins": true,
       "sha256": "85a1bd1e6e2701d3218cc443dddd40a0e07b9e007f56302713569df69e90b672",
       "bytes": 631
     },
@@ -115,6 +126,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "a payload-relative path of exactly max_depth segments, the accepted half of the depth pair",
+      "pins": true,
       "sha256": "5e9ae0e908daab41a1463bb5633f0a882b88598e414f036e1c9f2759cf2758c6",
       "bytes": 688
     },
@@ -124,6 +136,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "a payload-relative path of exactly max_path_bytes, assembled from legal segments, the accepted half of the total-path pair",
+      "pins": true,
       "sha256": "a368690322f86bedd93ebc6e731a468aca632cd47d280c0d81dab07b3f8ec685",
       "bytes": 638
     },
@@ -133,6 +146,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "a PAX extended header carrying a legitimate long UTF-8 filename. The plan lists this as a required positive control for a reason: without it, an extractor that rejects every PAX header passes the whole corpus, since PAX otherwise appears only in negatives. Innocuous PAX metadata is allowed under bounds, and this is what proves the difference between allowed and ignored (finding 29857f7-F4)",
+      "pins": true,
       "sha256": "162abcac04974dae30261254d591ea8c7f9e4b13f057711547b693a1802f78ae",
       "bytes": 701
     },
@@ -142,6 +156,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "the plain case",
+      "pins": false,
       "sha256": "0b75d139ddf379b7bc4638e7ca406cce48d0664ed8448cb25d67df4d8e742ee9",
       "bytes": 539
     },
@@ -151,6 +166,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "traversal that only escapes after several segments, so a check of the first component alone misses it",
+      "pins": false,
       "sha256": "50fcd0cc95dcb14a64045098ac85d6252ff4032722b3fb4ee834c6413d6cf616",
       "bytes": 543
     },
@@ -160,6 +176,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "an absolute path",
+      "pins": false,
       "sha256": "d584dda1e0aef730cd6b8920bd7de3efdad3d9a0a4e3ba3d463c9903beb05262",
       "bytes": 544
     },
@@ -169,6 +186,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "a Windows drive path",
+      "pins": false,
       "sha256": "2e70e780d1abaaf12e5dff65e4f1a1848c161ba7c256b8ac0aab9474a12aee83",
       "bytes": 540
     },
@@ -178,6 +196,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "a UNC path",
+      "pins": false,
       "sha256": "3fc42b8174ba45350385f9720062c3b0820465b97fec89314a2b9dd8ecf8e995",
       "bytes": 547
     },
@@ -187,6 +206,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "a backslash separator, which is a literal character on Linux and a separator to anything that later handles the path on Windows",
+      "pins": false,
       "sha256": "63bb7267b0f3fbbc3c7f1e348170e2295c5f2e1fe4fa48f91563224a2da04fe3",
       "bytes": 537
     },
@@ -196,6 +216,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "a dot segment",
+      "pins": false,
       "sha256": "ba9547244977ba5d19a21d1297e03d3c61cff9d9d0fca2a59a9430126e03a5a9",
       "bytes": 538
     },
@@ -205,6 +226,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "an empty segment",
+      "pins": false,
       "sha256": "9b2fea3037609e2222a70d27a3cba11ffc6b1dd6159af1fad834c29aff8da5e8",
       "bytes": 538
     },
@@ -214,6 +236,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "percent-encoded traversal, which is literal text in a tar name and must NOT be decoded; a validator that URL-decodes here creates the escape it is checking for",
+      "pins": false,
       "sha256": "5fdc208e45d8f1b75f3eaadfa74a49fbb0b6ec3493ee65b6d0336598e5e2dab8",
       "bytes": 544
     },
@@ -223,6 +246,7 @@
       "expect": "reject",
       "rule": "S1",
       "why": "a benign ustar name with a PAX extended header overriding `path` to a traversal, so a validator that reads the wrong one of the two names is fooled",
+      "pins": false,
       "sha256": "8981d18efed000b5c074af31178ad5a14076c0cd365c28f9531652eab1e11be0",
       "bytes": 580
     },
@@ -232,6 +256,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a symlink to a file outside the root; following it on write escapes, and reading it leaks",
+      "pins": false,
       "sha256": "bd4ddc437c307b80e69b0c4af6413125391cb214f422b7ae6ad2126725a85b7e",
       "bytes": 537
     },
@@ -241,6 +266,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a symlinked DIRECTORY followed by a member beneath it. The child's own name is innocent, so a lexical check of each name in turn accepts both and the write lands outside the root",
+      "pins": false,
       "sha256": "6cb3d1da65bbe497ae7e37d398c9623aa7e268edc5ab8bfc16b2f0119c3c1458",
       "bytes": 561
     },
@@ -250,6 +276,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "two symlinks in sequence, the second relative, so resolving only one level is not enough",
+      "pins": false,
       "sha256": "dbe9045d4bdda75854b135258ddfb133dd0a9f251ae21ae549e3810eafcd8e17",
       "bytes": 571
     },
@@ -259,6 +286,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a hardlink to a file outside the root, which needs no follow to read",
+      "pins": false,
       "sha256": "5d259d97d3299ec391ed1efe0d6632e983d0d053413f5095da56cb9631d241b1",
       "bytes": 540
     },
@@ -268,6 +296,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a symlink whose target IS inside the tree. Still rejected: nothing in a bundle needs one, and 'inside' is a property of the moment it is checked, not of the moment it is used",
+      "pins": false,
       "sha256": "a008b115571c037d45c079ce6ba22c4da574f6571953abf125ac168990144de7",
       "bytes": 535
     },
@@ -277,6 +306,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "exactly the configured entry cap: the accepted half of the N/N+1 pair",
+      "pins": true,
       "sha256": "67359ad0e0f991961a8219657b8b57b7cbd6932f7983d22747c4e46a0071002b",
       "bytes": 154717
     },
@@ -286,6 +316,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "one member past the cap, counted as physical headers including metadata",
+      "pins": false,
       "sha256": "e7eaa5be0b27a2cf1bd06f068375a4d1240daec6a6ade7f60cbeaa1b3e0ee1a9",
       "bytes": 154721
     },
@@ -295,6 +326,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "one highly compressible member past the expanded cap: small on disk, ruinous to anyone who decompresses before checking",
+      "pins": false,
       "sha256": "4f57b3a9e97b10aaa46600911b1272b80a23b06eb90f32e1ea0e5a47895d086b",
       "bytes": 2087823
     },
@@ -304,6 +336,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a single member past the per-file cap, under the total cap",
+      "pins": false,
       "sha256": "34f3c3da3cb660a73d7580e710e2e16e55caabfabc6b6c9db37e36628b9ff029",
       "bytes": 522391
     },
@@ -313,6 +346,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a negative size written straight into the header. No tar writer emits this, and arithmetic that trusts it underflows a running total",
+      "pins": false,
       "sha256": "ff2a177c0cd9bc64b1753fae93d75d174cf092e21a79de05b1c2ad73471cc759",
       "bytes": 538
     },
@@ -322,6 +356,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a size field of all sevens in octal, near 2^36, to break a total kept in a too-small integer",
+      "pins": false,
       "sha256": "0b519364fe6fac4f4b6c03e788f7c8429d12915ffcd3908bff2622e112f9cdef",
       "bytes": 538
     },
@@ -331,6 +366,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a header whose checksum does not match, which a lenient parser may skip past into attacker-chosen bytes",
+      "pins": false,
       "sha256": "791c5ac06491dcc0e5bd2f6b60eec2ee3b0733403002376825ecb9eb21ee8888",
       "bytes": 540
     },
@@ -340,6 +376,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a PAX extended header far past the per-header cap, which a parser that buffers the whole record reads into memory before deciding anything",
+      "pins": false,
       "sha256": "ca58f4753d2716be81a4a5ab8afb77511d3544e0096cea2b91de49da3498162b",
       "bytes": 913
     },
@@ -349,6 +386,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a GNU sparse member. The encoding lets declared and stored size disagree by design, which is the one thing every size check here depends on",
+      "pins": false,
       "sha256": "0e805425b764745e7f13f340f04ac4a2871692f4c6a9567d6eeb6d674abbe880",
       "bytes": 540
     },
@@ -358,6 +396,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "entries that cost nothing to store and one header each, so a cap counted in bytes rather than headers never fires",
+      "pins": false,
       "sha256": "d6bd803e374c89e82ab4b8151e7f01475573b3d28a55a9835cdbfc67cbb83434",
       "bytes": 125954
     },
@@ -367,6 +406,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "the gzip stream stops mid-member",
+      "pins": false,
       "sha256": "fde81d37f2713195690d43ba39a860de0c9c10970bb29a31426bb0baba532585",
       "bytes": 256
     },
@@ -376,6 +416,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "valid gzip wrapping a tar that ends mid-member, with no end marker",
+      "pins": false,
       "sha256": "515633bfefd5fc33e4c0b5129f37fcc5ae3c3244cc8c13f0ed6f512bffbfa2fb",
       "bytes": 341
     },
@@ -385,6 +426,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "two gzip members concatenated. Readers disagree about whether the second exists, so what was validated and what was extracted can differ",
+      "pins": false,
       "sha256": "ab735a5007dd2d8ed34f6278d55809186e3d1a9e94da0458c1da7a4101228b95",
       "bytes": 1024
     },
@@ -394,6 +436,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "bytes after the gzip member that are not padding",
+      "pins": false,
       "sha256": "2a8eba3a41a8568b6c1379190291a5f2da0fe9b2c66db0d569afff8f172bae69",
       "bytes": 534
     },
@@ -403,6 +446,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a hardlink whose target IS inside the tree. The plan asks for both directions, and the inside case is the one that looks harmless: two names for one inode means a file validated once can be reached under a path that was never checked",
+      "pins": false,
       "sha256": "a5cedd352e2ec3034047239eb51a9e34a4e282934bb1b7227fb9c0de46022752",
       "bytes": 537
     },
@@ -412,6 +456,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "total expanded bytes exactly at the cap, split across members that each stay within the per-file cap: the accepted half the plan asks for. A single 2 GiB member would have been over max_file_bytes, so a correct extractor would have had to reject a fixture marked accept -- 29857f7-F1 in the size dimension. Costly to extract on purpose: an off-by-one that rejects a legitimate bundle at the cap is a real failure for a publisher, and only this fixture catches it",
+      "pins": true,
       "sha256": "5711b76be854ba99b1c1cfc62cc67552d231434c713e3c9b13855fe83f25d71b",
       "bytes": 2088174
     },
@@ -421,6 +466,7 @@
       "expect": "accept",
       "rule": "-",
       "why": "one member exactly at the per-file cap, the accepted half of that pair. The member is declared in the inventory: an accepted fixture that ships a payload file its manifest never mentions exhibits inventory-extra-file, which is a rejection elsewhere in this corpus",
+      "pins": true,
       "sha256": "9bd2762fa2cb9e601a932a9705d7961e91d488a2391ac480ad462b1b6b8322ea",
       "bytes": 522460
     },
@@ -430,6 +476,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a character device header; materialising one is a privileged act and a bundle has no business asking",
+      "pins": false,
       "sha256": "d25f8f0b1ce83c11687ccf9d77496183581a69cec178c2f409b3438862b3348e",
       "bytes": 534
     },
@@ -439,6 +486,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a FIFO; a later reader blocks on it forever",
+      "pins": false,
       "sha256": "9960f1226e3e1fa6779056e21ea2f18dac8c60ef90201486eebc1a9e9686ef4a",
       "bytes": 532
     },
@@ -448,6 +496,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a block device header",
+      "pins": false,
       "sha256": "5953e5cdd5e9e923dbcc941bc4b335e69d639bd518bab0094b457cfe131505ee",
       "bytes": 534
     },
@@ -457,6 +506,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a setuid bit, which the extractor must never carry over",
+      "pins": false,
       "sha256": "430361eb6b39580629465449f15b1bcea668cf9b1acf34bf33999aa1572dbd2a",
       "bytes": 544
     },
@@ -466,6 +516,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a setgid bit",
+      "pins": false,
       "sha256": "8303b043d95ae5bac13d86740b5393964f4d19fabf14181ba736630863fec5d0",
       "bytes": 544
     },
@@ -475,6 +526,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a sticky bit",
+      "pins": false,
       "sha256": "330aa66d37848a37a203743c00a4e460df480fd54348f72d368487fc2e2af5cd",
       "bytes": 543
     },
@@ -484,6 +536,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a typeflag no standard defines. The extraction contract requires rejecting unknown tar types rather than guessing, and a reader that treats anything unrecognised as a regular file materialises attacker-chosen bytes under an attacker-chosen name",
+      "pins": false,
       "sha256": "a4c3cfd67e631150b10ecc691c1aab64ba6534760970e62dbb8caf8e33ca3e17",
       "bytes": 544
     },
@@ -493,6 +546,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "one segment past the cap: the rejected half of the boundary pair whose accepted half is pos-exact-limit-segment",
+      "pins": false,
       "sha256": "dec989761c358c93d65e8aed248266f5593811f67299e021c7a83608f0bc267c",
       "bytes": 572
     },
@@ -502,6 +556,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a path past the total cap, assembled from legal segments",
+      "pins": false,
       "sha256": "e5975f95d8308e4e3fa82ae6c14fd92abe42d043829bfcb32ee6abdeb184a836",
       "bytes": 576
     },
@@ -511,6 +566,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "one level past the depth cap",
+      "pins": false,
       "sha256": "75c7986695953f28cc4845a6c43dffe1de7f7df504d1fa0833f4b707455aa4e2",
       "bytes": 634
     },
@@ -520,6 +576,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a NUL inside the name field, which truncates the path for anything that treats it as a C string while the rest of the field is still there",
+      "pins": false,
       "sha256": "b0c51549aace6b0357a10cdc02ebde80c8b9b582bdddc44faac49ba9471b494a",
       "bytes": 549
     },
@@ -529,6 +586,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a control character in a name, which corrupts any log or terminal that echoes it",
+      "pins": false,
       "sha256": "616fad373528c8c9f425feaaed991ea4e1475c4e7c75276bff026b24a4adee82",
       "bytes": 535
     },
@@ -538,6 +596,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a lone continuation byte: not valid UTF-8, so it has no defined normalisation and two readers can disagree about what the name is",
+      "pins": false,
       "sha256": "2046b96b5b38d9f6ef878c20f3f9555e2a5b828f53a190cc7ae1ef45eb91f9d6",
       "bytes": 542
     },
@@ -547,6 +606,7 @@
       "expect": "reject",
       "rule": "S3",
       "why": "the same path twice. Last-entry-wins means what was validated is not what is on disk",
+      "pins": false,
       "sha256": "36214f4161e52d30c902034c4ac533ea6170d0ce5267e870a6f99dca1e58c28c",
       "bytes": 546
     },
@@ -556,6 +616,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "two manifests. A reader that takes the first and a reader that takes the last are looking at different bundles",
+      "pins": false,
       "sha256": "cf1ba1854785147c76c3d17ae2a922a580ba606f003fb73e9d88f40a979d78a4",
       "bytes": 592
     },
@@ -565,6 +626,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a regular file, then a directory at the same path",
+      "pins": false,
       "sha256": "fc13146988139b400c1f1a034dc5853be519a732da133f6e8441622811a206e5",
       "bytes": 553
     },
@@ -574,6 +636,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "the same collision the other way round",
+      "pins": false,
       "sha256": "ddc0b5aa8440868a9ed9a79d3e7d285d48be9416714d5b9d51feecaef214375d",
       "bytes": 554
     },
@@ -583,6 +646,7 @@
       "expect": "reject",
       "rule": "S3",
       "why": "App.R beside app.R: distinct on Linux, one file on a case-insensitive filesystem, so the bundle means different things depending where it lands",
+      "pins": false,
       "sha256": "28f470d29b7bbd1b57f453b8beb81bd506d15936ed27eb46c6cc3d411d31681a",
       "bytes": 536
     },
@@ -592,6 +656,7 @@
       "expect": "reject",
       "rule": "S3",
       "why": "the same name in NFC and NFD. Byte-different, identical after normalisation, and macOS normalises on write",
+      "pins": false,
       "sha256": "c441f45e1c5d2df2a585de12251de139236e3a5b8c95775046bfedd06d882424",
       "bytes": 566
     },
@@ -601,6 +666,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a file, then a regular file where its parent directory must be; ordering decides whether an extractor notices",
+      "pins": false,
       "sha256": "dcb436e288472128e35626e207f9b2b4cd3142ab7bdf94a4342cb06eb8ab7797",
       "bytes": 564
     },
@@ -610,6 +676,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "the same directory header twice; repeated metadata still counts against the entry cap and still makes two members claim one path",
+      "pins": false,
       "sha256": "67776c92290fe76fe6270e87b00d1fcf780cec570be8e0052b70f6705ec32af6",
       "bytes": 537
     },
@@ -619,6 +686,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "schema_version 2: a newer format this validator must refuse rather than guess at",
+      "pins": false,
       "sha256": "2f69caa9e34f3989688654fb9d72c767e706aa44f1ef56748a5f58c2842731cd",
       "bytes": 512
     },
@@ -628,6 +696,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a runtime language outside the enabled matrix",
+      "pins": false,
       "sha256": "862eeaa7e3259507ed893609f922ed9e6987d2a415e268a00bccc28e1f06b8b9",
       "bytes": 517
     },
@@ -637,6 +706,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "no manifest at all",
+      "pins": false,
       "sha256": "cfe6fb9f21d4ec5e813d7e2a00dca0890e728530e9d5a1b4bd191dce25d89a3b",
       "bytes": 240
     },
@@ -646,6 +716,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "the manifest after the payload. It must be the first logical regular file, or a streaming reader validates bytes it has already written",
+      "pins": false,
       "sha256": "3699fc60deffe4a15b0e26a45c91c299128a5029fd88df334c409282ad1c338d",
       "bytes": 515
     },
@@ -655,6 +726,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a manifest that is not JSON",
+      "pins": false,
       "sha256": "22a0fea07ba7c65c80ca6249b7e33325c8accf02f031218f6069cbfef71e24a6",
       "bytes": 277
     },
@@ -664,6 +736,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "the same key twice. Parsers disagree about which wins, so two readers can see different entrypoints in one document",
+      "pins": false,
       "sha256": "4c8cf3eb6f07dee6970aed95abb71bb4d9c77ca1a5ffc0dfbea0a21cbba1b84f",
       "bytes": 366
     },
@@ -673,6 +746,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a $ref at a URL. Resolving it would let an upload choose what validates it and make the platform fetch on its behalf",
+      "pins": false,
       "sha256": "4cc0cc17ef02d466c4400a7dcba003d26fd7d17b47ea4649eba6c4d1999eb565",
       "bytes": 544
     },
@@ -682,6 +756,7 @@
       "expect": "reject",
       "rule": "S11",
       "why": "a payload member absent from the inventory: a file smuggled past a reader that trusts the manifest",
+      "pins": false,
       "sha256": "cbb7d77259c434d9314ca1a636ed3d41bec2510658996c82a2c6cd3248d90dff",
       "bytes": 545
     },
@@ -691,6 +766,7 @@
       "expect": "reject",
       "rule": "S11",
       "why": "an inventory entry with no member behind it",
+      "pins": false,
       "sha256": "168b96cc3417cbd413c5b603787e8168c535524c0c009c93239738469c1dd6b6",
       "bytes": 576
     },
@@ -700,6 +776,7 @@
       "expect": "reject",
       "rule": "S10",
       "why": "a declared hash that does not match the bytes; the publisher's hash is a claim, not proof",
+      "pins": false,
       "sha256": "6b6a059960735bd301b2bc5c5279a76ea225fa4009764503df6450e13fb924b2",
       "bytes": 470
     },
@@ -709,6 +786,7 @@
       "expect": "reject",
       "rule": "S10",
       "why": "a declared size that does not match the bytes",
+      "pins": false,
       "sha256": "31ba128e48b09b8fb0307e825396ed2adfc1b61e077c0f5b2f8e058c51dd1653",
       "bytes": 511
     },
@@ -718,6 +796,7 @@
       "expect": "reject",
       "rule": "S5",
       "why": "an R entrypoint naming a regular file",
+      "pins": false,
       "sha256": "1215a6632f6f9f3225f125c81046f0fffe045e2bcf90dc598a7c5096d9fe8919",
       "bytes": 509
     },
@@ -727,6 +806,7 @@
       "expect": "reject",
       "rule": "S4",
       "why": "a Python entrypoint naming a directory",
+      "pins": false,
       "sha256": "391d7c2a3fece2f2a7c2e0c59caad013c51c5aca2ffe0cdaa18cffbc06ccc241",
       "bytes": 508
     },
@@ -736,6 +816,7 @@
       "expect": "reject",
       "rule": "S5",
       "why": "an R entrypoint directory with neither app.R nor ui.R plus server.R",
+      "pins": false,
       "sha256": "46678e772e4f89713eaebb596176db9e4fdde246495baa1e1a409e2fb3924798",
       "bytes": 451
     },
@@ -745,6 +826,7 @@
       "expect": "reject",
       "rule": "S5",
       "why": "an entrypoint evidenced only by a directory header, with no qualifying file beneath it; a header neither satisfies the rule nor is required by it",
+      "pins": false,
       "sha256": "9281b30d6af735cc4cffea77a3bbc11210035845a0d4d9cc25e2488d09584fc7",
       "bytes": 382
     },
@@ -754,6 +836,7 @@
       "expect": "reject",
       "rule": "S6",
       "why": "a lockfile named by dependencies.path but absent from the inventory",
+      "pins": false,
       "sha256": "6f4b7f1092e583e9fd791b001aacaef028f376d9216973f13a0a99b1c8b0eadc",
       "bytes": 408
     },
@@ -763,6 +846,7 @@
       "expect": "reject",
       "rule": "S7",
       "why": "pip-hashed declared under an R runtime",
+      "pins": false,
       "sha256": "2e7f2bdce4263bf784e719450c49c8e6eaee0afaa9b4bb9f50a9d5af4712ca9a",
       "bytes": 521
     },
@@ -772,6 +856,7 @@
       "expect": "reject",
       "rule": "S8",
       "why": "a registered type with no reviewed recipe; being in the enum is not a promise",
+      "pins": false,
       "sha256": "89fe9183ca1a620a7abba92cbb0c634e6823241b0160de060e7dc094b67032c6",
       "bytes": 520
     },
@@ -781,6 +866,7 @@
       "expect": "reject",
       "rule": "-",
       "why": "a manifest past its own cap, so a parser that reads before bounding allocates it",
+      "pins": false,
       "sha256": "8d326ec9ab998a898662f7c8305c712534bc83cce55b6455f51c9394df96c6ba",
       "bytes": 174455
     }

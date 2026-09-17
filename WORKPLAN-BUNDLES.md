@@ -1083,9 +1083,12 @@ below are marked passed by this planning document.
         complete forever, and the way it rots is a fixture quietly becoming benign while
         still being counted. Accepted fixtures are checked to exhibit **none** of fifteen
         hostile properties, so "rejects everything" stays distinguishable from "works".
-        Eight of the fifteen are about size and shape against the configured limits, and an
-        accepted fixture also keeps its own predicate: a boundary half has to prove it is
-        *at* the limit as well as over none of the others.
+        Eight of the fifteen are about size and shape against the configured limits.
+      - A sweep can only say what a fixture is **not**, so seven accepted fixtures also
+        carry a predicate of their own: each boundary half proves it sits *at* its limit,
+        and the PAX control proves its override resolves to a member really present. They
+        are marked `pins` in the generator and the checker refuses to run without a
+        predicate for each, so a future boundary half cannot be added without one.
       - Its tar reader is hand-written rather than `tarfile`-based, because several fixtures
         are malformed on purpose and a library that refuses to parse them would leave
         precisely those uninspectable. It walks a **stream**: a member declaring two
@@ -1094,10 +1097,12 @@ below are marked passed by this planning document.
         in-memory prefix is kept alongside it for the questions that are about raw bytes.
       - Mutation-tested: a traversal fixture made benign, a symlink added to a positive
         control, the setuid fixture losing its bit, the case-alias fixture ceasing to
-        collide, a fixture's bytes changing without its hash, and — added with the F1–F4
-        corrections — an at-limit control pushed over the limit, an over-limit negative
-        pulled inside it, an accepted fixture shipping a file its manifest never declares,
-        and the streaming walker reverted to a bounded buffer. Each reported and failed.
+        collide, a fixture's bytes changing without its hash, an at-limit control pushed
+        over the limit, an over-limit negative pulled inside it, an accepted fixture
+        shipping a file its manifest never declares, the streaming walker reverted to a
+        bounded buffer, each boundary half shrunk until it straddles nothing, a PAX path
+        record emptied and then pointed at a member that does not exist, and a pinning
+        fixture stripped of its predicate. Each reported and failed.
 
       Two defects in the checker were found by the checker, both of the class this project
       keeps meeting. Its tar walker could not resolve GNU long names, so every fixture whose
@@ -1114,8 +1119,12 @@ below are marked passed by this planning document.
       them against the 100-byte tar name field instead of `max_path_bytes`; and several
       required cases were absent, including any positive control with a PAX filename, which
       let an extractor that rejects every PAX header pass the whole corpus. The corrections
-      are in the commit that references those findings. The lesson is recorded here because
-      it recurs: a checker inherits the blind spots of whoever wrote the thing it checks.
+      are in the commit that references those findings. Review of that commit then found
+      the mirror image, 3438045-F1: four accepted fixtures were swept for hostile
+      properties but asserted nothing, so a boundary half could stop straddling its limit
+      in silence — the same pair failing to pin anything, from the other side. The lesson
+      is recorded here because it recurs: a checker inherits the blind spots of whoever
+      wrote the thing it checks.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,
