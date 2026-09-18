@@ -84,8 +84,12 @@ SCENARIOS = [
     ("escape through links", ["--", "--unsafe"],
      [("link-symlink-dir-then-child", "outside-root-change"),
       ("link-hardlink-outside", "outside-root-change"),
-      ("trav-absolute", "outside-root-change")],
-     "tarfile.extractall(filter='fully_trusted')"),
+      ("trav-absolute", "outside-root-change"),
+      ("bomb-sparse-claimed", "crash")],
+     "tarfile.extractall(filter='fully_trusted'). The crash pair is not incidental: "
+     "under --unsafe the oracle sees nine crashes on fixtures the corpus expects to be "
+     "REJECTED, so folding crash into rejection would turn all nine into silent passes "
+     "(finding 64f5dd8-F1)"),
 
     ("limit bypass", ["--", "--without", "limits", "--without", "manifest"],
      [("bomb-entries-over-limit", "unexpected-accept"),
@@ -112,6 +116,18 @@ SCENARIOS = [
                         "--extractor", DEGENERATE, "--", "--mode", "slow"],
      [("pos-r-root", "timeout")],
      "a subject that never finishes; proves the oracle's own deadline bites"),
+
+    ("outer disk budget", ["--only", "pos-r-root", "--disk-budget", str(1 << 20),
+                           "--extractor", DEGENERATE, "--", "--mode", "bloats"],
+     [("pos-r-root", "over-disk-budget")],
+     "correct decision, 64 MiB written against a 1 MiB budget; a bomb rejected only "
+     "after filling the disk has not been rejected"),
+
+    ("no verdict at all", ["--only", "pos-r-root",
+                           "--extractor", DEGENERATE, "--", "--mode", "silent"],
+     [("pos-r-root", "no-verdict")],
+     "an extractor that prints nothing has decided nothing, and silence must not read "
+     "as a rejection"),
 ]
 
 

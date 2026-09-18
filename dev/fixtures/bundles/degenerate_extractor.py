@@ -19,6 +19,10 @@ Modes:
   residue          decides correctly, but leaves the root populated after a rejection.
   slow             sleeps past the outer deadline, so the oracle's own timeout is shown
                    to bite rather than being assumed.
+  silent           prints nothing at all. An extractor that says nothing has decided
+                   nothing, and the oracle must not read silence as a rejection.
+  bloats           decides correctly and then writes far past the outer disk budget. A
+                   bomb "rejected" only after filling the disk has not been rejected.
 """
 
 import getopt
@@ -53,6 +57,8 @@ def main(argv):
     if mode == "always-reject":
         print(json.dumps({"decision": "reject", "rule": "always", "reason": ""}))
         return 0
+    if mode == "silent":
+        return 0
     if mode == "slow":
         time.sleep((limits.get("extraction_deadline_seconds", 60) * 2) + 30)
         print(json.dumps({"decision": "reject", "rule": "eventually", "reason": ""}))
@@ -75,7 +81,13 @@ def main(argv):
     except Exception as e:
         verdict = {"decision": "crash", "rule": type(e).__name__, "reason": str(e)[:200]}
 
-    if mode == "escapes":
+    if mode == "bloats":
+        blob = pathlib.Path(root) / "bloat.bin"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        with open(blob, "wb") as fh:
+            for _ in range(64):
+                fh.write(b"\0" * (1 << 20))
+    elif mode == "escapes":
         outside = pathlib.Path(root).parent / "escape.txt"
         try:
             outside.write_bytes(b"planted by the degenerate extractor\n")

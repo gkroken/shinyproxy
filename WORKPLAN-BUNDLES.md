@@ -1228,10 +1228,10 @@ below are marked passed by this planning document.
         `--full` uses the defaults.
 
       - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
-        and `dev/validate-oracle-matrix.sh` hand the oracle eleven subjects, each wrong
-        in one specific way, and assert *which* finding comes back on *which* fixture —
-        not that something failed, which an oracle failing everything for the wrong
-        reason would satisfy. 84s for eleven full corpus passes.
+        and `dev/validate-oracle-matrix.sh` hand the oracle thirteen subjects, each
+        wrong in one specific way, and assert *which* finding comes back on *which*
+        fixture — not that something failed, which an oracle failing everything for the
+        wrong reason would satisfy. ~85s.
       - The four classes the Pass line names, each with the subject that demonstrates it:
         outside-root change (an extractor whose *decisions are all correct* and which
         plants one file outside the root — a decision-only oracle passes it), duplicate
@@ -1247,8 +1247,15 @@ below are marked passed by this planning document.
         the duplicate guard. Good news about layering, bad news for single-guard
         matrices, and the reason the limit-bypass and duplicate-overwrite scenarios
         remove two guards: to isolate the guard under test, not to inflate the numbers.
-      - The matrix was itself mutation-tested: removing the oracle's outside-root
-        detection fails three scenarios, removing its residue check fails one.
+      - **Every one of the oracle's seven failure kinds is policed.** Three were not at
+        first (64f5dd8-F1), and the dangerous one was `crash`: under `--unsafe` the
+        oracle sees nine crashes on fixtures the corpus expects to be *rejected*, so an
+        oracle that folded crash into rejection would have turned all nine into silent
+        passes with nothing objecting.
+      - The matrix is mutation-tested against the oracle, which is the only way a suite
+        asserting that another suite can fail is itself not vacuous. Neutering the
+        outside-root detection fails three scenarios; the residue check, the crash rule,
+        the disk budget and the no-verdict check each fail exactly their own.
 
       Still owed for T2: the rename race during extraction, and extraction into a
       pre-existing symlinked root (the world provides one; nothing points an extractor at

@@ -22,7 +22,8 @@ bombs alone would write about three gigabytes per pass. `--full` uses the defaul
 
 Usage:
     python3 dev/bundle-oracle.py [--full] [--keep] [--json] [--only FIXTURE]
-                                 [--deadline SECONDS] [--extractor PATH]
+                                 [--deadline SECONDS] [--disk-budget BYTES]
+                                 [--extractor PATH]
                                  [-- EXTRACTOR ARGS...]
 
 `--json` prints the findings as one object instead of a report, which is how
@@ -182,6 +183,8 @@ def run(argv):
     # two minutes for a subject that is sleeping on purpose.
     deadline_override = (int(argv[argv.index("--deadline") + 1])
                          if "--deadline" in argv else None)
+    budget_override = (int(argv[argv.index("--disk-budget") + 1])
+                       if "--disk-budget" in argv else None)
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     head = argv[:argv.index("--")] if "--" in argv else argv
     extractor = pathlib.Path(head[head.index("--extractor") + 1]) \
@@ -212,7 +215,8 @@ def run(argv):
             return 1
     if deadline_override is not None:
         limits["extraction_deadline_seconds"] = deadline_override
-    budget = limits["max_expanded_bytes"] * DISK_BUDGET_FACTOR
+    budget = (budget_override if budget_override is not None
+              else limits["max_expanded_bytes"] * DISK_BUDGET_FACTOR)
     deadline = limits["extraction_deadline_seconds"] * DEADLINE_SLACK
 
     regime = read_detection(str(base))
