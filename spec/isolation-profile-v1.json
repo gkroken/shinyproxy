@@ -68,6 +68,7 @@
         "cpu": {
           "argument": "--cpus=<cpu_quota>",
           "probe": "cpu quota",
+          "placeholders": ["cpu_quota"],
           "configurable": true,
           "enforced_by": "cgroup v2 cpu.max, applied by the runtime",
           "why": "A build that spins every core is a denial of service against the content already running on this host, which is the same host."
@@ -75,6 +76,7 @@
         "memory": {
           "argument": "--memory=<memory_limit>",
           "probe": "memory limit",
+          "placeholders": ["memory_limit"],
           "configurable": true,
           "enforced_by": "cgroup v2 memory.max; the kernel OOM-kills an overrun",
           "why": "A dependency resolver is the most memory-hungry thing in a build and the easiest to make hungry on purpose."
@@ -82,6 +84,7 @@
         "pids": {
           "argument": "--pids-limit=<pid_limit>",
           "probe": "pid limit",
+          "placeholders": ["pid_limit"],
           "configurable": true,
           "enforced_by": "cgroup v2 pids.max; fork blocks at the limit",
           "why": "A fork bomb needs no exploit and no privilege."
@@ -89,6 +92,7 @@
         "no_new_privileges": {
           "argument": "--security-opt=no-new-privileges",
           "probe": "no-new-privileges",
+          "placeholders": [],
           "configurable": false,
           "enforced_by": "PR_SET_NO_NEW_PRIVS on the worker process and every descendant",
           "why": "A setuid binary inside a publisher's own base layer is otherwise a privilege escalation the platform handed over itself."
@@ -96,6 +100,7 @@
         "read_only_rootfs": {
           "argument": "--read-only",
           "probe": "read-only rootfs",
+          "placeholders": [],
           "configurable": false,
           "enforced_by": "the runtime mounts the container root read-only",
           "why": "It is what makes the two writable mounts below the ONLY writable paths, which is what makes their quotas the disk quota rather than one of several."
@@ -103,6 +108,7 @@
         "scratch": {
           "argument": "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=<tmpfs_size>",
           "probe": "sized tmpfs",
+          "placeholders": ["tmpfs_size"],
           "configurable": true,
           "enforced_by": "tmpfs size=, refusing writes past the cap",
           "why": "Scratch has to exist under a read-only root. noexec is not decoration: /tmp is where a downloaded payload lands.",
@@ -111,6 +117,7 @@
         "workspace": {
           "argument": "--volume=<quota_volume>:/workspace",
           "probe": "loop-backed volume",
+          "placeholders": ["quota_volume"],
           "configurable": true,
           "enforced_by": "an ext4 filesystem on a sparse loop-backed image, sized at creation",
           "why": "A real quota, and the answer to --storage-opt size being refused on overlay2/extfs. The worker receives the VOLUME and never the device; the privileged setup container that attaches it is the trusted launcher's, not the worker's."
@@ -118,6 +125,7 @@
         "network": {
           "argument": "--network=<egress_network>",
           "probe": "network none",
+          "placeholders": ["egress_network"],
           "configurable": true,
           "enforced_by": "a Docker network with no route off-host except the configured egress gateway; `none` is the measured floor",
           "why": "Q3 set the rule as deny-all except the configured repository hosts. `--network none` is what the probe demonstrates and is the floor the gateway is measured against; the gateway itself is T3's remaining work and is NOT proved by this bound."
@@ -125,6 +133,7 @@
         "seccomp": {
           "argument": "--security-opt=seccomp=<seccomp_profile>",
           "probe": "seccomp",
+          "placeholders": ["seccomp_profile"],
           "configurable": true,
           "enforced_by": "a seccomp BPF filter applied by the runtime",
           "why": "With AppArmor unavailable here, seccomp and user namespaces are the confinement. That is a reason to state it precisely, not loosely.",
@@ -167,6 +176,7 @@
   "invariants": [
     "Every bound names a probe that dev/sandbox-probe.py records with kind='bound', and every such probe is claimed by exactly one bound. Neither direction alone is enough: the first lets a probe go unclaimed, the second lets a bound go unproved.",
     "The literal argument a bound specifies must be the literal argument its probe ran, compared flag-first and then option by option, with <placeholder> values matching anything. Lengths must agree, so an option dropped from the profile fails as surely as one the probe never measured.",
+    "Every placeholder a bound uses must be DECLARED in that bound's placeholders list, and every declared one must be used. A bare <token> matches any measured token wherever it stands, so an undeclared one can occupy the position a fixed security option held -- replacing noexec with <exec_policy> once read as 'the SAME literal argument' while the probe measured noexec. Declaring them makes widening the configurable surface a visible edit rather than a silent one; the list is required even when empty.",
     "A bound is proved by observing the WORKER, never by reading what the daemon or the host supports. A capability read does not change when the worker runs unconfined, so it cannot distinguish an enforced bound from an absent one.",
     "A name the probe records as kind='fact' may never be a bound's proof.",
     "No forbidden argument may appear in any bound's argument.",

@@ -767,6 +767,31 @@ def check_isolation_profile():
             fail("probe %r records no literal argument, so nothing can confirm that %s's "
                  "%r is what was measured" % (probe, name, spec_arg))
             continue
+        # Placeholders are DECLARED, not inferred. A bare <token> matches any measured
+        # token wherever it stands, including where a fixed security option was: replacing
+        # noexec with <exec_policy> in the tmpfs argument left the runner printing "the
+        # SAME literal argument" while the probe measured noexec. That path is not
+        # fanciful -- some toolchains want exec in TMPDIR -- so widening the configurable
+        # surface has to be a visible edit rather than a silent one. Declaring them costs
+        # a list and turns it into one.
+        declared = b.get("placeholders")
+        if declared is None:
+            fail("bound %s declares no placeholders list; an undeclared <placeholder> "
+                 "silently widens what may vary, so the list is required even when empty"
+                 % name)
+            continue
+        used = set(re.findall(r"<([a-z_]+)>", spec_arg))
+        undeclared = sorted(used - set(declared))
+        unused = sorted(set(declared) - used)
+        if undeclared:
+            fail("bound %s uses undeclared placeholder(s) %s; each one lets a value the "
+                 "probe never measured stand where a fixed option was"
+                 % (name, ", ".join("<%s>" % u for u in undeclared)))
+            continue
+        if unused:
+            fail("bound %s declares placeholder(s) %s that its argument does not use"
+                 % (name, ", ".join("<%s>" % u for u in unused)))
+            continue
         agree, why = _args_agree(spec_arg, probe_arg)
         if not agree:
             fail("bound %s specifies %r but probe %r measured %r -- %s"
@@ -826,8 +851,11 @@ def check_isolation_profile():
     if not selectable:
         fail("no runtime is selectable, so the seam's rule constrains nothing")
 
+    n_ph = sum(len(b.get("placeholders") or []) for b in bounds.values())
     print("  ok   %d bound(s), each proved by a distinct probe that measured the SAME "
           "literal argument" % len(claimed))
+    print("  ok   %d declared placeholder(s); every varying value is named, so nothing "
+          "fixed can become configurable unnoticed" % n_ph)
     print("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent from "
           "the launch line" % (len(probe_facts), len(forbidden)))
     print("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
