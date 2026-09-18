@@ -87,6 +87,7 @@ DEADLINE_SLACK = 2.0            # of extraction_deadline_seconds
 KINDS = (
     "timeout",               # the subject never finished inside the outer deadline
     "no-verdict",            # it printed nothing parseable: silence is not a decision
+    "race-not-raced",        # --rename-race never got a swap in: the run proves nothing
     "crash",                 # it fell over: also not a decision
     "bad-decision",          # it said something that is none of the three
     "unexpected-accept",     # the corpus said reject
@@ -347,7 +348,7 @@ def run(argv):
                   % regime)
         print()
 
-    failures, kinds, worst, records = 0, {}, [], []
+    failures, kinds, worst, records, total_swaps = 0, {}, [], [], 0
     for i, f in enumerate(fixtures):
         # A previous run that died mid-fixture leaves its world behind, and World()
         # refuses to reuse a directory. Without this, one crash cascades: every later
@@ -388,13 +389,7 @@ def run(argv):
         after = snapshot(watched)
         bad, written = judge(f, world, root_path, expect, verdict, before, after,
                              elapsed, timed_out, budget)
-        if rename_race and swaps == 0:
-            # A race that never swapped is not a race. Reported as a failure rather than
-            # a clean run, because "no escape observed" from a window that never opened
-            # is exactly the result this whole suite exists to refuse.
-            bad = list(bad) + [Failure("no-verdict",
-                                       "the racer never swapped anything; this run "
-                                       "raced nothing and proves nothing")]
+        total_swaps += swaps
         if bad:
             failures += 1
             for b in bad:
@@ -406,6 +401,23 @@ def run(argv):
                 worst.append((f["name"], f["expect"], bad))
         if not keep:
             world.destroy()
+
+    # A race that never swapped is not a race, and "no escape observed" from a window
+    # that never opened is the result this whole suite exists to refuse. Judged over the
+    # WHOLE run rather than per repeat: one repeat that misses its window still had its
+    # containment checked, and failing on it made the suite intermittently red for
+    # something that is not a defect in the subject (finding 69478b0-F1). Zero swaps
+    # across every repeat is a different thing, and is a failure.
+    if rename_race and total_swaps == 0:
+        failures += 1
+        kinds["race-not-raced"] = 1
+        detail = ("the racer never swapped anything across %d repeat(s); this run raced "
+                  "nothing and proves nothing" % len(fixtures))
+        records.append({"name": fixtures[0]["name"], "expect": fixtures[0]["expect"],
+                        "group": fixtures[0]["group"],
+                        "findings": [{"kind": "race-not-raced", "detail": detail}]})
+        worst.append((fixtures[0]["name"], fixtures[0]["expect"],
+                      [Failure("race-not-raced", detail)]))
 
     if as_json:
         if not keep:
@@ -425,6 +437,9 @@ def run(argv):
         print("  ... and %d more fixtures with findings" % (failures - len(worst)))
     print()
     print("  %d of %d fixtures clean" % (len(fixtures) - failures, len(fixtures)))
+    if rename_race:
+        print("  the racer swapped %d time(s) across %d repeat(s)"
+              % (total_swaps, len(fixtures)))
     if kinds:
         print("  findings by kind: " + ", ".join("%s %d" % kv for kv in sorted(kinds.items())))
     print()

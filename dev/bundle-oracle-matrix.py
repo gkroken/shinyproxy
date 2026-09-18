@@ -165,6 +165,13 @@ SCENARIOS = [
      "a negative result from a window that might never open; with it, the window is "
      "known to be reachable"),
 
+    ("race that never raced", ["--only", "pos-r-root", "--repeat", "2",
+                               "--rename-race"],
+     [("pos-r-root", "race-not-raced")],
+     "pos-r-root has no www directory, so the racer has nothing to swap. A race that "
+     "never happened must be reported as such and never as a clean run -- and with its "
+     "own kind, so it is not confused with the subject printing nothing"),
+
     ("unrecognised decision", ["--only", "pos-r-root",
                                "--extractor", DEGENERATE, "--", "--mode", "nonsense"],
      [("pos-r-root", "bad-decision")],

@@ -1228,7 +1228,7 @@ below are marked passed by this planning document.
         `--full` uses the defaults.
 
       - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
-        and `dev/validate-oracle-matrix.sh` hand the oracle twenty subjects, each
+        and `dev/validate-oracle-matrix.sh` hand the oracle twenty-one subjects, each
         wrong in one specific way, and assert *which* finding comes back on *which*
         fixture — not that something failed, which an oracle failing everything for the
         wrong reason would satisfy. ~87s.
@@ -1282,11 +1282,16 @@ below are marked passed by this planning document.
         the parent is a link. Under a race **either decision is acceptable** — refusing
         is correct and finishing is correct — so only containment is judged.
       - A negative result from a race is worth nothing on its own, so two things back it:
-        a run where the racer never swapped is reported as a **failure**, not a pass, and
-        the same race against `--without path` must escape. It does, 32 outside-root
-        changes over 8 repeats, stable across five consecutive suite runs. The guarded
-        extractor survives 8 of 8 — it walks with `O_NOFOLLOW` at every component, so it
-        either wins or fails closed.
+        a run where the racer never swapped **anywhere** is a failure with its own kind,
+        `race-not-raced`, and the same race against `--without path` must escape. It
+        does, 32 outside-root changes over 8 repeats, stable across five consecutive
+        suite runs.
+      - The racer gets exactly **one swap per repeat**, and the reason is the result:
+        the guarded extractor fails closed on the first swap it meets
+        (`parent-not-a-directory`), which ends the extraction. Eight repeats are
+        therefore eight genuine encounters, each survived — and the vulnerable variant
+        escapes on that same single swap, which is what calibrates the window as wide
+        enough to matter.
       - Finding the racer's own bug is the point worth keeping: it first raced
         `<root>/www` only, and an extractor with the path guard removed does not strip
         the payload root, so it writes `<root>/app/www`. The *vulnerable* variant was
