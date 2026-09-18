@@ -1404,19 +1404,22 @@ below are marked passed by this planning document.
       redefined to mean something else.
 
       **What this genuinely provides, on the evidence of T2 and T3(a).** Across seventeen
-      review cycles (`29857f7`..`2124414`, ten of them CHANGES_REQUIRED) the reviewer found
+      review cycles (`3f8bdd2..2124414`, ten of them CHANGES_REQUIRED) the reviewer found
       defects the author had missed, several of them in things the author had just asserted
       were fixed: an at-limit fixture four bytes over its limit (`29857f7-F1`), four
       predicates comparing against literals instead of the configured limit (`29857f7-F2`,
       `29857f7-F3`), a 924 MiB peak a commit had described only in seconds (`6987f01-F1`),
-      an oracle check no scenario asserted, three commits running (`6d7b790-F1`,
-      `64f5dd8-F1`, `3e23732-F1`), and commit messages asserting what was not so — a false
-      timing claim in T2 (`471a50f-F1`) and, in T3(a), a claim that this workplan said
-      something it did not (`7b6e931-F1`). It wrote its own extractors, mutations and probes
-      rather than re-running the author's. That is a real control, not a formality.
+      a check with nothing asserting it, three commits running (`6d7b790-F1`, `64f5dd8-F1`,
+      `3e23732-F1`), and commit messages asserting what was not so — a coverage claim in T2
+      that named groups while required cases inside them were missing (`29857f7-F4`) and,
+      in T3(a), a claim that this workplan said something it did not (`7b6e931-F1`). It
+      wrote its own extractors, mutations and probes rather than re-running the author's.
+      That is a real control, not a formality.
 
       The IDs are here rather than a bare count because this paragraph's whole authority is
-      that its numbers are checkable, and the first draft of it got two of them wrong.
+      that its numbers are checkable. Each draft of this sentence has been wrong about that
+      in a different way — a miscount first, then three citations that did not support the
+      claims attached to them — which is the argument for the paragraph, not against it.
 
       **What it does not provide, and this plan must not pretend otherwise.** It is not an
       external human security review. Both agents share a model and therefore share blind
