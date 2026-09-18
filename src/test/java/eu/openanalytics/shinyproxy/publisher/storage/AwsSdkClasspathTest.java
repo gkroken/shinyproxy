@@ -26,6 +26,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -128,17 +132,52 @@ class AwsSdkClasspathTest {
     }
 
     @Test
-    @DisplayName("the engine's own SDK modules are covered by the pinned version")
+    @DisplayName("the engine still contributes the modules the pin is aligned to")
     void theEnginesModulesAreIncluded() {
         Map<String, String> artifacts = sdkArtifacts();
-        // These arrive only through ContainerProxy. If they vanish, the version this
-        // project pins is no longer constrained by the engine and the choice should be
-        // revisited deliberately rather than inherited from a stale comment in the pom.
-        for (String engineModule : new String[]{"sso", "sts", "ecs", "s3"}) {
+        // These arrive ONLY through ContainerProxy -- s3 is deliberately not in this list,
+        // because it is declared here as well and so its absence would mean something
+        // different. If these vanish, the version this project pins is no longer
+        // constrained by the engine and the choice should be revisited deliberately rather
+        // than inherited from a stale comment in the pom.
+        for (String engineModule : new String[]{"sso", "sts", "ecs"}) {
             assertTrue(artifacts.containsKey(engineModule),
                     "ContainerProxy no longer contributes " + engineModule + "; "
                             + "aws-sdk.version is pinned to match the engine and that "
                             + "reason may no longer apply. Present: " + artifacts.keySet());
         }
+    }
+
+    @Test
+    @DisplayName("s3 is DECLARED here, not merely inherited from the engine")
+    void s3IsDeclaredAndNotOnlyInherited() throws IOException {
+        // The classpath cannot show this. The engine supplies s3 at 2.31.21 whether or not
+        // this repository declares it, so deleting the dependency block leaves every
+        // classpath assertion green -- verified, and it is why this test reads the pom
+        // (finding ba06976-F1). Without it, a later cleanup that removes the block as
+        // redundant silently returns this project to inheriting whatever ContainerProxy
+        // happens to bring, which is the situation the declaration exists to end.
+        Path pom = Path.of("pom.xml");
+        assertTrue(Files.exists(pom), "pom.xml not found; this test cannot check what it "
+                + "cannot read");
+        String text = Files.readString(pom, StandardCharsets.UTF_8);
+
+        Matcher m = Pattern.compile(
+                "<dependency>\\s*<groupId>software\\.amazon\\.awssdk</groupId>\\s*"
+                        + "<artifactId>s3</artifactId>\\s*<version>([^<]+)</version>",
+                Pattern.DOTALL).matcher(text);
+        assertTrue(m.find(),
+                "pom.xml does not declare software.amazon.awssdk:s3 with an explicit "
+                        + "version. It would still be on the classpath -- ContainerProxy "
+                        + "brings it -- but at whatever version the engine happens to use, "
+                        + "which is what this declaration exists to stop.");
+        assertEquals("${aws-sdk.version}", m.group(1),
+                "s3 is declared with a literal version rather than ${aws-sdk.version}; the "
+                        + "property is what keeps s3 and url-connection-client aligned");
+
+        assertTrue(text.contains("<artifactId>url-connection-client</artifactId>"),
+                "url-connection-client is the one artifact this repository actually adds to "
+                        + "the runtime classpath, and the HTTP client is selected explicitly "
+                        + "because several are present; it must stay declared");
     }
 }
