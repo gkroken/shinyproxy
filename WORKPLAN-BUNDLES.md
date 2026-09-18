@@ -12,6 +12,10 @@ are accepted. Extraction **and build isolation** require an independent Opus 5 s
 review mid-track, by a session that did not implement them. Neither delegation nor a
 passing author-written suite constitutes that review.
 
+**Who performs it, decided 2026-09-18 by the user: the coding agent and the independent
+reviewer agent, not a human.** See T5 for what that does and does not buy, and for the
+conditions that make it worth anything.
+
 The LOCKED section distinguishes inherited constraints from decisions made by this plan.
 Items marked **OPEN / sign-off** are not locked by implication; task 0 records their
 decision gates and each is resolved before dependent work. In particular, the concrete BuildKit sandbox configuration is not yet
@@ -171,8 +175,9 @@ rootful build daemon, a flag-reading “isolation test”, and silently adding
 process separation and process cleanup; rootless is not evidence to the contrary.
 
 **Recommended required gate; concrete deployment remains OPEN Q2:** the precise rootless worker, namespace, seccomp/AppArmor,
-cgroup and storage configuration must pass T3/T5 and independent review **before** the
-production build driver is connected. No unrestricted profile or host-wide security
+cgroup and storage configuration must pass T3/T5 and the T5 agent review **before** the
+production build driver is connected; a human review of the deployment profile remains
+owed to the operator and is not discharged by that gate. No unrestricted profile or host-wide security
 disablement is pre-approved by this plan. A requirement for one is a concrete proposal
 to bring back, not an implementation detail. The same applies if a separate VM becomes
 necessary: that changes the Docker single-host deployment contract and needs sign-off.
@@ -818,7 +823,9 @@ Test failed cleanup without losing ledger records, and test rollback after a rea
 ## Tasks
 
 Order matters. T2's independently authored corpus precedes T3/T5 extraction work. T5 is
-the mandatory independent security gate **before** wiring an upload to production builds.
+the mandatory independent security gate **before** wiring an upload to production builds;
+it is performed by the reviewer agent, and T5 records both what that buys and what it
+leaves owed to a human.
 Every task records commands, versions, commit, assertions and actual outcomes; no checks
 below are marked passed by this planning document.
 
@@ -1382,9 +1389,51 @@ below are marked passed by this planning document.
       Run the untouched T2 corpus and resource measurements; mutation-test each defense.
       A new reviewer/session reads the extractor and sandbox configuration, adds withheld
       archive/escape fixtures and drives T3's live attempts independently. Review all
-      security comments against named tests. **Pass:** signed review with resolved findings,
+      security comments against named tests. **Pass:** a completed review with every
+      finding resolved,
       no skipped isolation probe; same corpus through the upload pipeline once T8 exists.
       Driver/log plumbing may proceed only against reviewed boundaries after this gate.
+
+      **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
+      There will be no human security review at this gate. The two-session split in
+      `code_review/` is the mechanism: the coding agent implements and commits, a separate
+      session that cannot see its reasoning reads the commit and the tree, writes its own
+      probes and fixtures, and records findings in a report. The earlier wording said
+      "signed review", which implied a human signature; it is struck rather than quietly
+      redefined to mean something else.
+
+      **What this genuinely provides, on the evidence of T2.** Across fourteen review
+      cycles the reviewer found defects the author had missed, several of them in things
+      the author had just asserted were fixed: an at-limit fixture four bytes over its
+      limit, three predicates comparing against literals instead of the configured limit,
+      a 924 MiB peak a commit had described only in seconds, an oracle check no scenario
+      asserted (three times running), and a claim in a commit message that the workplan
+      said something it did not. It wrote its own extractors, mutations and probes rather
+      than re-running the author's. That is a real control, not a formality.
+
+      **What it does not provide, and this plan must not pretend otherwise.** It is not an
+      external human security review. Both agents share a model and therefore share blind
+      spots; a class of mistake invisible to one is likely invisible to the other, and no
+      number of review cycles fixes a correlated blind spot. There is no accountable
+      signature. Nothing here discharges the need for a human to look before untrusted
+      bundles from real users are accepted — that remains **owed, and owed to the
+      operator, not to this plan**.
+
+      **Conditions that make the agent review worth something.** Each is a requirement of
+      this gate, not advice:
+      - The reviewer **authors its withheld archive/escape fixtures before reading the
+        extractor**, and records that it did. Fixtures written afterwards test the
+        implementation's own idea of the problem.
+      - The review runs in a **fresh session**, not one that watched the extractor being
+        built commit by commit. Incremental familiarity is anchoring.
+      - The reviewer **re-runs T2's corpus and T3's probes itself**, from the committed
+        tree, rather than accepting the author's reported output.
+      - Every finding class gets a **permanent test**, not a one-off fix. T2 produced the
+        same finding — "a check that nothing checks" — four times running, because each
+        fix closed only the instances that had been named.
+      - A review that produces **no findings is itself a finding** at this gate: the
+        reviewer states what it attacked and failed to break, rather than reporting
+        silence.
 
 - [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
