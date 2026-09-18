@@ -1164,7 +1164,7 @@ below are marked passed by this planning document.
         and costs exactly its own length. The N+1 half is the same payload with one more
         byte of filename, which is what makes it a true pair.
 
-      - **The outside-root sentinels** (2026-09-18), `dev/bundle-sentinels.py` and
+      - **The outside-root sentinels** (2026-09-18), `dev/bundle_sentinels.py` and
         `dev/validate-sentinels.sh`. A disposable world — a private extraction root, a
         pre-created file where a relative traversal lands, a symlinked root, an ordinary
         sibling — plus a snapshot/diff over it and over the absolute targets the corpus

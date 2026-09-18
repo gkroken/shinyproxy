@@ -13,18 +13,26 @@ the outcome was acceptable -- which is more than "did the return code match":
   * the extractor stayed inside the outer test limits -- a wall-clock deadline and a disk
     budget -- so a bomb that is "rejected" only after filling the disk still fails
 
-It imports no Skald class and no extractor. The extractor is a subprocess named on the
-command line, so the same oracle will judge the real one at T5 without changing.
+It imports no Skald class and no extractor. The extractor is a subprocess named by
+`--extractor`, so the same oracle judges the real one at T5 by being pointed at it.
 
 By default it runs a REDUCED limit profile. Every boundary fixture is parameterised off
 the limits, so the properties hold at any profile, and at the documented defaults the
 bombs alone would write about three gigabytes per pass. `--full` uses the defaults.
 
 Usage:
-    python3 dev/bundle-oracle.py [--full] [--keep] [-- EXTRACTOR ARGS...]
+    python3 dev/bundle-oracle.py [--full] [--keep] [--extractor PATH]
+                                 [-- EXTRACTOR ARGS...]
 
 Anything after `--` is appended to the extractor's argv, which is how a guard is removed
-(`-- --without duplicates`) or a variant selected (`-- --unsafe`).
+(`-- --without duplicates`) or a variant selected (`-- --unsafe`). The subject is invoked
+as:
+
+    <python> <extractor> --root DIR --archive FILE --limits JSON [extra args...]
+
+and must print one JSON object on stdout with a "decision" of accept, reject or crash.
+Any other program obeying that contract can be judged by this oracle; `--extractor` is
+how the real one gets pointed at.
 """
 
 import json
@@ -40,7 +48,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from bundle_sentinels import World, snapshot, changes, read_detection  # noqa: E402
 
 HERE = pathlib.Path("dev/fixtures/bundles")
-EXTRACTOR = HERE / "disposable_extractor.py"
+DEFAULT_EXTRACTOR = HERE / "disposable_extractor.py"
 
 # The reduced profile. Chosen so every N/N+1 pair still straddles its limit while the
 # whole corpus extracts in seconds; the properties are what is under test, not the
@@ -163,6 +171,12 @@ def run(argv):
     full = "--full" in argv
     keep = "--keep" in argv
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
+    head = argv[:argv.index("--")] if "--" in argv else argv
+    extractor = pathlib.Path(head[head.index("--extractor") + 1]) \
+        if "--extractor" in head else DEFAULT_EXTRACTOR
+    if not extractor.is_file():
+        print("  FAIL no extractor at %s" % extractor)
+        return 1
 
     base = pathlib.Path(os.environ.get("SKALD_WORLD_BASE", "/work"))
     base.mkdir(parents=True, exist_ok=True)
@@ -182,9 +196,9 @@ def run(argv):
     budget = limits["max_expanded_bytes"] * DISK_BUDGET_FACTOR
     deadline = limits["extraction_deadline_seconds"] * DEADLINE_SLACK
 
-    print("== oracle: %d fixtures, %s profile, extractor %s ==" %
-          (len(fixtures), "default" if full else "reduced",
-           " ".join(extra) or "all guards on"))
+    print("== oracle: %d fixtures, %s profile ==" %
+          (len(fixtures), "default" if full else "reduced"))
+    print("   subject: %s %s" % (extractor, " ".join(extra) or "(all guards on)"))
     print("   outer limits: %.0fs deadline, %d MiB disk budget per fixture"
           % (deadline, budget // (1 << 20)))
     regime = read_detection(str(base))
@@ -198,7 +212,7 @@ def run(argv):
         archive = corpus / (f["name"] + ".tar.gz")
         watched = world.watched()
         before = snapshot(watched)
-        cmd = [sys.executable, str(EXTRACTOR), "--root", str(world.root),
+        cmd = [sys.executable, str(extractor), "--root", str(world.root),
                "--archive", str(archive), "--limits", json.dumps(limits)] + extra
         started, timed_out, verdict = time.time(), False, None
         try:
