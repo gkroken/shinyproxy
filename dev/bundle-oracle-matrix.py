@@ -78,8 +78,11 @@ SCENARIOS = [
 
     ("escape through traversal", ["--", "--without", "path"],
      [("trav-dotdot", "outside-root-change"),
-      ("trav-absolute", "outside-root-change")],
-     "the path guard removed from the real disposable extractor"),
+      ("trav-absolute", "outside-root-change"),
+      ("pos-empty-file", "extra-output")],
+     "the path guard removed from the real disposable extractor. It also stops stripping "
+     "the payload root, so accepted bundles land under app/ and every declared file is "
+     "both missing and extra -- which is what pins extra-output (finding 3e23732-F1)"),
 
     ("escape through links", ["--", "--unsafe"],
      [("link-symlink-dir-then-child", "outside-root-change"),
@@ -128,7 +131,24 @@ SCENARIOS = [
      [("pos-r-root", "no-verdict")],
      "an extractor that prints nothing has decided nothing, and silence must not read "
      "as a rejection"),
+
+    ("accepted with the wrong bytes", ["--only", "pos-r-root",
+                                       "--extractor", DEGENERATE, "--", "--mode",
+                                       "corrupts"],
+     [("pos-r-root", "wrong-output")],
+     "accepting is not enough: the tree has to be the one the manifest described"),
+
+    ("accepted with a setuid bit", ["--only", "pos-r-root",
+                                    "--extractor", DEGENERATE, "--", "--mode", "setuid"],
+     [("pos-r-root", "privileged-mode")],
+     "the corpus rejects setuid members in the archive; this is the same outcome "
+     "arriving by the extractor's own hand"),
 ]
+
+
+def oracle_kinds():
+    r = subprocess.run([sys.executable, str(ORACLE), "--kinds"], capture_output=True)
+    return json.loads(r.stdout.decode())
 
 
 def run(args, full):
@@ -176,6 +196,21 @@ def main(argv):
                      ", ".join("%s %d" % kv for kv in sorted(result["kinds"].items())),
                      took))
         print("       %s" % note)
+    # Coverage by construction. Enumerating the kinds by hand is what produced three
+    # consecutive findings of "a check that nothing checks": each fix closed the kinds
+    # that had been named and left the ones nobody had counted. The oracle declares its
+    # own list, and a kind with no scenario behind it fails here the day it is added.
+    asserted = {kind for _, _, expected, _ in SCENARIOS if expected != "clean"
+                for _, kind in expected}
+    unpoliced = [k for k in oracle_kinds() if k not in asserted]
+    print()
+    if unpoliced:
+        ok = False
+        print("  FAIL the oracle can report %d finding kind(s) no scenario asserts: %s"
+              % (len(unpoliced), ", ".join(unpoliced)))
+        print("       remove the check and this suite stays green, which is the defect")
+    else:
+        print("  ok   every finding kind the oracle declares is asserted by a scenario")
     print()
     print("RESULT:", "the oracle detects every class it claims to" if ok else "MISMATCH")
     return 0 if ok else 1

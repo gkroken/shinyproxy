@@ -23,6 +23,11 @@ Modes:
                    nothing, and the oracle must not read silence as a rejection.
   bloats           decides correctly and then writes far past the outer disk budget. A
                    bomb "rejected" only after filling the disk has not been rejected.
+  corrupts         accepts and writes a declared file with the WRONG bytes. Accepting is
+                   not enough; the tree has to be the one the manifest described.
+  setuid           accepts and sets 04755 on an extracted file. The corpus rejects
+                   setuid members in the archive; this is the same outcome arriving by
+                   the extractor's own hand.
 """
 
 import getopt
@@ -81,7 +86,14 @@ def main(argv):
     except Exception as e:
         verdict = {"decision": "crash", "rule": type(e).__name__, "reason": str(e)[:200]}
 
-    if mode == "bloats":
+    if mode in ("corrupts", "setuid") and verdict["decision"] == "accept":
+        declared = json.loads((pathlib.Path(root) / "manifest.json").read_bytes())
+        target = pathlib.Path(root) / declared["files"][0]["path"]
+        if mode == "corrupts":
+            target.write_bytes(b"not what the manifest declared\n")
+        else:
+            os.chmod(target, 0o4755)
+    elif mode == "bloats":
         blob = pathlib.Path(root) / "bloat.bin"
         blob.parent.mkdir(parents=True, exist_ok=True)
         with open(blob, "wb") as fh:

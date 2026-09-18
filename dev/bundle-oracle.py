@@ -24,6 +24,7 @@ Usage:
     python3 dev/bundle-oracle.py [--full] [--keep] [--json] [--only FIXTURE]
                                  [--deadline SECONDS] [--disk-budget BYTES]
                                  [--extractor PATH]
+    python3 dev/bundle-oracle.py --kinds
                                  [-- EXTRACTOR ARGS...]
 
 `--json` prints the findings as one object instead of a report, which is how
@@ -72,8 +73,29 @@ DISK_BUDGET_FACTOR = 4          # of max_expanded_bytes
 DEADLINE_SLACK = 2.0            # of extraction_deadline_seconds
 
 
+# Every finding this oracle can produce, declared in one place so the matrix can check
+# its own coverage BY CONSTRUCTION instead of by someone remembering to add a scenario.
+# Three commits in a row were corrected for "a check that nothing checks"; enumerating
+# the list again would only move the next omission somewhere else.
+KINDS = (
+    "timeout",               # the subject never finished inside the outer deadline
+    "no-verdict",            # it printed nothing parseable: silence is not a decision
+    "crash",                 # it fell over: also not a decision
+    "unexpected-accept",     # the corpus said reject
+    "unexpected-reject",     # the corpus said accept -- what positive controls are for
+    "outside-root-change",   # a sentinel moved
+    "over-disk-budget",      # rejected, eventually, after filling the disk
+    "residue",               # rejected, but the root was not emptied
+    "missing-output",        # accepted, but a declared file is not there
+    "wrong-output",          # accepted, and a declared file has the wrong bytes
+    "privileged-mode",       # accepted, and something carries setuid/setgid/sticky
+    "extra-output",          # accepted, and something undeclared is there
+)
+
+
 class Failure:
     def __init__(self, kind, detail):
+        assert kind in KINDS, "undeclared finding kind %r; add it to KINDS" % kind
         self.kind, self.detail = kind, detail
 
     def __str__(self):
@@ -173,6 +195,9 @@ def check_produced(root):
 
 
 def run(argv):
+    if "--kinds" in argv:
+        print(json.dumps(list(KINDS)))
+        return 0
     full = "--full" in argv
     keep = "--keep" in argv
     as_json = "--json" in argv
