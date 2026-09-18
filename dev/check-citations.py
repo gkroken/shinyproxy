@@ -14,12 +14,15 @@ What this checks, and what it cannot:
   CAN   the cited hash resolves, is an ancestor of HEAD, has a review report,
         and that report contains that finding ID as a finding header.
   CAN   a cited `a..b` range resolves and the commit count matches any "Across
-        <number> review cycles" claim attached to it -- in any spelling, because
-        every such claim is located independently and one this tool did not pair
-        with a range is reported as UNCHECKED rather than passed over. Two
-        spellings have already slipped a pattern that merely matched one shape
-        (`a`..`b`, then a comma for a parenthesis), so coverage is asserted rather
-        than enumerated.
+        <number> review cycles" claim attached to it. Every such claim is located
+        independently, and one this tool did not pair with a range is reported as
+        UNCHECKED rather than passed over; a number word it cannot read is reported
+        too. Three spellings have already slipped a pattern that merely matched one
+        shape -- `a`..`b`, then a comma for a parenthesis, then a hyphenated number
+        word -- so coverage is asserted rather than enumerated. The span is what
+        `Across\s+([\w-]+)\s+review\s+cycles` reaches: rephrase that lead-in and the
+        claim is invisible again, which is a limit of the pattern and not a
+        property the assertion can rescue.
   CANNOT  that the finding *says* what the sentence claims it says. Measured
         against the three defects that prompted this: it catches a0d3ce1-F2 (the
         range count) and MISSES a0d3ce1-F1 and -F3, because both cite a real
@@ -74,9 +77,14 @@ WORDS = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
 # twice already (`a`..`b`, then a comma for a paren); asserting coverage is the fix,
 # in the shape 6024d51 used for the oracle matrix.
 COUNTED_RANGE = re.compile(
-    r"Across\s+(\w+)\s+review\s+cycles\b[\s(,:-]*" + _H + r"\.\." + _H, re.S)
-# Every count claim, paired or not.
-LOOSE_COUNT = re.compile(r"Across\s+(\w+)\s+review\s+cycles\b")
+    r"Across\s+([\w-]+)\s+review\s+cycles\b[\s(,:-]*" + _H + r"\.\." + _H, re.S)
+# Every count claim, paired or not. `[\w-]`, not `\w`: the hyphen matters, because
+# `\w` excluded it and "Across twenty-one review cycles" therefore matched NEITHER
+# pattern -- so the claim was not mis-parsed, it ceased to exist, and a count of
+# twenty-one against a range of twenty passed in silence (b16b1e4-F1). This series
+# stands at seventeen cycles, so the next number that breaks it is the next one it
+# reaches. An unrecognised word is a loud failure below; being unseen is not.
+LOOSE_COUNT = re.compile(r"Across\s+([\w-]+)\s+review\s+cycles\b")
 
 
 def git(*args):
@@ -235,6 +243,11 @@ def self_test():
         ("a count claim with no range following it at all",
          "Across nineteen review cycles the reviewer found things.",
          "count claim NOT CHECKED"),
+        # Regression: b16b1e4-F1. `\w` excluded the hyphen, so this matched neither
+        # pattern and twenty-one-against-twenty passed silently.
+        ("a hyphenated number word, which must at least be SEEN",
+         "Across twenty-one review cycles (`a6615c1..b16b1e4`, all reviewed).",
+         "unrecognised number word"),
     ]
 
     bad = []
