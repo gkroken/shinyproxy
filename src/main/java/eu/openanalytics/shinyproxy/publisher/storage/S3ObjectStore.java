@@ -93,7 +93,7 @@ public class S3ObjectStore implements ObjectStore {
         try {
             PutObjectResponse response =
                     client.putObject(request.build(), RequestBody.fromBytes(content));
-            return Optional.of(new StoredObject(bucket, key, content.length, sha256,
+            return Optional.of(StoredObject.digested(bucket, key, content.length, sha256,
                     response.eTag()));
         } catch (S3Exception e) {
             if (onlyIfAbsent && e.statusCode() == 412) {
@@ -166,7 +166,8 @@ public class S3ObjectStore implements ObjectStore {
                             + "is truncated. An upload whose receipt is never committed is "
                             + "inert and is collected by the incomplete-upload rule.");
         }
-        return new StoredObject(bucket, key, counted.count(), hex(digest), response.eTag());
+        return StoredObject.digested(bucket, key, counted.count(), hex(digest),
+                response.eTag());
     }
 
     @Override
@@ -193,7 +194,7 @@ public class S3ObjectStore implements ObjectStore {
                             + expectedSha256 + ", read " + actual + " over " + size
                             + " bytes");
         }
-        return new StoredObject(bucket, key, size, actual, null);
+        return StoredObject.digested(bucket, key, size, actual, null);
     }
 
     /** Counts what was actually read, which is the size recorded for the stored object. */
@@ -232,8 +233,11 @@ public class S3ObjectStore implements ObjectStore {
         try {
             HeadObjectResponse response = client.headObject(
                     HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            // Absent for an object written by putStreaming: the digest could not be in
+            // the headers, which are sent before the body is read.
             return Optional.of(new StoredObject(bucket, key, response.contentLength(),
-                    response.metadata().get("skald-sha256"), response.eTag()));
+                    Optional.ofNullable(response.metadata().get("skald-sha256")),
+                    response.eTag()));
         } catch (NoSuchKeyException e) {
             return Optional.empty();
         } catch (S3Exception e) {

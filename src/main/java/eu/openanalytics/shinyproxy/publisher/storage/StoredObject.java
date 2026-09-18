@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.storage;
 
+import java.util.Optional;
+
 /**
  * What the store actually holds at a key.
  *
@@ -29,12 +31,28 @@ package eu.openanalytics.shinyproxy.publisher.storage;
  * @param key       its key, as built by {@link ObjectKeys}
  * @param size      length in bytes, as counted by this platform
  * @param sha256    lower-case hex SHA-256, computed here over the bytes written or read,
- *                  never the store's ETag
+ *                  never the store's ETag. {@link Optional} because it is genuinely absent
+ *                  in one case: {@code head()} of an object written by
+ *                  {@code putStreaming} has no recorded digest, since metadata travels in
+ *                  request headers that are sent before the body has been read. A plain
+ *                  nullable String made that invisible at the call site, where
+ *                  {@code head(...).get().sha256().equals(expected)} is an NPE rather than
+ *                  a verification — on the bundle, which is the object whose integrity
+ *                  matters most (finding {@code f440ce4-F2}). The durable record for a
+ *                  streamed object is {@code receipt.json}, as the plan requires.
+ *                  A write always returns one present
  * @param etag      the store's own tag, carried for diagnosis only. It is deliberately NOT
  *                  a content hash: for a multipart upload it is a digest of part digests,
  *                  and AWS documents it as unsuitable for integrity checking. Recorded so
  *                  that a support question can be answered, never compared against
  *                  {@code sha256}.
  */
-public record StoredObject(String bucket, String key, long size, String sha256, String etag) {
+public record StoredObject(String bucket, String key, long size, Optional<String> sha256,
+                           String etag) {
+
+    /** For a path that computed the digest itself, where it is always present. */
+    public static StoredObject digested(String bucket, String key, long size, String sha256,
+                                        String etag) {
+        return new StoredObject(bucket, key, size, Optional.of(sha256), etag);
+    }
 }

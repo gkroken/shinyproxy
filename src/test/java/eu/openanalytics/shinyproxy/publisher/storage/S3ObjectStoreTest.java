@@ -136,17 +136,17 @@ class S3ObjectStoreTest {
 
         StoredObject written = store.put(BUCKET, k, content, "application/json");
         assertEquals(content.length, written.size());
-        assertEquals(S3ObjectStore.sha256(content), written.sha256());
-        assertEquals(64, written.sha256().length(), "SHA-256 hex is 64 characters");
-        assertEquals(written.sha256().toLowerCase(java.util.Locale.ROOT), written.sha256(),
+        assertEquals(S3ObjectStore.sha256(content), written.sha256().orElseThrow());
+        assertEquals(64, written.sha256().orElseThrow().length(), "SHA-256 hex is 64 characters");
+        assertEquals(written.sha256().orElseThrow().toLowerCase(java.util.Locale.ROOT), written.sha256().orElseThrow(),
                 "the manifest schema's sha256 pattern accepts lower-case hex only");
 
         // The ETag is recorded and must never be mistaken for the content hash. MinIO
         // returns MD5 for a single-part upload, so this also pins that they differ.
-        assertNotEquals(written.sha256(), stripQuotes(written.etag()),
+        assertNotEquals(written.sha256().orElseThrow(), stripQuotes(written.etag()),
                 "the ETag must not be treated as, or equal, the SHA-256");
 
-        byte[] read = store.readVerified(BUCKET, k, written.sha256());
+        byte[] read = store.readVerified(BUCKET, k, written.sha256().orElseThrow());
         assertArrayEquals(content, read);
 
         try (InputStream in = store.open(BUCKET, k)) {
@@ -188,7 +188,7 @@ class S3ObjectStoreTest {
         // The refusal is worthless if the bytes changed anyway. This is the property the
         // plan states: "rejects an attempt to replace different bytes at an existing
         // sequence".
-        assertArrayEquals(first, store.readVerified(BUCKET, k, created.get().sha256()),
+        assertArrayEquals(first, store.readVerified(BUCKET, k, created.get().sha256().orElseThrow()),
                 "the original chunk bytes must be untouched after a refused write");
     }
 
@@ -264,7 +264,7 @@ class S3ObjectStoreTest {
 
             Optional<StoredObject> found = store.head(BUCKET, k);
             assertTrue(found.isPresent(), "could not find the object back under " + k);
-            assertArrayEquals(content, store.readVerified(BUCKET, k, written.sha256()),
+            assertArrayEquals(content, store.readVerified(BUCKET, k, written.sha256().orElseThrow()),
                     "content did not survive for " + name);
         }
     }
@@ -289,10 +289,23 @@ class S3ObjectStoreTest {
     }
 
     @Test
-    @DisplayName("a streamed put never holds the object, and its digest matches")
-    void streamingPutDoesNotBuffer() {
-        // 32 MiB, well past anything a test would hold by accident, and large enough that
-        // the counting below is not measuring noise.
+    @DisplayName("a large object survives the streaming path with its digest intact")
+    void largeObjectRoundTripsThroughTheStreamingPath() {
+        // NOT a detector of buffering, and it was named as one until f440ce4-F1. A
+        // putStreaming implemented as readAllBytes() then put() PASSES this test; the suite
+        // catches that mutation only through declaredLengthIsAClaimThatIsChecked, because a
+        // buffering implementation ignores declaredLength. A tick earned by another branch
+        // is not coverage of this one.
+        //
+        // Non-buffering rests on RequestBody.fromInputStream with an explicit length, which
+        // is by construction. No cheap deterministic assertion exists for it: heap sampling
+        // around the call is flaky and an object large enough to OOM a buffering
+        // implementation would be slow and host-dependent. Naming the limit is better than
+        // a fragile assertion, as caseCollisionsAreLeftToTheFileListOwner does for its own.
+        //
+        // What this DOES assert is worth having: 32 MiB through the streaming API, with the
+        // digest computed in flight equal to the digest of the same bytes computed whole,
+        // and every byte arriving at the far end.
         int size = 32 * 1024 * 1024;
         String k = key(ObjectKeys.BUNDLE_ARCHIVE);
 
@@ -307,16 +320,45 @@ class S3ObjectStoreTest {
         StoredObject written = store.putStreaming(BUCKET, k, generated(size), size,
                 "application/gzip");
         assertEquals(size, written.size());
-        assertEquals(expectedDigest, written.sha256(),
+        assertEquals(expectedDigest, written.sha256().orElseThrow(),
                 "the digest computed while streaming must equal the digest of the bytes");
 
         // And back out again without materialising it either.
         CountingSink sink = new CountingSink();
         StoredObject read = store.readVerifiedTo(BUCKET, k, expectedDigest, sink);
         assertEquals(size, read.size());
+        assertEquals(expectedDigest, read.sha256().orElseThrow());
         assertEquals(size, sink.count, "every byte must reach the sink");
         assertEquals(expectedDigest, sink.digestHex(),
                 "the bytes that reached the sink must be the bytes that were stored");
+    }
+
+    @Test
+    @DisplayName("head() has a digest for a buffered put and none for a streamed one")
+    void headDigestIsAbsentForStreamedObjects() {
+        // The asymmetry is real and was explained only in a javadoc. Asserted here so a
+        // caller meets it in the suite, and so that if putStreaming ever learns to record
+        // the digest, this fails and says the receipt is no longer the only record.
+        byte[] content = "same bytes either way".getBytes(StandardCharsets.UTF_8);
+        String expected = S3ObjectStore.sha256(content);
+
+        String buffered = key(ObjectKeys.BUNDLE_MANIFEST);
+        store.put(BUCKET, buffered, content, "application/json");
+        assertEquals(Optional.of(expected), store.head(BUCKET, buffered).orElseThrow().sha256(),
+                "a buffered put records its digest as object metadata");
+
+        String streamed = key(ObjectKeys.BUNDLE_ARCHIVE);
+        StoredObject written = store.putStreaming(BUCKET, streamed,
+                new ByteArrayInputStream(content), content.length, "application/gzip");
+        assertEquals(Optional.of(expected), written.sha256(),
+                "the write itself still returns the digest it computed in flight");
+        assertEquals(Optional.empty(), store.head(BUCKET, streamed).orElseThrow().sha256(),
+                "a streamed put cannot record the digest as metadata: headers are sent "
+                        + "before the body is read, so receipt.json is the durable record");
+
+        // And the bytes are verifiable anyway, from the digest the write returned.
+        assertArrayEquals(content,
+                store.readVerified(BUCKET, streamed, written.sha256().orElseThrow()));
     }
 
     @Test
