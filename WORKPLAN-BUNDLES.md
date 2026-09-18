@@ -164,7 +164,16 @@ in a dependency install or application process. This applies to extraction helpe
 dependency hooks and smoke-started images, not only the final `RUN` instruction.
 
 **Plan decision:** one disposable rootless BuildKit worker per attempt, no worker reused
-across publishers; a trusted launcher controls its lifecycle. The launcher may use the
+across publishers; a trusted launcher controls its lifecycle. **The worker runtime is a
+configuration seam, decided 2026-09-18 by the user** — the launcher selects a runtime
+(`runc`, `runsc`, a microVM runtime) and receives the isolation profile as one policy
+object, rather than having one runtime and a scatter of flags compiled into it. Rootless
+BuildKit under `runc` is the **default and the only profile #2 ships**; the seam exists so
+that an operator whose publisher population is wider than "people we issued accounts to",
+or whose host has KVM, can raise the boundary without a redesign. **A runtime that cannot
+enforce every bound in the configured profile must refuse to start, never run weaker** —
+a seam that silently degrades is worse than no seam, because the profile then describes an
+intention rather than a state. The launcher may use the
 platform's existing Docker control-plane access, but that socket is never mounted into
 the worker or exposed through a worker-callable Docker API proxy. Transfer inputs through
 a bounded BuildKit session/stream, not a bind mount of the repository, platform temp
@@ -175,7 +184,7 @@ rootful build daemon, a flag-reading “isolation test”, and silently adding
 `--oci-worker-no-process-sandbox` to get nested builds working. The last option weakens
 process separation and process cleanup; rootless is not evidence to the contrary.
 
-**Recommended required gate; concrete deployment remains OPEN Q2:** the precise rootless worker, namespace, seccomp/AppArmor,
+**Required gate; Q2 DECIDED 2026-09-18, the profile still owes its proof:** the precise rootless worker, namespace, seccomp/AppArmor,
 cgroup and storage configuration must pass T3/T5 and the T5 agent review **before** the
 production build driver is connected; a human review of the deployment profile remains
 owed to the operator and is not discharged by that gate. No unrestricted profile or host-wide security
@@ -1049,17 +1058,36 @@ below are marked passed by this planning document.
         and `dev/schema-regex-check.js`, so `$schema`, `$defs` and `$ref` are not exposed to
         shell expansion and each can be read on its own.
 
-      **Still open in T1:** the ID/state vocabulary, admin transport, image layout wording,
-      the semantic validator specification, and the literal safe launch arguments — the last
-      of which waits on Q2, since T0 found this host has no AppArmor and delegates only
-      `memory pids`, so a rootless worker cannot currently bound CPU at all.
+      **T1(d) and T1(e) FROZEN 2026-09-18 by the user, as proposed and unchanged.**
+      `spec/lifecycle-v1.json` (the ID/state vocabulary) and `spec/admin-transport-v1.json`
+      (the nine admin endpoints) are public API shapes, so `CLAUDE.md` puts them to the user
+      rather than to this plan. Both were taken as written. What freezing them commits to,
+      stated here because a later reader will meet the consequences before the rationale:
 
-      **Not frozen, but no longer blocked on a decision.** Q3 closed on 2026-09-17, so the
-      remaining precondition is T1's own contract review — the ID/state vocabulary, admin
-      transport, image layout wording and semantic validator specification. Nothing about
-      those answers changed the manifest or descriptor schemas: the limits live in
-      configuration and the repository set in deployment policy, neither of which a bundle
-      declares.
+      - Cancellation is **refused** once a build reaches `PUBLISHING`, and the recovery is
+        deleting the *content*. **A version-delete endpoint was offered and declined**: it
+        would have to prove nothing is running the version and nothing references its image,
+        which is the live-proxy cleanup race this track deliberately does not open. It
+        remains available to a later track that brings the machinery for it.
+      - A **deadline** is not refused there, so `PUBLISHING` has a `TIMED_OUT` outcome and
+        lease generation fences a late worker out of inserting a `content_version`.
+      - `INTERRUPTED` stays distinct from `FAILED`, because reconciliation can conclude
+        things about a build that ran and broke which it cannot conclude about one the
+        platform lost.
+      - The admin transport's CSRF defence is that **no endpoint accepts a media type an
+        HTML form can produce** — ShinyProxy protects `POST /login` alone — so upload is a
+        raw `application/gzip` `PUT` with a required `X-Skald-Upload` header and explicitly
+        not `multipart/form-data`.
+
+      These are now the source T6's tables and CHECK constraints, the coordinator and T8's
+      controllers are written from. Changing them after this point is a migration and a
+      client break, not an edit.
+
+      **Still open in T1:** the literal safe launch arguments, and nothing else. Q3 closed
+      2026-09-17; image layout wording landed with T1(f) and the semantic validator
+      specification with T1(c). The launch arguments waited on Q2, which was decided
+      2026-09-18 — rootless default plus a runtime seam — so they are now unblocked and are
+      the last thing T1 owes.
 
 - [x] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
@@ -1513,7 +1541,7 @@ below are marked passed by this planning document.
 | Question/risk | Recommendation, decision owner and stop condition |
 |---|---|
 | **Q1 — CLOSED: runnable breadth** | User selected **R and Python Shiny now**. Both are required end to end. T1 selects exact maintained language/tool versions and freezes the two manifest branches; additional version support is an additive catalog choice. Static/API/data behavior remains with its owning track. |
-| **Q2 — DECIDED 2026-09-17, verification pending** | The user takes the systemd route: a `Delegate=cpu cpuset io memory pids` drop-in for `user@.service`, so the user manager can enforce a CPU bound on a rootless worker. T0 found the host delegating only `memory pids`, and the parent slice offering `cpuset cpu io memory hugetlb pids rdma`, so the mechanism exists and was merely switched off. **Not yet verified, and the configuration check is not the proof:** `cgroup.controllers` listing `cpu` says the delegation happened; `systemd-run --user --scope -p CPUQuota=50% sleep 1` succeeding says a quota can be *applied* to a scope. Neither measures **enforcement**, and a sleeping process consumes no CPU, so that command is a preflight and nothing more. T3 still owes a CPU-burning probe against the real worker *and its descendants*, and T5 repeats it independently; a successful preflight does not satisfy either. Record both outputs against this gate before T3 relies on it, labelled as preflight. AppArmor remains unavailable on this host — a fact, not a decision: the profile is confined by user namespaces, seccomp and cgroups, and the write-up must say that rather than listing AppArmor. Privileged mode and a disabled process sandbox remain unaccepted. **Measured 2026-09-18 (T3a) — the premise changed, and the decision above may no longer be needed.** The `user@.service` path T0 read does not exist on this host; this shell's cgroup is `0::/` and the root cgroup already delegates `cpuset cpu io memory hugetlb pids rdma`. More to the point, a worker launched through the **rootful Docker daemon** is bounded by the daemon, not by a user manager, so the `Delegate=` drop-in is moot for that architecture. The CPU-burning probe this row demanded has been run against a container **and its four forked descendants**: `--cpus=0.5` → 0.51 cores, `--cpus=2` → 2.01, unrestricted → 3.99, with memory (SIGKILL at the cap), PIDs (fork blocked at 30 of 32) and a real disk quota measured alongside — `bash dev/validate-sandbox.sh`, 9 of 9 bounds. **What is still the user's call:** whether Skald should nonetheless run workers rootless under the user manager, in which case the drop-in and a repeat of this probe in that mode are both still owed. This note does not retire the decision; it records that the gap it was taken to close is not present on this host. |
+| **Q2 — DECIDED 2026-09-17, verification pending** | The user takes the systemd route: a `Delegate=cpu cpuset io memory pids` drop-in for `user@.service`, so the user manager can enforce a CPU bound on a rootless worker. T0 found the host delegating only `memory pids`, and the parent slice offering `cpuset cpu io memory hugetlb pids rdma`, so the mechanism exists and was merely switched off. **Not yet verified, and the configuration check is not the proof:** `cgroup.controllers` listing `cpu` says the delegation happened; `systemd-run --user --scope -p CPUQuota=50% sleep 1` succeeding says a quota can be *applied* to a scope. Neither measures **enforcement**, and a sleeping process consumes no CPU, so that command is a preflight and nothing more. T3 still owes a CPU-burning probe against the real worker *and its descendants*, and T5 repeats it independently; a successful preflight does not satisfy either. Record both outputs against this gate before T3 relies on it, labelled as preflight. AppArmor remains unavailable on this host — a fact, not a decision: the profile is confined by user namespaces, seccomp and cgroups, and the write-up must say that rather than listing AppArmor. Privileged mode and a disabled process sandbox remain unaccepted. **Measured 2026-09-18 (T3a) — the premise changed, and the decision above may no longer be needed.** The `user@.service` path T0 read does not exist on this host; this shell's cgroup is `0::/` and the root cgroup already delegates `cpuset cpu io memory hugetlb pids rdma`. More to the point, a worker launched through the **rootful Docker daemon** is bounded by the daemon, not by a user manager, so the `Delegate=` drop-in is moot for that architecture. The CPU-burning probe this row demanded has been run against a container **and its four forked descendants**: `--cpus=0.5` → 0.51 cores, `--cpus=2` → 2.01, unrestricted → 3.99, with memory (SIGKILL at the cap), PIDs (fork blocked at 30 of 32) and a real disk quota measured alongside — `bash dev/validate-sandbox.sh`, 9 of 9 bounds. **What is still the user's call:** whether Skald should nonetheless run workers rootless under the user manager, in which case the drop-in and a repeat of this probe in that mode are both still owed. This note does not retire the decision; it records that the gap it was taken to close is not present on this host. **DECIDED 2026-09-18 by the user: rootless stays the default, and the worker runtime becomes a configuration seam (decision 6).** The reasoning, because the premise this row spent two rounds on was the wrong premise: "rootless" answers *does the platform need root to build*, which is a deployment question; it does not answer *what happens when build code defeats the kernel*, which is the tenancy question, and only a separate kernel — gVisor, or a microVM under a hypervisor — answers that. T3(a) measured cgroup bounds, which the rootful daemon supplies either way; it never measured escape, so the measurement retired the CPU-quota argument for rootless and left its actual argument untouched. Against that, the published guidance is equally clear that a hypervisor for builds that all originate from accounts the operator issued is architecture for its own sake, and Skald's publishers authenticate against the operator's own directory. So: rootless by default, seam for the deployments that are not that. **A hard constraint, measured on this host 2026-09-18 and not a matter of effort:** there is no `/dev/kvm` and no `vmx`/`svm` in `/proc/cpuinfo`, so Firecracker and Kata cannot run here at all and a microVM profile cannot be *measured* — and T3/T5 accept measured containment only. gVisor needs no KVM and is provable here, but BuildKit under it fights overlay-on-overlay and wants a tmpfs upper layer, so it is a candidate profile and not a default. **Still owed by the rootless default, unchanged by this decision:** the `Delegate=` drop-in or an equivalent, a repeat of T3(a)'s nine probes in rootless mode, and a replacement for the loop-backed ext4 disk quota, which today is attached by *privileged setup containers* a rootless worker will not have. |
 | **Q3 — CLOSED 2026-09-17** | Four answers, and two of them change the design rather than filling in a number. **(1) Sizes, counts and timeouts are configurable per deployment** with the documented defaults above, so an operator sizes them to their own host; a configured value is validated at startup and a limit may be raised but not removed. **(2) Retention** is decided, and the per-artifact table in "Status, logs, admin transport and cleanup" is the only authoritative statement of it — this row deliberately does not repeat the numbers, because restating them in two places is exactly what produced finding `d4f5baf-F1`. In summary: a published version's bundle and image are pinned until the content is deleted, while logs and failed-attempt artifacts expire. **(3) Package sources are configurable** — default CRAN and PyPI, an operator may point at their own Nexus, Artifactory, Posit Package Manager or a forge-style proxy. The egress rule therefore becomes **deny all except the configured repository hosts**, which is stricter to state and easier to implement than a hard-coded allowlist, and it is what lets a private mirror work without special-casing. R and Python remain the only languages in v1. **(4) System packages are the administrator's**, installed into the base images; a build never installs one. A build that fails for a missing system library **surfaces the build log** and stops there — the publisher takes it to their administrator. A curated error-to-package-name mapping was considered and **rejected as scope**: it can never be complete, and a half-complete lookup that confidently names the wrong package is worse than the compiler's own message. |
 | **Q4 — dependencies and base-image licensing** | Candidate Java additions: Commons Compress (Apache-2.0), networknt JSON Schema Validator (Apache-2.0), AWS SDK for Java v2 S3 (Apache-2.0); BuildKit (Apache-2.0). Flag exact versions/transitives before adding. Check base-image/package license inventory too; R/toolchain images contain their own licenses. Any new GPL/AGPL dependency follows CLAUDE.md's explicit sign-off rule; the presence of dev MinIO is not blanket approval for an AGPL SDK. |
 | Existing ACL decision cache | Keep ACL/visibility mutations out of #2; don't introduce viewer-to-builder authorization via cached `canAccess`. Admin gating remains centralized. #4 still owns revocation/fork question. Test warm sessions as well as fresh ones. |
@@ -1524,6 +1552,21 @@ below are marked passed by this planning document.
 
 External implementation references checked during planning (not proof that Skald meets them):
 
+- Isolation guidance consulted for the **Q2 decision of 2026-09-18**, recorded because the
+  decision turns on what they separate rather than on a number any of them gives:
+  [Firecracker vs gVisor](https://fly.io/learn/firecracker-vs-gvisor/),
+  [Kata vs Firecracker vs gVisor](https://northflank.com/blog/kata-containers-vs-firecracker-vs-gvisor),
+  ["Your container is not a sandbox"](https://emirb.github.io/blog/microvm-2026/) and
+  [untrusted image builds in microVMs](https://www.pandastack.ai/blog/microvm-container-image-builds/).
+  The distinction they draw, and the one this plan adopts: rootless answers whether the
+  platform needs root to build; only a separate kernel answers what happens when build code
+  defeats the shared one. The same sources say a hypervisor is unwarranted where every build
+  comes from an account the operator issued, which is Skald's case. Reading them is not
+  evidence Skald meets anything — T3 and T5 measure that, and the no-KVM constraint on this
+  host bounds what can be measured at all.
+- [Docker in gVisor](https://gvisor.dev/docs/tutorials/docker-in-gvisor/), for why gVisor is
+  a candidate profile and not the default: it needs no KVM, so it is provable on this host,
+  but overlay-on-overlay is refused by Linux and it wants a tmpfs upper layer.
 - [BuildKit rootless requirements and process-sandbox caveats](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
   Its container examples relax security profiles; `--oci-worker-no-process-sandbox` has
   documented process-control/cleanup drawbacks. This is why T3 precedes integration.
