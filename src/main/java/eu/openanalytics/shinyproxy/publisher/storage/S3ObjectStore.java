@@ -34,8 +34,11 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -107,6 +110,124 @@ public class S3ObjectStore implements ObjectStore {
     }
 
     @Override
+    public StoredObject putStreaming(String bucket, String key, InputStream content,
+                                     long declaredLength, String contentType) {
+        MessageDigest digest = newDigest();
+        CountingStream counted = new CountingStream(new DigestInputStream(content, digest));
+        PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(bucket)
+                .key(key)
+                .contentType(contentType)
+                .contentLength(declaredLength)
+                .build();
+        PutObjectResponse response;
+        try {
+            // fromInputStream with an explicit length, so the SDK streams rather than
+            // buffering to discover the size. No metadata digest here: headers are sent
+            // before the body is read, so there is nothing to put in them yet.
+            response = client.putObject(request,
+                    RequestBody.fromInputStream(counted, declaredLength));
+        } catch (S3Exception e) {
+            throw new ObjectStoreException(
+                    "could not write " + bucket + "/" + key + ": " + describe(e), e);
+        } catch (RuntimeException e) {
+            throw new ObjectStoreException("could not write " + bucket + "/" + key, e);
+        }
+        // "Content-Length is a claim, checked against the bytes actually read"
+        // -- spec/admin-transport-v1.json, bundle.upload.
+        //
+        // The two directions are caught by two different mechanisms, and only one of them
+        // is ours:
+        //
+        //   body SHORTER than declared: the SDK runs out of bytes and throws before
+        //     returning, wrapped above as "could not write". Measured: an IllegalStateException
+        //     from the SDK. A count check here would never execute, so there is not one --
+        //     an unreachable branch reads as a control and is not one.
+        //   body LONGER than declared: the SDK stops at exactly declaredLength and every
+        //     count agrees, so nothing looks wrong. A publisher understating Content-Length
+        //     would have stored a silently truncated bundle that every later check accepted.
+        //     The only way to know is to ask the source whether it has more, which is what
+        //     the read below does.
+        //
+        // declaredLengthIsAClaimThatIsChecked pins both directions, so if the SDK ever
+        // stops throwing on a short body that test fails rather than the behaviour changing
+        // quietly.
+        int trailing;
+        try {
+            trailing = counted.read();
+        } catch (IOException e) {
+            throw new ObjectStoreException(
+                    "could not check for trailing bytes after " + bucket + "/" + key, e);
+        }
+        if (trailing != -1) {
+            throw new ObjectStoreException(
+                    "declared length " + declaredLength + " for " + bucket + "/" + key
+                            + " but the body has more bytes than that; the object as stored "
+                            + "is truncated. An upload whose receipt is never committed is "
+                            + "inert and is collected by the incomplete-upload rule.");
+        }
+        return new StoredObject(bucket, key, counted.count(), hex(digest), response.eTag());
+    }
+
+    @Override
+    public StoredObject readVerifiedTo(String bucket, String key, String expectedSha256,
+                                       OutputStream sink) {
+        MessageDigest digest = newDigest();
+        long size = 0;
+        try (InputStream in = open(bucket, key)) {
+            byte[] buffer = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, n);
+                sink.write(buffer, 0, n);
+                size += n;
+            }
+        } catch (IOException e) {
+            throw new ObjectStoreException("could not read " + bucket + "/" + key, e);
+        }
+        String actual = hex(digest);
+        if (!actual.equals(expectedSha256)) {
+            // The sink already holds every byte. Its owner discards it; see the javadoc.
+            throw new ObjectStoreException(
+                    "digest mismatch at " + bucket + "/" + key + ": expected "
+                            + expectedSha256 + ", read " + actual + " over " + size
+                            + " bytes");
+        }
+        return new StoredObject(bucket, key, size, actual, null);
+    }
+
+    /** Counts what was actually read, which is the size recorded for the stored object. */
+    private static final class CountingStream extends FilterInputStream {
+        private long count;
+
+        CountingStream(InputStream in) {
+            super(in);
+        }
+
+        long count() {
+            return count;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b != -1) {
+                count++;
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) {
+                count += n;
+            }
+            return n;
+        }
+    }
+
+    @Override
     public Optional<StoredObject> head(String bucket, String key) {
         try {
             HeadObjectResponse response = client.headObject(
@@ -164,9 +285,16 @@ public class S3ObjectStore implements ObjectStore {
 
     /** Lower-case hex SHA-256, the one spelling the manifest schema's pattern accepts. */
     static String sha256(byte[] content) {
+        return HexFormat.of().formatHex(newDigest().digest(content));
+    }
+
+    private static String hex(MessageDigest digest) {
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static MessageDigest newDigest() {
         try {
-            return HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(content));
+            return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
             // Every JVM is required to provide SHA-256.
             throw new IllegalStateException("SHA-256 is unavailable on this JVM", e);

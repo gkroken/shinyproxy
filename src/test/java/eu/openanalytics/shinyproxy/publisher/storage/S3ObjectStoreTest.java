@@ -37,7 +37,11 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
@@ -76,7 +80,16 @@ class S3ObjectStoreTest {
     static void startMinio() {
         // quay.io, as WORKPLAN-DEVSTACK.md records for the dev stack: Docker Hub's minio
         // image was not usable there.
-        minio = new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio"))
+        //
+        // PINNED, like postgres:16 in every other container test here, and for a sharper
+        // reason: the load-bearing claim of this class is that the STORE enforces
+        // If-None-Match on PutObject, which is a comparatively recent MinIO feature. An
+        // unpinned :latest could change that and either break this suite or, worse, quietly
+        // change what conditionalCreateRefusesTheSecondWriter proves while still passing.
+        // Measured against RELEASE.2025-09-07T16-13-09Z; the digest is what fixes it.
+        minio = new GenericContainer<>(DockerImageName.parse(
+                "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e"
+                        + "708c1e2960462bd8936e"))
                 .withCommand("server", "/data")
                 .withEnv("MINIO_ROOT_USER", USER)
                 .withEnv("MINIO_ROOT_PASSWORD", PASSWORD)
@@ -273,6 +286,140 @@ class S3ObjectStoreTest {
         int status = conn.getResponseCode();
         assertFalse(status >= 200 && status < 300,
                 "an unauthenticated GET returned " + status + "; the bucket is public");
+    }
+
+    @Test
+    @DisplayName("a streamed put never holds the object, and its digest matches")
+    void streamingPutDoesNotBuffer() {
+        // 32 MiB, well past anything a test would hold by accident, and large enough that
+        // the counting below is not measuring noise.
+        int size = 32 * 1024 * 1024;
+        String k = key(ObjectKeys.BUNDLE_ARCHIVE);
+
+        byte[] expected = new byte[size];
+        for (int i = 0; i < size; i++) {
+            expected[i] = (byte) (i * 31);
+        }
+        String expectedDigest = S3ObjectStore.sha256(expected);
+
+        // A source that generates its bytes rather than holding them, so if the store
+        // buffered the whole object it would be the store doing it, not this test.
+        StoredObject written = store.putStreaming(BUCKET, k, generated(size), size,
+                "application/gzip");
+        assertEquals(size, written.size());
+        assertEquals(expectedDigest, written.sha256(),
+                "the digest computed while streaming must equal the digest of the bytes");
+
+        // And back out again without materialising it either.
+        CountingSink sink = new CountingSink();
+        StoredObject read = store.readVerifiedTo(BUCKET, k, expectedDigest, sink);
+        assertEquals(size, read.size());
+        assertEquals(size, sink.count, "every byte must reach the sink");
+        assertEquals(expectedDigest, sink.digestHex(),
+                "the bytes that reached the sink must be the bytes that were stored");
+    }
+
+    @Test
+    @DisplayName("a declared length that does not match the bytes read is refused")
+    void declaredLengthIsAClaimThatIsChecked() {
+        // spec/admin-transport-v1.json, bundle.upload: "Content-Length is a claim, checked
+        // against the bytes actually read." A short body under an honest-looking header is
+        // how a truncated upload becomes a stored object nobody notices.
+        byte[] content = "only twenty-nine bytes here.".getBytes(StandardCharsets.UTF_8);
+
+        // Over-declared: the SDK runs out of bytes and throws first, so this pins the
+        // SDK's behaviour rather than ours. If it ever stops throwing, this fails and the
+        // short-body direction becomes ours to catch.
+        ObjectStoreException tooLong = assertThrows(ObjectStoreException.class,
+                () -> store.putStreaming(BUCKET, key(ObjectKeys.BUNDLE_ARCHIVE),
+                        new ByteArrayInputStream(content), content.length + 100,
+                        "application/gzip"));
+        assertTrue(tooLong.getMessage().contains("could not write"), tooLong.getMessage());
+
+        // The dangerous direction. The SDK stops at exactly the declared length, so the
+        // byte count matches perfectly and only asking the source whether it has more
+        // reveals the truncation. Without that check this stored a short bundle silently.
+        String k = key(ObjectKeys.BUNDLE_ARCHIVE);
+        ObjectStoreException tooShort = assertThrows(ObjectStoreException.class,
+                () -> store.putStreaming(BUCKET, k,
+                        new ByteArrayInputStream(content), content.length - 5,
+                        "application/gzip"));
+        assertTrue(tooShort.getMessage().contains("more bytes than that"),
+                tooShort.getMessage());
+    }
+
+    @Test
+    @DisplayName("a streamed read with the wrong digest fails after the bytes have moved")
+    void streamedReadVerifiesAndSaysSoLate() {
+        byte[] content = "streamed payload".getBytes(StandardCharsets.UTF_8);
+        String k = key(ObjectKeys.BUNDLE_ARCHIVE);
+        store.putStreaming(BUCKET, k, new ByteArrayInputStream(content), content.length,
+                "application/gzip");
+
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        String wrong = S3ObjectStore.sha256("other".getBytes(StandardCharsets.UTF_8));
+        ObjectStoreException e = assertThrows(ObjectStoreException.class,
+                () -> store.readVerifiedTo(BUCKET, k, wrong, sink));
+        assertTrue(e.getMessage().contains("digest mismatch"), e.getMessage());
+        // The documented consequence, asserted rather than only written down: the sink has
+        // the bytes already, which is why its owner must discard it.
+        assertArrayEquals(content, sink.toByteArray(),
+                "the sink is expected to hold the bytes; the caller discards it");
+    }
+
+    /** Generates bytes on demand, so nothing here holds the object being streamed. */
+    private static InputStream generated(int size) {
+        return new InputStream() {
+            private int position;
+
+            @Override
+            public int read() {
+                return position >= size ? -1 : (byte) (position++ * 31) & 0xff;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) {
+                if (position >= size) {
+                    return -1;
+                }
+                int n = Math.min(len, size - position);
+                for (int i = 0; i < n; i++) {
+                    b[off + i] = (byte) ((position + i) * 31);
+                }
+                position += n;
+                return n;
+            }
+        };
+    }
+
+    /** Counts and digests without keeping anything. */
+    private static final class CountingSink extends OutputStream {
+        private final java.security.MessageDigest digest;
+        private long count;
+
+        CountingSink() {
+            try {
+                digest = java.security.MessageDigest.getInstance("SHA-256");
+            } catch (java.security.NoSuchAlgorithmException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        String digestHex() {
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        }
+
+        @Override
+        public void write(int b) {
+            digest.update((byte) b);
+            count++;
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            digest.update(b, off, len);
+            count += len;
+        }
     }
 
     private static String stripQuotes(String etag) {
