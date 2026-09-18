@@ -12,8 +12,9 @@ are accepted. Extraction **and build isolation** require an independent Opus 5 s
 review mid-track, by a session that did not implement them. Neither delegation nor a
 passing author-written suite constitutes that review.
 
-**Who performs it, decided 2026-09-18 by the user: the coding agent and the independent
-reviewer agent, not a human.** See T5 for what that does and does not buy, and for the
+**Who performs it, decided 2026-09-18 by the user: the independent reviewer agent, not a
+human.** The coding agent implements and does **not** perform it; the two-session split in
+`code_review/` is the mechanism. See T5 for what that does and does not buy, and for the
 conditions that make it worth anything.
 
 The LOCKED section distinguishes inherited constraints from decisions made by this plan.
@@ -1390,8 +1391,8 @@ below are marked passed by this planning document.
       A new reviewer/session reads the extractor and sandbox configuration, adds withheld
       archive/escape fixtures and drives T3's live attempts independently. Review all
       security comments against named tests. **Pass:** a completed review with every
-      finding resolved,
-      no skipped isolation probe; same corpus through the upload pipeline once T8 exists.
+      finding resolved, the five conditions below satisfied and recorded, and no skipped
+      isolation probe; same corpus through the upload pipeline once T8 exists.
       Driver/log plumbing may proceed only against reviewed boundaries after this gate.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
@@ -1402,14 +1403,20 @@ below are marked passed by this planning document.
       "signed review", which implied a human signature; it is struck rather than quietly
       redefined to mean something else.
 
-      **What this genuinely provides, on the evidence of T2.** Across fourteen review
-      cycles the reviewer found defects the author had missed, several of them in things
-      the author had just asserted were fixed: an at-limit fixture four bytes over its
-      limit, three predicates comparing against literals instead of the configured limit,
-      a 924 MiB peak a commit had described only in seconds, an oracle check no scenario
-      asserted (three times running), and a claim in a commit message that the workplan
-      said something it did not. It wrote its own extractors, mutations and probes rather
-      than re-running the author's. That is a real control, not a formality.
+      **What this genuinely provides, on the evidence of T2 and T3(a).** Across seventeen
+      review cycles (`29857f7`..`2124414`, ten of them CHANGES_REQUIRED) the reviewer found
+      defects the author had missed, several of them in things the author had just asserted
+      were fixed: an at-limit fixture four bytes over its limit (`29857f7-F1`), four
+      predicates comparing against literals instead of the configured limit (`29857f7-F2`,
+      `29857f7-F3`), a 924 MiB peak a commit had described only in seconds (`6987f01-F1`),
+      an oracle check no scenario asserted, three commits running (`6d7b790-F1`,
+      `64f5dd8-F1`, `3e23732-F1`), and commit messages asserting what was not so — a false
+      timing claim in T2 (`471a50f-F1`) and, in T3(a), a claim that this workplan said
+      something it did not (`7b6e931-F1`). It wrote its own extractors, mutations and probes
+      rather than re-running the author's. That is a real control, not a formality.
+
+      The IDs are here rather than a bare count because this paragraph's whole authority is
+      that its numbers are checkable, and the first draft of it got two of them wrong.
 
       **What it does not provide, and this plan must not pretend otherwise.** It is not an
       external human security review. Both agents share a model and therefore share blind
@@ -1425,12 +1432,21 @@ below are marked passed by this planning document.
         extractor**, and records that it did. Fixtures written afterwards test the
         implementation's own idea of the problem.
       - The review runs in a **fresh session**, not one that watched the extractor being
-        built commit by commit. Incremental familiarity is anchoring.
+        built commit by commit. Incremental familiarity is anchoring. This **disqualifies
+        the standing per-commit reviewer**, which watches the extractor land commit by
+        commit by design (`code_review/README.md`), so the T5 gate is a separately arranged
+        session — and, because its fixtures must predate its reading of the extractor, one
+        arranged *before* T5's implementation commits begin. Who arranges it is not settled
+        here; that it must be arranged in advance is, since a condition nobody schedules is
+        not a control.
       - The reviewer **re-runs T2's corpus and T3's probes itself**, from the committed
         tree, rather than accepting the author's reported output.
       - Every finding class gets a **permanent test**, not a one-off fix. T2 produced the
-        same finding — "a check that nothing checks" — four times running, because each
-        fix closed only the instances that had been named.
+        same finding — "a check that nothing checks" — three commits running
+        (`6d7b790-F1`, `64f5dd8-F1`, `3e23732-F1`), because each fix closed only the
+        instances that had been named. It stopped when the matrix was made to derive its
+        coverage from the kinds the oracle can emit instead of enumerating them (`6024d51`),
+        which is what "permanent test" means here.
       - A review that produces **no findings is itself a finding** at this gate: the
         reviewer states what it attacked and failed to break, rather than reporting
         silence.
