@@ -14,7 +14,12 @@ What this checks, and what it cannot:
   CAN   the cited hash resolves, is an ancestor of HEAD, has a review report,
         and that report contains that finding ID as a finding header.
   CAN   a cited `a..b` range resolves and the commit count matches any "Across
-        <number> review cycles" claim attached to it.
+        <number> review cycles" claim attached to it -- in any spelling, because
+        every such claim is located independently and one this tool did not pair
+        with a range is reported as UNCHECKED rather than passed over. Two
+        spellings have already slipped a pattern that merely matched one shape
+        (`a`..`b`, then a comma for a parenthesis), so coverage is asserted rather
+        than enumerated.
   CANNOT  that the finding *says* what the sentence claims it says. Measured
         against the three defects that prompted this: it catches a0d3ce1-F2 (the
         range count) and MISSES a0d3ce1-F1 and -F3, because both cite a real
@@ -27,9 +32,14 @@ What this checks, and what it cannot:
 Vacuity: the review reports live in code_review/, which is reviewer-owned and
 untracked, so this cannot be wired into a tracked suite that must pass on a
 fresh clone. It is a pre-commit tool, and it EXITS 2 rather than passing when
-the reports are absent or when a document yields no citations at all -- a
-citation checker that silently finds nothing to check is the defect it exists
-to catch. Run it before committing anything that cites a finding ID.
+the reports are absent, when they contain no finding at all, or when the default
+document set yields zero of ANY of the three kinds it looks for -- citations,
+ranges, count claims. Per-kind, because a surviving range vouching for a CITE
+pattern that had quietly stopped matching is exactly the silence this guards
+against. A document named explicitly on the command line is held only to
+"something was examined", since it carries no promise about what it contains.
+Findings are reported before any of that, so a vacuity guard can never pre-empt
+a real one. Run it before committing anything that cites a finding ID.
 
 Usage:  python3 dev/check-citations.py [doc ...]        (default: the workplans)
         python3 dev/check-citations.py --self-test      (proves it can fail)
@@ -57,8 +67,16 @@ WORDS = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
          "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
          "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
          "eighteen": 18, "nineteen": 19, "twenty": 20}
+# A count claim paired with the range that should support it. The separator is
+# deliberately loose, but looseness is NOT the guarantee -- LOOSE_COUNT below finds
+# every count claim however it is written, and any claim this pattern did not pair
+# with a range is reported as unchecked. Widening an alternation is what failed
+# twice already (`a`..`b`, then a comma for a paren); asserting coverage is the fix,
+# in the shape 6024d51 used for the oracle matrix.
 COUNTED_RANGE = re.compile(
-    r"Across (\w+)\s+review\s+cycles\s+\(" + _H + r"\.\." + _H, re.S)
+    r"Across\s+(\w+)\s+review\s+cycles\b[\s(,:-]*" + _H + r"\.\." + _H, re.S)
+# Every count claim, paired or not.
+LOOSE_COUNT = re.compile(r"Across\s+(\w+)\s+review\s+cycles\b")
 
 
 def git(*args):
@@ -108,7 +126,12 @@ def check_doc(path, failures):
         else:
             print(f"  ok   {path.name}: range {a}..{b} = {out} commits")
 
-    for word, a, b in COUNTED_RANGE.findall(text):
+    n_counts = 0
+    paired = set()
+    for m in COUNTED_RANGE.finditer(text):
+        paired.add(m.start())
+        word, a, b = m.group(1), m.group(2), m.group(3)
+        n_counts += 1
         claimed = WORDS.get(word.lower())
         if claimed is None:
             failures.append(f"{path.name}: 'Across {word} review cycles' -- "
@@ -125,29 +148,97 @@ def check_doc(path, failures):
             print(f"  ok   {path.name}: '{word} review cycles' == "
                   f"{out} in {a}..{b}")
 
-    return len(set(cites)), len(set(ranges))
+    # Coverage, not enumeration: a count claim this checker did not pair with a
+    # range is an UNCHECKED claim, and must fail rather than pass in silence.
+    for m in LOOSE_COUNT.finditer(text):
+        if m.start() not in paired:
+            n_counts += 1
+            failures.append(f"{path.name}: 'Across {m.group(1)} review cycles' at "
+                            f"offset {m.start()} -- count claim NOT CHECKED: no "
+                            f"`a..b` range follows it, so nothing verified the number")
+
+    return len(set(cites)), len(set(ranges)), n_counts
+
+
+def _reviewed_commit():
+    """A commit that HAS a review report, so the header branch is reachable.
+
+    The self-test must not key on HEAD: at commit time HEAD has no report (the
+    report is written after the commit), so the case falls to the missing-report
+    branch; once reviewed, the same case reaches the header branch instead. A test
+    that silently changes which branch it exercises depending on when it runs is
+    how f1078e5-F1 happened.
+    """
+    for f in sorted(REVIEWS.glob("*-done.txt")):
+        h = f.name[:-len("-done.txt")]
+        rc, _, _ = git("merge-base", "--is-ancestor", h, "HEAD")
+        if rc == 0 and re.search(r"^[0-9a-f]{7}-F\d+", f.read_text(errors="replace"), re.M):
+            return h
+    return None
+
+
+def _unreviewed_ancestor():
+    """A commit with no review report, for the missing-report branch."""
+    rc, out, _ = git("log", "--format=%H", "-400", "HEAD")
+    for h in out.split():
+        if not (REVIEWS / f"{h}-done.txt").exists():
+            return h
+    return None
 
 
 def self_test():
-    """A green run proves nothing unless a wrong citation turns it red."""
+    """A green run proves nothing unless a wrong citation turns it red.
+
+    Every case asserts WHICH check fired, not merely that something did. Asserting
+    only "it was caught" is what let the finding-header check go uncovered while the
+    self-test reported four of four: the case was being caught two branches earlier
+    (f1078e5-F1).
+    """
     import tempfile
-    print("== self-test: each case must be REPORTED ==")
-    rc, head, _ = git("rev-parse", "HEAD")
+    print("== self-test: each case must be reported FOR THE STATED REASON ==")
+
+    reviewed = _reviewed_commit()
+    unreviewed = _unreviewed_ancestor()
+    if reviewed is None:
+        print("ERROR: no reviewed ancestor with a parseable finding; the "
+              "finding-header branch cannot be exercised.", file=sys.stderr)
+        return 2
+    if unreviewed is None:
+        print("ERROR: every recent commit has a report; the missing-report branch "
+              "cannot be exercised.", file=sys.stderr)
+        return 2
+
     cases = [
-        ("a finding ID that does not exist in a real report",
-         f"see `{head[:7]}-F99` for this"),
+        ("a finding number that does not exist, on a REVIEWED commit",
+         f"see `{reviewed[:7]}-F99` for this",
+         "not a finding in"),
+        ("a citation on a commit with no review report",
+         f"see `{unreviewed[:7]}-F1` for this",
+         "no review report"),
         ("a hash that does not resolve",
-         "see `deadbee-F1` for this"),
-        ("a range whose commit count contradicts its stated number",
-         "Across three review cycles (`3f8bdd2..2124414`, ten of them CR)"),
-        # Regression: the first draft of this checker matched only `a..b` and so
-        # passed a0d3ce1's text verbatim, which is the one text it existed to
-        # reject. Both spellings are checked from here on.
-        ("the same, with each hash separately backticked (a0d3ce1's spelling)",
-         "Across seventeen review cycles (`29857f7`..`2124414`, ten of them CR)"),
+         "see `deadbee-F1` for this",
+         "hash does not resolve"),
+        ("a contradicted count, paren form",
+         "Across three review cycles (`3f8bdd2..2124414`, ten of them CR)",
+         "that range is 17 commits, not 3"),
+        # Regression: the first draft matched only `a..b` and so passed a0d3ce1's
+        # text verbatim -- the one text it existed to reject.
+        ("a contradicted count, each hash separately backticked (a0d3ce1's spelling)",
+         "Across seventeen review cycles (`29857f7`..`2124414`, ten of them CR)",
+         "that range is 16 commits, not 17"),
+        # Regression: f1078e5-F2, a comma where the pattern wanted a parenthesis.
+        ("a contradicted count, comma instead of a paren",
+         "Across seventeen review cycles, `29857f7..2124414`, ten of them CR.",
+         "that range is 16 commits, not 17"),
+        # The coverage assertion: a count claim with no range at all must FAIL,
+        # because nothing verified it. This is the case that makes rewording safe.
+        ("a count claim with no range following it at all",
+         "Across nineteen review cycles the reviewer found things.",
+         "count claim NOT CHECKED"),
     ]
+
     bad = []
-    for label, body in cases:
+    for label, body, expect in cases:
         with tempfile.NamedTemporaryFile("w", suffix=".md", dir=REPO,
                                          delete=False, encoding="utf-8") as fh:
             fh.write(body + "\n")
@@ -155,19 +246,26 @@ def self_test():
         try:
             f = []
             check_doc(tmp, f)
-            if f:
-                print(f"  ok   caught: {label}")
-                for line in f:
-                    print(f"         -> {line}")
-            else:
-                print(f"  FAIL not caught: {label}")
+            if not f:
+                print(f"  FAIL not caught at all: {label}")
                 bad.append(label)
+            elif not any(expect in line for line in f):
+                print(f"  FAIL caught for the WRONG REASON: {label}")
+                print(f"         expected to contain: {expect!r}")
+                for line in f:
+                    print(f"         got: {line}")
+                bad.append(label)
+            else:
+                print(f"  ok   caught, for the stated reason: {label}")
         finally:
             tmp.unlink()
+
     if bad:
-        print(f"\nRESULT: self-test FAILED, {len(bad)} case(s) not caught")
+        print(f"\nRESULT: self-test FAILED, {len(bad)} of {len(cases)} case(s) "
+              f"not caught for their stated reason")
         return 1
-    print("\nRESULT: self-test passed -- the checker can fail")
+    print(f"\nRESULT: self-test passed -- all {len(cases)} cases fail for the "
+          f"reason claimed, so each branch is genuinely covered")
     return 0
 
 
@@ -186,38 +284,63 @@ def main(argv):
               f"report success\n       with nothing to check against.", file=sys.stderr)
         return 2
 
-    docs = [Path(a) for a in argv if not a.startswith("-")] or \
-           [REPO / d for d in DEFAULT_DOCS]
+    explicit = [Path(a) for a in argv if not a.startswith("-")]
+    docs = explicit or [REPO / d for d in DEFAULT_DOCS]
     docs = [d if d.is_absolute() else REPO / d for d in docs]
 
     print(f"== finding citations, against {n_reports} review reports ==")
-    failures, total_cites, total_ranges = [], 0, 0
+    failures, total_cites, total_ranges, total_counts = [], 0, 0, 0
     checked = 0
     for d in docs:
         if not d.exists():
             continue
         checked += 1
-        c, r = check_doc(d, failures)
+        c, r, n = check_doc(d, failures)
         total_cites += c
         total_ranges += r
+        total_counts += n
 
     if checked == 0:
         print("ERROR: none of the named documents exist.", file=sys.stderr)
         return 2
-    if total_cites == 0 and total_ranges == 0:
-        print(f"ERROR: {checked} document(s) read and NOT ONE citation or range "
-              f"found.\n       The citation patterns have almost certainly broken; "
-              f"refusing to pass.", file=sys.stderr)
-        return 2
-
     print(f"\n{total_cites} finding citations, {total_ranges} ranges, "
-          f"{checked} document(s)")
+          f"{total_counts} count claims, {checked} document(s)")
+
+    # Findings first. A vacuity guard that pre-empts a real finding hides the very
+    # thing the run was for -- the first draft of this fix did exactly that, turning
+    # the comma-form probe from "BAD, 16 not seventeen" into a bare exit 2.
     if failures:
         print(f"\nRESULT: {len(failures)} bad citation(s)")
         for f in failures:
             print(f"  BAD  {f}")
         return 1
-    print("RESULT: every cited finding ID exists in the report it names")
+
+    # Only now, and only for the default set: `or` would let one surviving range
+    # vouch for a CITE pattern that had silently stopped matching (f1078e5-F3).
+    # The workplans are known to carry all three kinds, so a zero there means the
+    # pattern broke. An explicitly named document carries no such promise, so it is
+    # held only to "something was examined".
+    if explicit:
+        if total_cites + total_ranges + total_counts == 0:
+            print(f"ERROR: {checked} named document(s) yielded no citation, range or "
+                  f"count claim.\n       Refusing to report success for a set that was "
+                  f"not examined.", file=sys.stderr)
+            return 2
+    else:
+        empty = [name for name, n in (("finding citations", total_cites),
+                                      ("ranges", total_ranges),
+                                      ("count claims", total_counts)) if n == 0]
+        if empty:
+            print(f"ERROR: {checked} document(s) read and NOT ONE of: "
+                  f"{', '.join(empty)}.\n       The workplans carry all three kinds, so a "
+                  f"zero means the pattern broke\n       (or the last such claim was "
+                  f"removed, in which case update this guard deliberately).\n       "
+                  f"Refusing to report success for a set that was not examined.",
+                  file=sys.stderr)
+            return 2
+    # Name what was actually examined. "Everything is fine" is not a result.
+    print(f"RESULT: {total_cites} cited finding IDs exist in the reports they name; "
+          f"{total_counts} count claim(s) checked against {total_ranges} range(s)")
     return 0
 
 
