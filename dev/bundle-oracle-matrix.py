@@ -150,6 +150,21 @@ SCENARIOS = [
      "before this check the guarded extractor wrote three files through the link and "
      "reported accept"),
 
+    ("rename race survived", ["--only", "bomb-entries-at-limit", "--repeat", "8",
+                              "--rename-race"], "clean",
+     "a directory inside the root is swapped for a symlink pointing out of it, over and "
+     "over, while the subject writes 400 files into it. Either decision is acceptable "
+     "under a race -- refusing is correct and finishing is correct -- so only "
+     "containment is judged, and a run where the racer never swapped is a failure "
+     "rather than a pass"),
+
+    ("rename race followed", ["--only", "bomb-entries-at-limit", "--repeat", "8",
+                              "--rename-race", "--", "--without", "path"],
+     [("bomb-entries-at-limit", "outside-root-change")],
+     "the same race against the path guard removed. Without this the row above would be "
+     "a negative result from a window that might never open; with it, the window is "
+     "known to be reachable"),
+
     ("unrecognised decision", ["--only", "pos-r-root",
                                "--extractor", DEGENERATE, "--", "--mode", "nonsense"],
      [("pos-r-root", "bad-decision")],

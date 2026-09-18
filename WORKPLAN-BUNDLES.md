@@ -1045,7 +1045,7 @@ below are marked passed by this planning document.
       configuration and the repository set in deployment policy, neither of which a bundle
       declares.
 
-- [~] **T2. Author the adversarial corpus independently — before extractor code.**
+- [x] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above
       without production validation helpers. Store fixture generator, hashes and expectations.
       Test the oracle against a deliberately unsafe disposable extractor and a deliberately
@@ -1228,7 +1228,7 @@ below are marked passed by this planning document.
         `--full` uses the defaults.
 
       - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
-        and `dev/validate-oracle-matrix.sh` hand the oracle eighteen subjects, each
+        and `dev/validate-oracle-matrix.sh` hand the oracle twenty subjects, each
         wrong in one specific way, and assert *which* finding comes back on *which*
         fixture — not that something failed, which an oracle failing everything for the
         wrong reason would satisfy. ~87s.
@@ -1275,8 +1275,29 @@ below are marked passed by this planning document.
         `via-symlink-target` and reported **accept**. It now refuses the root up front,
         and `O_NOFOLLOW` covers the root itself and not only the components below it.
 
-      Still owed for T2: the rename race during extraction. It is the plan's last links
-      case, is not expressible in archive bytes, and needs a concurrency harness.
+      - **The rename race** (2026-09-18), T2's last case. `--rename-race` swaps a
+        directory inside the root for a symlink pointing out of it, over and over, while
+        the subject writes 400 files into it — the classic time-of-check/time-of-use:
+        every path the extractor validated was fine, and by the time it opens the parent
+        the parent is a link. Under a race **either decision is acceptable** — refusing
+        is correct and finishing is correct — so only containment is judged.
+      - A negative result from a race is worth nothing on its own, so two things back it:
+        a run where the racer never swapped is reported as a **failure**, not a pass, and
+        the same race against `--without path` must escape. It does, 32 outside-root
+        changes over 8 repeats, stable across five consecutive suite runs. The guarded
+        extractor survives 8 of 8 — it walks with `O_NOFOLLOW` at every component, so it
+        either wins or fails closed.
+      - Finding the racer's own bug is the point worth keeping: it first raced
+        `<root>/www` only, and an extractor with the path guard removed does not strip
+        the payload root, so it writes `<root>/app/www`. The *vulnerable* variant was
+        never raced at all, and its clean run read as a pass. It now races both spellings.
+
+      **T2 is done.** One thing in the plan's links row is not verifiable and is not
+      claimed: "reject without outside **reads**". Reads are only observable through
+      atime, and the default relatime mount makes them invisible once the harness has
+      taken its own picture — the sentinels measure and report this rather than asserting
+      silence. Verifying it needs syscall tracing of the extractor, which belongs with
+      the extractor at T5.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,

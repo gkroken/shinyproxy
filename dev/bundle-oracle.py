@@ -14,6 +14,10 @@ the outcome was acceptable -- which is more than "did the return code match":
     budget -- so a bomb that is "rejected" only after filling the disk still fails
   * with `--symlinked-root`, that it fails closed when its root is a symlink rather than
     a directory -- which is not a property of any archive, so no fixture can express it
+  * with `--rename-race`, that a directory swapped for a symlink WHILE it is extracting
+    does not take anything outside the root with it. Under a race either decision is
+    acceptable -- refusing is correct and finishing is correct -- so only containment is
+    judged
 
 It imports no Skald class and no extractor. The extractor is a subprocess named by
 `--extractor`, so the same oracle judges the real one at T5 by being pointed at it.
@@ -26,6 +30,7 @@ Usage:
     python3 dev/bundle-oracle.py [--full] [--keep] [--json] [--only FIXTURE]
                                  [--deadline SECONDS] [--disk-budget BYTES]
                                  [--extractor PATH] [--symlinked-root]
+                                 [--rename-race] [--repeat N]
     python3 dev/bundle-oracle.py --kinds
                                  [-- EXTRACTOR ARGS...]
 
@@ -49,7 +54,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import tempfile
+import threading
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -116,6 +121,62 @@ def tree_bytes(path):
     return total
 
 
+class Racer(threading.Thread):
+    """Swap `<root>/www` between a real directory and a symlink pointing outside.
+
+    The classic time-of-check/time-of-use against an extractor: every path it validated
+    was fine, and by the time it opens the parent the parent is a link. An extractor that
+    walks with O_NOFOLLOW at each component either wins or fails closed; one that resolves
+    a path and then opens it writes through the link.
+
+    Deliberately crude -- a tight loop rather than a synchronised handoff -- because a
+    synchronised race tests the synchronisation. The caller repeats the fixture so that a
+    window missed once is not read as a window that cannot be hit.
+    """
+
+    def __init__(self, root, outside):
+        super().__init__(daemon=True)
+        self.root, self.outside, self.running = pathlib.Path(root), outside, True
+        self.swaps = 0
+        # Both spellings, because they are not the same subject. A guarded extractor
+        # strips the payload root and writes <root>/www; one with the path guard removed
+        # does not, and writes <root>/app/www. Racing only the first meant the VULNERABLE
+        # variant was never raced at all, and its clean run was mistaken for a pass.
+        self.targets = [self.root / "www", self.root / "app" / "www"]
+
+    def stop(self):
+        self.running = False
+        self.join(timeout=5)
+
+    def run(self):
+        while self.running:
+            for target in self.targets:
+                if not self.running:
+                    break
+                self.swap(target)
+
+    def swap(self, target):
+        stash = target.parent / (".racer-stash-" + target.name)
+        try:
+            if target.is_dir() and not target.is_symlink():
+                os.rename(target, stash)
+                os.symlink(self.outside, target)
+                self.swaps += 1
+                time.sleep(0.0005)
+                os.unlink(target)
+                os.rename(stash, target)
+        except OSError:
+            # The subject is writing underneath us; a lost race here is expected and is
+            # not what is being measured. What must never be left behind is the symlink.
+            try:
+                if target.is_symlink():
+                    os.unlink(target)
+                if stash.exists() and not target.exists():
+                    os.rename(stash, target)
+            except OSError:
+                pass
+
+
 def judge(fixture, world, root_path, expect, verdict, before, after, elapsed,
           timed_out, budget):
     """Everything that has to be true, not only the decision."""
@@ -132,6 +193,8 @@ def judge(fixture, world, root_path, expect, verdict, before, after, elapsed,
         # corpus of negatives passes without anything working.
         out.append(Failure("crash", "%s: %s" % (verdict.get("rule"),
                                                 verdict.get("reason", "")[:70])))
+    elif expect is None:
+        pass          # a raced run: any decision is acceptable, containment is not
     elif verdict.get("decision") not in ("accept", "reject"):
         # A subject defect, reported as one. Building Failure("unexpected-" + decision)
         # here made an unrecognised decision string violate the oracle's own KINDS assert
@@ -155,7 +218,7 @@ def judge(fixture, world, root_path, expect, verdict, before, after, elapsed,
         out.append(Failure("over-disk-budget", "%d bytes written, budget %d"
                            % (written, budget)))
 
-    if verdict and verdict.get("decision") == "reject":
+    if verdict and verdict.get("decision") == "reject" and expect is not None:
         residue = sorted(p.name for p in root_path.iterdir()) if root_path.is_dir() else []
         if residue:
             out.append(Failure("residue", "root not emptied: %s" % residue[:4]))
@@ -227,6 +290,11 @@ def run(argv):
     # member still lands wherever the link points. The contract says fail closed, so in
     # this mode every fixture -- positives included -- must be rejected.
     symlinked_root = "--symlinked-root" in argv
+    # Swap a directory inside the root for a symlink pointing OUT of it, over and over,
+    # while the subject is writing into it. The plan's last links case, and like the
+    # symlinked root it is a property of the world rather than of any archive.
+    rename_race = "--rename-race" in argv
+    repeat = int(argv[argv.index("--repeat") + 1]) if "--repeat" in argv else 1
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     head = argv[:argv.index("--")] if "--" in argv else argv
     extractor = pathlib.Path(head[head.index("--extractor") + 1]) \
@@ -255,6 +323,9 @@ def run(argv):
         if not fixtures:
             print("  FAIL no fixture named %r" % only)
             return 1
+    # Each repeat gets its own world. A race that only sometimes hits its window has to
+    # be given more than one chance, and a single clean run would prove nothing.
+    fixtures = fixtures * repeat
     if deadline_override is not None:
         limits["extraction_deadline_seconds"] = deadline_override
     budget = (budget_override if budget_override is not None
@@ -286,13 +357,21 @@ def run(argv):
         shutil.rmtree(here, ignore_errors=True)
         world = World(here)
         root_path = world.path / "via-symlink" if symlinked_root else world.root
-        expect = "reject" if symlinked_root else f["expect"]
+        # expect None means "either decision is acceptable". Under a hostile concurrent
+        # rename, refusing is correct and finishing is correct; escaping never is, so
+        # containment is the only thing judged.
+        expect = None if rename_race else (
+            "reject" if symlinked_root else f["expect"])
         archive = corpus / (f["name"] + ".tar.gz")
         watched = world.watched()
         before = snapshot(watched)
         cmd = [sys.executable, str(extractor), "--root", str(root_path),
                "--archive", str(archive), "--limits", json.dumps(limits)] + extra
         started, timed_out, verdict = time.time(), False, None
+        racer = Racer(root_path, world.path / "neighbour") if rename_race else None
+        swaps = 0
+        if racer:
+            racer.start()
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=deadline)
             try:
@@ -301,10 +380,21 @@ def run(argv):
                 verdict = None
         except subprocess.TimeoutExpired:
             timed_out = True
+        finally:
+            if racer:
+                racer.stop()
+                swaps = racer.swaps
         elapsed = time.time() - started
         after = snapshot(watched)
         bad, written = judge(f, world, root_path, expect, verdict, before, after,
                              elapsed, timed_out, budget)
+        if rename_race and swaps == 0:
+            # A race that never swapped is not a race. Reported as a failure rather than
+            # a clean run, because "no escape observed" from a window that never opened
+            # is exactly the result this whole suite exists to refuse.
+            bad = list(bad) + [Failure("no-verdict",
+                                       "the racer never swapped anything; this run "
+                                       "raced nothing and proves nothing")]
         if bad:
             failures += 1
             for b in bad:
