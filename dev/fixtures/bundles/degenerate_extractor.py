@@ -28,6 +28,9 @@ Modes:
   setuid           accepts and sets 04755 on an extracted file. The corpus rejects
                    setuid members in the archive; this is the same outcome arriving by
                    the extractor's own hand.
+  nonsense         prints a decision that is none of accept, reject or crash. The oracle
+                   has to report that as a finding about the SUBJECT, not fall over with
+                   an error about its own vocabulary.
 """
 
 import getopt
@@ -63,6 +66,9 @@ def main(argv):
         print(json.dumps({"decision": "reject", "rule": "always", "reason": ""}))
         return 0
     if mode == "silent":
+        return 0
+    if mode == "nonsense":
+        print(json.dumps({"decision": "maybe", "rule": "", "reason": ""}))
         return 0
     if mode == "slow":
         time.sleep((limits.get("extraction_deadline_seconds", 60) * 2) + 30)

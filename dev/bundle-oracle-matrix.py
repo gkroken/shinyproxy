@@ -138,6 +138,13 @@ SCENARIOS = [
      [("pos-r-root", "wrong-output")],
      "accepting is not enough: the tree has to be the one the manifest described"),
 
+    ("unrecognised decision", ["--only", "pos-r-root",
+                               "--extractor", DEGENERATE, "--", "--mode", "nonsense"],
+     [("pos-r-root", "bad-decision")],
+     "a decision string that is none of the three. A subject defect must be reported as "
+     "one; aborting the run with an error about the oracle's own vocabulary loses the "
+     "other 89 verdicts and says nothing about the subject"),
+
     ("accepted with a setuid bit", ["--only", "pos-r-root",
                                     "--extractor", DEGENERATE, "--", "--mode", "setuid"],
      [("pos-r-root", "privileged-mode")],

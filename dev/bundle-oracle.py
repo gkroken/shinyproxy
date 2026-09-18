@@ -81,6 +81,7 @@ KINDS = (
     "timeout",               # the subject never finished inside the outer deadline
     "no-verdict",            # it printed nothing parseable: silence is not a decision
     "crash",                 # it fell over: also not a decision
+    "bad-decision",          # it said something that is none of the three
     "unexpected-accept",     # the corpus said reject
     "unexpected-reject",     # the corpus said accept -- what positive controls are for
     "outside-root-change",   # a sentinel moved
@@ -128,6 +129,15 @@ def judge(fixture, world, verdict, before, after, elapsed, limits, timed_out, bu
         # corpus of negatives passes without anything working.
         out.append(Failure("crash", "%s: %s" % (verdict.get("rule"),
                                                 verdict.get("reason", "")[:70])))
+    elif verdict.get("decision") not in ("accept", "reject"):
+        # A subject defect, reported as one. Building Failure("unexpected-" + decision)
+        # here made an unrecognised decision string violate the oracle's own KINDS assert
+        # and abort the whole run with a traceback about its internals, losing the other
+        # 89 verdicts (finding 6024d51-F1). At T5 the subject is a different
+        # implementation and a drifting decision string is exactly what this should
+        # report, not die on.
+        out.append(Failure("bad-decision", "decision %r is not accept, reject or crash"
+                           % (verdict.get("decision"),)))
     elif verdict["decision"] != fixture["expect"]:
         out.append(Failure("unexpected-" + verdict["decision"],
                            "expected %s; %s" % (fixture["expect"],
@@ -258,7 +268,13 @@ def run(argv):
 
     failures, kinds, worst, records = 0, {}, [], []
     for i, f in enumerate(fixtures):
-        world = World(base / ("w%03d" % i))
+        # A previous run that died mid-fixture leaves its world behind, and World()
+        # refuses to reuse a directory. Without this, one crash cascades: every later
+        # scenario in the same container fails with FileExistsError and reports "the
+        # oracle did not run", which hides whatever the real failure was.
+        here = base / ("w%03d" % i)
+        shutil.rmtree(here, ignore_errors=True)
+        world = World(here)
         archive = corpus / (f["name"] + ".tar.gz")
         watched = world.watched()
         before = snapshot(watched)

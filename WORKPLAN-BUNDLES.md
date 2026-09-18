@@ -1228,7 +1228,7 @@ below are marked passed by this planning document.
         `--full` uses the defaults.
 
       - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
-        and `dev/validate-oracle-matrix.sh` hand the oracle fifteen subjects, each
+        and `dev/validate-oracle-matrix.sh` hand the oracle sixteen subjects, each
         wrong in one specific way, and assert *which* finding comes back on *which*
         fixture — not that something failed, which an oracle failing everything for the
         wrong reason would satisfy. ~87s.
@@ -1248,7 +1248,7 @@ below are marked passed by this planning document.
         matrices, and the reason the limit-bypass and duplicate-overwrite scenarios
         remove two guards: to isolate the guard under test, not to inflate the numbers.
       - **Coverage is by construction, not by enumeration.** The oracle declares the
-        twelve finding kinds it can emit in one list and asserts it never emits an
+        thirteen finding kinds it can emit in one list and asserts it never emits an
         undeclared one; the matrix compares that list against the kinds its own
         scenarios assert and fails on any it does not police. Three commits in a row
         were corrected for "a check that nothing checks" (64f5dd8-F1, 3e23732-F1), each
