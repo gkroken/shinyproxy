@@ -275,7 +275,11 @@ class ObjectKeysTest {
         // behaviour AND the thing that makes "does not rewrite" testable.
         for (String accepted : new String[]{nfc, "report.html", "a file with spaces.html",
                 "100%.html", "plus+and&amp.html", "\u65e5\u672c\u8a9e/x.html",
-                " leading-space.html", "trailing-space.html ", "inner dir /file.html"}) {
+                " leading-space.html", "trailing-space.html ", "inner dir /file.html",
+                // Upper case, so this assertion catches case folding on its own rather
+                // than leaning on caseCollisionsAreLeftToTheFileListOwner to catch it
+                // (the c49725a review's standing note).
+                "Report.html"}) {
             assertEquals(accepted, ObjectKeys.validatedRenditionPath(accepted),
                     "the validator altered a path it accepted: " + quoted(accepted));
         }
