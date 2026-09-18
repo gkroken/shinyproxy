@@ -39,6 +39,7 @@
         <handlebars.version>4.7.9</handlebars.version>
         <sqlite-jdbc.version>3.50.3.0</sqlite-jdbc.version>
         <commons-lang.version>3.18.0</commons-lang.version>
+        <aws-sdk.version>2.31.21</aws-sdk.version>
         <!-- Plugin versions -->
         <maven.license-plugin.version>4.6</maven.license-plugin.version>
         <maven.build-helper-maven.plugin.version>3.6.0</maven.build-helper-maven.plugin.version>
@@ -146,6 +147,42 @@
              per-database support out of flyway-core.
              The PostgreSQL driver, spring-boot-starter-jdbc and HikariCP are already on the
              compile classpath transitively through containerproxy. -->
+        <!-- Skald: S3-compatible object storage for bundles, build logs and rendered
+             output (ADR-0007, spine #2 T4). Apache License 2.0, as is every artifact it
+             resolves; flagged under Q4 before adding.
+
+             VERSION IS PINNED TO THE ENGINE'S, NOT TO THE NEWEST. ContainerProxy 1.2.4
+             already puts the AWS SDK on this classpath: sso, sts, ecs and their protocol
+             modules arrive transitively at 2.31.21. Declaring s3 at the then-latest 2.55.0
+             produced a MIXED-VERSION classpath, with 2.55.0 sdk-core underneath 2.31.21
+             service modules that were compiled against 2.31.21. AWS publishes a BOM
+             precisely to stop that, and mixing 2.x module versions is unsupported.
+             Matching 2.31.21 keeps all 34 awssdk artifacts on one version and changes
+             nothing the engine ships. AwsSdkClasspathTest fails if that ever stops holding.
+
+             Upgrading the whole set to a newer SDK is a separate decision, because it
+             changes what ContainerProxy runs with and not only what Skald runs with.
+
+             NO EXCLUSIONS, deliberately. An earlier revision excluded netty-nio-client and
+             apache-client from this dependency with a rationale about avoiding a second
+             Netty. Both claims were wrong and were removed after measuring: Netty is
+             already present via spring-boot-starter-reactor-netty, and those two HTTP
+             clients arrive through ContainerProxy's sso rather than through s3, so
+             excluding them here changed the resolved list not at all. The classpath
+             therefore carries several HTTP implementations and the SDK's runtime discovery
+             is ambiguous, so the client is selected EXPLICITLY in code. That is the fix;
+             an exclusion that resolves to nothing is not. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws-sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${aws-sdk.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
