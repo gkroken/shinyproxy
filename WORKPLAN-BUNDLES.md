@@ -1164,9 +1164,29 @@ below are marked passed by this planning document.
         and costs exactly its own length. The N+1 half is the same payload with one more
         byte of filename, which is what makes it a true pair.
 
-      Still owed for T2(b): the oracle, the outside-root sentinel harness, the deliberately
-      unsafe disposable extractor and the unbounded variant. That is what the Pass line
-      turns on.
+      - **The outside-root sentinels** (2026-09-18), `dev/bundle-sentinels.py` and
+        `dev/validate-sentinels.sh`. A disposable world — a private extraction root, a
+        pre-created file where a relative traversal lands, a symlinked root, an ordinary
+        sibling — plus a snapshot/diff over it and over the absolute targets the corpus
+        actually names (`/etc/passwd`, `/etc/skald-escape.txt`, `/tmp/escape.txt`). No
+        extractor is involved; it photographs the world, lets something else run, and
+        photographs it again.
+      - The suite's job is to prove the harness **can fail**. It performs each change it
+        claims to detect — overwrite, create, delete, re-mode, retarget a symlink,
+        replace a file with a directory, write through a symlinked root — and asserts the
+        diff reports it. Three things it refuses to fake: a walk that hits its bound
+        raises instead of returning a shorter snapshot; a sentinel target this process
+        cannot write to is reported WEAK and fails the run, because watching an
+        unwritable path reports "unchanged" forever; and read detection is *measured*
+        (does atime move on this filesystem?) rather than claimed.
+      - It therefore runs as root in a disposable container with `--network none` and the
+        repository mounted read-only. Unprivileged, the same suite exits 1 with "2
+        sentinel target(s) this process cannot touch, so watching them proves nothing" —
+        verified both ways.
+
+      Still owed for T2(b): the oracle that judges an extraction against the corpus and
+      these sentinels, the deliberately unsafe disposable extractor and the unbounded
+      variant. That is what the Pass line turns on.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,
