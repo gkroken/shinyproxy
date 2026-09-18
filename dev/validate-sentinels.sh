@@ -19,4 +19,4 @@ IMAGE="${BUNDLE_CORPUS_IMAGE:-python:3.12-slim}"
 
 echo "== outside-root sentinels =="
 docker run --rm --user 0:0 --network none -v "$PWD":/ws:ro -w /ws -e HOME=/tmp "$IMAGE" \
-    python dev/bundle-sentinels.py --self-test
+    python dev/bundle_sentinels.py --self-test

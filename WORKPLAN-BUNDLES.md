@@ -1197,9 +1197,39 @@ below are marked passed by this planning document.
         sentinel target(s) this process cannot touch, so watching them proves nothing" —
         verified both ways.
 
-      Still owed for T2(b): the oracle that judges an extraction against the corpus and
-      these sentinels, the deliberately unsafe disposable extractor and the unbounded
-      variant. That is what the Pass line turns on.
+      - **The oracle and the disposable extractor** (2026-09-18).
+        `dev/fixtures/bundles/disposable_extractor.py` is test scaffolding — clearly
+        labelled, standard library only, no shared code with the corpus checker, because
+        the checker is the inspector and this is the subject. It has seven removable
+        guards (`--without path|types|duplicates|limits|framing|pax|manifest`), plus
+        `--unsafe`, which is `tarfile.extractall(filter="fully_trusted")` and really does
+        write to `/etc` and through symlinks.
+      - The corpus immediately earned its keep: a tarfile-only extractor **accepts**
+        `bomb-bad-checksum` and `bomb-declared-size-negative` (tarfile reads an
+        unparseable header as the end of the archive and returns cleanly — "a lenient
+        parser may skip past into attacker-chosen bytes", silently, as an accept),
+        accepts `bomb-huge-pax-field` (tarfile never reports an extended header's own
+        size), accepts `trav-pax-override` (it does not apply that override, so the
+        *effective* path is never checked) and crashes on `path-invalid-utf8`. That is
+        the plan's "any library unable to expose these distinctions is unsuitable without
+        an outer validator", demonstrated rather than assumed — the extractor now walks
+        the raw 512-byte headers itself before tarfile sees them.
+      - `dev/bundle-oracle.py` extracts every fixture for real, in a fresh world, and
+        judges more than the return code: the decision matches the corpus, a **crash is
+        never a rejection**, nothing outside the root moved, a rejected bundle left an
+        empty root, an accepted bundle produced its declared inventory byte for byte with
+        no extra files and no privileged modes, and the run stayed inside an outer
+        deadline and disk budget. It imports no extractor — the extractor is a subprocess
+        named on the command line, so the same oracle judges the real one at T5.
+      - It runs a **reduced limit profile** by default (`generate.py --limit k=v`, which
+        refuses to write expectations so the committed ones can only describe the
+        documented defaults). At the defaults the bombs alone write about three gigabytes
+        per pass; the boundary properties are parameterised, so they hold at any profile.
+        `--full` uses the defaults.
+
+      Still owed for T2(b): the guard-removal matrix as a policed suite rather than a
+      one-off run, and the unbounded variant under outer limits. That is what the Pass
+      line turns on.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,

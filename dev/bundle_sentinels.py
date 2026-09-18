@@ -20,9 +20,12 @@ Three things it must not be, because each would make it look like it works:
      harness measures whether atime moves on this filesystem and says so, rather than
      reporting "no reads" from a clock that never ticks.
 
+Named with underscores, unlike the other dev scripts, because the oracle imports it:
+it is a module as well as a command.
+
 Usage:
-    python3 dev/bundle-sentinels.py --self-test        # prove the harness can fail
-    python3 dev/bundle-sentinels.py --describe <dir>   # build a world, print its layout
+    python3 dev/bundle_sentinels.py --self-test        # prove the harness can fail
+    python3 dev/bundle_sentinels.py --describe <dir>   # build a world, print its layout
 """
 
 import hashlib
