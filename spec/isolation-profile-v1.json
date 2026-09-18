@@ -1,0 +1,172 @@
+{
+  "note": "The literal launch arguments a build worker is started with, and the runtime seam decision 6 requires. Not a JSON Schema and not under schemas/, for the reason recorded in spec/lifecycle-v1.json. T1 fixes the shape; T3 measures each runtime; T7 writes the driver from this file. Every bound here names the probe in dev/sandbox-probe.py that demonstrates it, and dev/schema-fixture-check.py requires that correspondence in BOTH directions -- a bound whose probe does not exist, and a probe no bound claims, are each a failure. That is the whole point of the file: a launch argument nobody measured is a sentence, not a bound.",
+  "layout_version": 1,
+
+  "seam": {
+    "decision": "Decided 2026-09-18 by the user; recorded in LOCKED decision 6 and the Q2 row of WORKPLAN-BUNDLES.md.",
+    "shape": "The launcher selects a runtime and is handed ONE profile object. It does not assemble flags from scattered constants, because a scattered flag is one an operator can drop without the profile changing.",
+    "default_runtime": "runc-rootless",
+    "refuse_to_start": "A runtime that cannot enforce every required bound in the selected profile MUST refuse to start the worker. It may not start it with the bounds it does have. A seam that silently degrades turns the profile from a description of a state into a description of an intention -- and 'we run rootless' then becomes a sentence nobody has checked in a year.",
+    "selectable_rule": "A runtime is selectable ONLY when status is 'measured' and its enforces list covers every required bound. Anything else is selectable: false, including the default. This is not pessimism: T3 has measured one runtime, and decision 6's gate says the production driver connects only after T3/T5 pass. The file therefore says what is true today rather than what is intended.",
+
+    "runtimes": {
+      "runc-rootful": {
+        "status": "measured",
+        "selectable": true,
+        "measured_by": "dev/validate-sandbox.sh",
+        "measured_on": "2026-09-18",
+        "enforces": [
+          "cpu quota",
+          "memory limit",
+          "pid limit",
+          "no-new-privileges",
+          "read-only rootfs",
+          "sized tmpfs",
+          "loop-backed volume",
+          "network none",
+          "seccomp"
+        ],
+        "note": "What T3(a) actually measured, 9 of 9. It is NOT the shipping default: an escape from a rootful worker lands as host UID 0, and this host has no AppArmor behind that. Recorded as selectable because it is the one runtime whose bounds are demonstrated, and because a file that marks every runtime unselectable would be a file nobody can act on."
+      },
+      "runc-rootless": {
+        "status": "unmeasured",
+        "selectable": false,
+        "enforces": [],
+        "owes": [
+          "repeat all nine probes in rootless mode; the rootful measurements do not transfer, because the enforcing agent changes",
+          "a Delegate= drop-in for the user manager, or evidence that the root cgroup's existing delegation reaches a rootless worker",
+          "a replacement for the loop-backed ext4 quota, which today is attached by privileged setup containers a rootless worker will not have"
+        ],
+        "note": "Decision 6's intended default and the user's 2026-09-18 choice. Unmeasured is not a criticism of the choice; it is the state of the evidence, and selectable: false is what stops the intention being mistaken for the measurement."
+      },
+      "runsc": {
+        "status": "candidate",
+        "selectable": false,
+        "enforces": [],
+        "owes": [
+          "measure all nine probes under runsc",
+          "resolve BuildKit's overlay-on-overlay: Linux refuses overlay atop overlay and gVisor wants a tmpfs upper layer"
+        ],
+        "note": "gVisor. The one stronger boundary that is PROVABLE on this host, because it needs no KVM. A candidate profile for deployments whose publisher population is wider than the account-issuance argument covers."
+      },
+      "kata": {
+        "status": "unavailable-on-this-host",
+        "selectable": false,
+        "enforces": [],
+        "owes": [
+          "a host that exposes /dev/kvm; nothing else can be attempted here"
+        ],
+        "note": "Stands for any microVM runtime, Kata or Firecracker. Measured 2026-09-18: no /dev/kvm, and /proc/cpuinfo reports no vmx/svm. This is a capability the machine does not have, not an amount of work, and T3/T5 accept measured containment only -- so no microVM profile can be proven here at all."
+      }
+    }
+  },
+
+  "profiles": {
+    "build-worker": {
+      "description": "One disposable worker per build attempt, running a publisher's dependency install and application build. Every argument below is literal and every bound is proved by a named probe.",
+      "bounds": {
+        "cpu": {
+          "argument": "--cpus=<cpu_quota>",
+          "probe": "cpu quota",
+          "configurable": true,
+          "enforced_by": "cgroup v2 cpu.max, applied by the runtime",
+          "why": "A build that spins every core is a denial of service against the content already running on this host, which is the same host."
+        },
+        "memory": {
+          "argument": "--memory=<memory_limit>",
+          "probe": "memory limit",
+          "configurable": true,
+          "enforced_by": "cgroup v2 memory.max; the kernel OOM-kills an overrun",
+          "why": "A dependency resolver is the most memory-hungry thing in a build and the easiest to make hungry on purpose."
+        },
+        "pids": {
+          "argument": "--pids-limit=<pid_limit>",
+          "probe": "pid limit",
+          "configurable": true,
+          "enforced_by": "cgroup v2 pids.max; fork blocks at the limit",
+          "why": "A fork bomb needs no exploit and no privilege."
+        },
+        "no_new_privileges": {
+          "argument": "--security-opt=no-new-privileges",
+          "probe": "no-new-privileges",
+          "configurable": false,
+          "enforced_by": "PR_SET_NO_NEW_PRIVS on the worker process and every descendant",
+          "why": "A setuid binary inside a publisher's own base layer is otherwise a privilege escalation the platform handed over itself."
+        },
+        "read_only_rootfs": {
+          "argument": "--read-only",
+          "probe": "read-only rootfs",
+          "configurable": false,
+          "enforced_by": "the runtime mounts the container root read-only",
+          "why": "It is what makes the two writable mounts below the ONLY writable paths, which is what makes their quotas the disk quota rather than one of several."
+        },
+        "scratch": {
+          "argument": "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=<tmpfs_size>",
+          "probe": "sized tmpfs",
+          "configurable": true,
+          "enforced_by": "tmpfs size=, refusing writes past the cap",
+          "why": "Scratch has to exist under a read-only root. noexec is not decoration: /tmp is where a downloaded payload lands."
+        },
+        "workspace": {
+          "argument": "--volume=<quota_volume>:/workspace",
+          "probe": "loop-backed volume",
+          "configurable": true,
+          "enforced_by": "an ext4 filesystem on a sparse loop-backed image, sized at creation",
+          "why": "A real quota, and the answer to --storage-opt size being refused on overlay2/extfs. The worker receives the VOLUME and never the device; the privileged setup container that attaches it is the trusted launcher's, not the worker's."
+        },
+        "network": {
+          "argument": "--network=<egress_network>",
+          "probe": "network none",
+          "configurable": true,
+          "enforced_by": "a Docker network with no route off-host except the configured egress gateway; `none` is the measured floor",
+          "why": "Q3 set the rule as deny-all except the configured repository hosts. `--network none` is what the probe demonstrates and is the floor the gateway is measured against; the gateway itself is T3's remaining work and is NOT proved by this bound."
+        },
+        "seccomp": {
+          "argument": "--security-opt=seccomp=<seccomp_profile>",
+          "probe": "seccomp",
+          "configurable": true,
+          "enforced_by": "a seccomp BPF filter applied by the runtime",
+          "why": "With AppArmor unavailable here, seccomp and user namespaces are the confinement. That is a reason to state it precisely, not loosely."
+        }
+      },
+
+      "forbidden_arguments": [
+        "--privileged",
+        "--cap-add",
+        "--security-opt=seccomp=unconfined",
+        "--security-opt=apparmor=unconfined",
+        "--security-opt=systempaths=unconfined",
+        "--network=host",
+        "--pid=host",
+        "--ipc=host",
+        "--uts=host",
+        "--userns=host",
+        "--device",
+        "--volume=/var/run/docker.sock:/var/run/docker.sock",
+        "--oci-worker-no-process-sandbox"
+      ],
+      "forbidden_rationale": "Decision 6 rejects each of these by name or by kind. They are listed literally so that a driver can be checked against the list mechanically rather than read for intent. --device covers the loop device specifically: the worker gets the volume, never the block device backing it.",
+
+      "never_reaches_the_worker": [
+        "the Docker socket, by mount or by a worker-callable API proxy",
+        "a bind mount of the repository, platform temp directory or home",
+        "S3, registry, database or platform credentials of any kind",
+        "another attempt's workspace volume"
+      ]
+    }
+  },
+
+  "facts": {
+    "note": "Recorded, and deliberately NOT bounds. dev/sandbox-probe.py records these with kind='fact' and dev/schema-fixture-check.py fails if either is ever cited as a bound's proof. Counting a recorded fact as an enforced bound is finding 7b6e931-F2, and 'AppArmor is not available' is the exact sentence that made an absent capability read as a present one.",
+    "apparmor": "Unavailable on this host (/sys/module/apparmor/parameters/enabled is not Y). No profile may list AppArmor as confinement; it rests on user namespaces, seccomp and cgroups.",
+    "--storage-opt size": "Refused outright on overlay2 over extfs, which needs xfs with pquota. This is why the workspace bound is a loop-backed volume and not a storage-opt quota."
+  },
+
+  "invariants": [
+    "Every bound names a probe that dev/sandbox-probe.py records with kind='bound', and every such probe is claimed by exactly one bound. Neither direction alone is enough: the first lets a probe go unclaimed, the second lets a bound go unproved.",
+    "A name the probe records as kind='fact' may never be a bound's proof.",
+    "No forbidden argument may appear in any bound's argument.",
+    "A runtime is selectable only if it is measured and enforces every bound. The default is not exempt.",
+    "The measured runtime is rootful; the default is rootless and unmeasured. Until that changes, this file records an intention and one measurement, and says which is which."
+  ]
+}

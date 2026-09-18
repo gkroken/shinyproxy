@@ -930,7 +930,7 @@ below are marked passed by this planning document.
       the content-row lock in `addVersion`, `spec_json` being selected but unused, and the
       fixed port 3838 in `ContentSpecRepository`.
 
-- [ ] **T1. Review and freeze contracts — Opus 5.** Depends T0. Finalize schema v1,
+- [x] **T1. Review and freeze contracts — Opus 5.** Depends T0. Finalize schema v1,
       examples, supported type/language/lockfile matrix, output descriptor, IDs/states,
       admin transport and object/image layouts. Specify literal safe launch arguments
       and all semantic validators. Add schema validation fixtures, including future-version
@@ -1083,11 +1083,50 @@ below are marked passed by this planning document.
       controllers are written from. Changing them after this point is a migration and a
       client break, not an edit.
 
-      **Still open in T1:** the literal safe launch arguments, and nothing else. Q3 closed
-      2026-09-17; image layout wording landed with T1(f) and the semantic validator
-      specification with T1(c). The launch arguments waited on Q2, which was decided
-      2026-09-18 — rootless default plus a runtime seam — so they are now unblocked and are
-      the last thing T1 owes.
+      **T1(g) done 2026-09-18 — the literal safe launch arguments. T1 is complete.**
+      `spec/isolation-profile-v1.json`. The last item T1 owed, unblocked by the Q2 decision
+      of the same day.
+
+      - **Nine bounds, each carrying its literal argument and the probe that proves it** —
+        `--cpus`, `--memory`, `--pids-limit`, `--security-opt=no-new-privileges`,
+        `--read-only`, a `noexec,nosuid,nodev` sized tmpfs, the loop-backed workspace
+        volume, the network, and `--security-opt=seccomp`. Thirteen forbidden arguments are
+        listed **literally** — `--privileged`, `--cap-add`, the three `unconfined`
+        security-opts, the four `host` namespaces, `--device`, the Docker socket bind and
+        `--oci-worker-no-process-sandbox` — so a driver can be checked against them
+        mechanically instead of being read for intent.
+      - **The correspondence with `dev/sandbox-probe.py` is checked in both directions**,
+        by parsing the probe with `ast` rather than trusting a list. A bound whose probe
+        does not exist fails; a probe no bound claims fails. One direction alone is what
+        lets a bound be written down and never measured — which is the entire failure this
+        file exists to prevent, since a launch argument nobody measured is a sentence.
+      - **A name the probe records as a FACT may not be a bound's proof.** This is finding
+        `7b6e931-F2` made permanent instead of fixed once: AppArmor is unavailable here and
+        `--storage-opt size` is refused outright, and both are recorded as facts. A profile
+        citing either as proof of an enforced bound now fails the runner.
+      - **The seam's refuse-to-start rule is machine-checked, not prose.** A runtime is
+        selectable only if its status is `measured` and it enforces every bound. Today that
+        is `runc-rootful` alone — and the file therefore says out loud that **the default,
+        `runc-rootless`, is unmeasured and not selectable**, with the three things it owes
+        listed against it. `runsc` is a candidate; `kata` is marked unavailable on this host
+        because there is no `/dev/kvm`. Recording the intention as though it were the
+        measurement is precisely the move this gate exists to refuse.
+      - Mutation-tested, **fifteen mutations, every one caught by the branch it was aimed
+        at**: a dropped bound, a probe that does not exist, a fact cited as proof, two
+        bounds sharing a probe, an unmeasured runtime marked selectable, a selectable
+        runtime missing a bound, an emptied forbidden list, a forbidden argument used as a
+        bound, a deleted profile, emptied runtimes, emptied bounds, a runtime enforcing
+        something unmeasured, a broken probe parser, and no selectable runtime at all. The
+        last needed its own case: the obvious mutation for it was caught by a *different*
+        check, which is the f1078e5-F1 lesson — a mutation caught for the wrong reason
+        leaves the branch it was meant to cover untested.
+      - The forbidden-argument check was itself wrong on first write: it compared the flag
+        *name* before `=`, so `--security-opt=seccomp=unconfined` reduced to
+        `--security-opt` and failed five times against a correct profile. It now compares
+        whole flags.
+      - `bash dev/validate-sandbox.sh` re-run on the host the same day rather than quoted
+        from T3(a): **9 of 9 bounds, 2 facts**, docker 27.1.2. The `measured` status in the
+        file is that run, not a recollection of one.
 
 - [x] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above

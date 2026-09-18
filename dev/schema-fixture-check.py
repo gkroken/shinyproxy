@@ -574,6 +574,159 @@ def check_image_references():
     print()
 
 
+def _probe_records():
+    """What dev/sandbox-probe.py actually records, parsed rather than assumed.
+
+    Static, via ast, so this runs in the fixture container with no Docker and no host.
+    A record() whose name is not a literal (the generic handler in main()) is skipped:
+    it names whichever probe threw, so it is not a bound anything can claim.
+    """
+    import ast
+    tree = ast.parse(pathlib.Path("dev/sandbox-probe.py").read_text(encoding="utf-8"))
+    found = {}
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "record"):
+            continue
+        if not n.args or not isinstance(n.args[0], ast.Constant) \
+                or not isinstance(n.args[0].value, str):
+            continue
+        kind = "bound"
+        for kw in n.keywords:
+            if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
+                kind = kw.value.value
+        # A name recorded anywhere as a fact is a fact: the failure path of a bound
+        # reuses the bound's name, but nothing reuses a fact's.
+        if found.get(n.args[0].value) != "fact":
+            found[n.args[0].value] = kind
+    return found
+
+
+def check_isolation_profile():
+    """The literal launch arguments, bound to the probes that demonstrate them.
+
+    spec/isolation-profile-v1.json is where T7's driver reads its arguments from. Nothing
+    validates against it, and the failure it invites is the one this project keeps making:
+    a bound written down, never measured, and read later as though it had been. So the
+    correspondence with dev/sandbox-probe.py is checked in BOTH directions, and a name the
+    probe records as a FACT may not be cited as a bound's proof -- which is finding
+    7b6e931-F2 ("AppArmor is not available" counted among enforced bounds) made permanent
+    rather than fixed once.
+    """
+    print("== isolation profile ==")
+    spec = load("spec/isolation-profile-v1.json")
+
+    # Demand the data before looping over it. Three checkers in this runner have now
+    # needed this guard (c4087cd-F2 and the two before it): a loop over supplied data
+    # passes vacuously unless something requires the data first.
+    profiles = spec.get("profiles") or {}
+    seam = spec.get("seam") or {}
+    runtimes = seam.get("runtimes") or {}
+    if "build-worker" not in profiles:
+        fail("spec/isolation-profile-v1.json declares no build-worker profile; every "
+             "check below would pass for free")
+        return
+    if not runtimes:
+        fail("spec/isolation-profile-v1.json declares no runtimes; the seam's selectable "
+             "rule would check nothing")
+        return
+
+    bounds = profiles["build-worker"].get("bounds") or {}
+    if not bounds:
+        fail("build-worker declares no bounds; the probe correspondence below would be "
+             "vacuous in both directions")
+        return
+
+    recorded = _probe_records()
+    probe_bounds = {n for n, k in recorded.items() if k == "bound"}
+    probe_facts = {n for n, k in recorded.items() if k == "fact"}
+    if not probe_bounds:
+        fail("parsed no kind='bound' records out of dev/sandbox-probe.py; the parser "
+             "broke, and every correspondence below would pass for free")
+        return
+
+    claimed = {}
+    for name, b in sorted(bounds.items()):
+        probe = b.get("probe")
+        if not probe:
+            fail("bound %s names no probe, so nothing demonstrates it" % name)
+            continue
+        if probe in probe_facts:
+            fail("bound %s cites %r as its proof, but dev/sandbox-probe.py records that "
+                 "as a FACT, not a bound -- a recorded capability is not an enforced one "
+                 "(7b6e931-F2)" % (name, probe))
+            continue
+        if probe not in probe_bounds:
+            fail("bound %s cites probe %r, which dev/sandbox-probe.py does not record; "
+                 "the argument is written down and nothing measures it"
+                 % (name, probe))
+            continue
+        if probe in claimed:
+            fail("probe %r is claimed by both %s and %s; one probe cannot demonstrate "
+                 "two different bounds" % (probe, claimed[probe], name))
+            continue
+        claimed[probe] = name
+
+    # The other direction, derived rather than enumerated -- the discipline 6024d51
+    # applied to the oracle matrix. Without it a probe can be added, or a bound quietly
+    # dropped, and this check would still report every remaining pair as fine.
+    unclaimed = sorted(probe_bounds - set(claimed))
+    if unclaimed:
+        fail("dev/sandbox-probe.py enforces bound(s) no profile claims: %s -- either the "
+             "profile lost a bound or the probe measures something nobody requires"
+             % ", ".join(unclaimed))
+
+    # Literal forbidden arguments must not appear in a literal launch argument.
+    forbidden = profiles["build-worker"].get("forbidden_arguments") or []
+    if not forbidden:
+        fail("build-worker lists no forbidden arguments; decision 6 rejects several by "
+             "name and the list is what makes that checkable")
+    # Whole-flag comparison, not a prefix of the flag NAME. Splitting on "=" and
+    # matching the head reduces "--security-opt=seccomp=unconfined" to "--security-opt",
+    # which the no-new-privileges and seccomp bounds legitimately use -- the first draft
+    # of this check failed five times against a correct profile. A bound violates an
+    # entry when its argument IS that entry, or extends it with a value.
+    for arg in forbidden:
+        for name, b in sorted(bounds.items()):
+            a = b.get("argument", "")
+            if a == arg or a.startswith(arg + "="):
+                fail("bound %s launches with %r, which decision 6 forbids (%r)"
+                     % (name, a, arg))
+
+    # The seam's selectable rule, which is the refuse-to-start clause in machine form.
+    required = set(bounds[n]["probe"] for n in bounds if bounds[n].get("probe"))
+    selectable = []
+    for rt, r in sorted(runtimes.items()):
+        enforces = set(r.get("enforces") or [])
+        stray = sorted(enforces - probe_bounds)
+        if stray:
+            fail("runtime %s claims to enforce %s, which is not a measured bound"
+                 % (rt, ", ".join(stray)))
+        covers = required <= enforces
+        measured = r.get("status") == "measured"
+        if r.get("selectable"):
+            selectable.append(rt)
+            if not measured:
+                fail("runtime %s is selectable with status %r; only a measured runtime "
+                     "may be selected" % (rt, r.get("status")))
+            if not covers:
+                fail("runtime %s is selectable but does not enforce %s; the seam's rule "
+                     "is refuse-to-start, not run-weaker"
+                     % (rt, ", ".join(sorted(required - enforces))))
+        elif measured and covers:
+            fail("runtime %s is measured and enforces every bound but is not selectable; "
+                 "say why or mark it selectable" % rt)
+    if not selectable:
+        fail("no runtime is selectable, so the seam's rule constrains nothing")
+
+    print("  ok   %d bound(s), each proved by a distinct probe, and every enforced probe "
+          "claimed" % len(claimed))
+    print("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent from "
+          "the launch line" % (len(probe_facts), len(forbidden)))
+    print("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
+          % (", ".join(selectable), len(runtimes) - len(selectable)))
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -622,6 +775,7 @@ check_semantic_fixtures_have_an_owning_rule()
 check_lifecycle_is_consistent()
 check_admin_transport()
 check_image_references()
+check_isolation_profile()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")
