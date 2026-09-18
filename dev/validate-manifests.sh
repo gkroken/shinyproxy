@@ -39,6 +39,12 @@ docker run --rm -v "$PWD":/ws:ro -w /ws "$PY_IMAGE" sh -c '
       "jsonschema==4.26.0" "rfc3339-validator==0.1.4" >/dev/null 2>&1 || {
     echo "!! could not install jsonschema + rfc3339-validator in the validator container" >&2
     exit 2; }
+  # The self-test first, in the same container and the same process image. It mutates the
+  # isolation profile IN MEMORY and requires each check to fail for its own stated reason.
+  # Running it here rather than by hand is the point: 23 mutations previously lived in
+  # commit messages, so a reverted fix left this suite vouching for it (finding 29f0ba0-F1).
+  python dev/schema-fixture-check.py --self-test || exit 1
+  echo
   exec python dev/schema-fixture-check.py
 ' || exit 1
 

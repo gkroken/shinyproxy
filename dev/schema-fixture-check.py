@@ -714,7 +714,7 @@ def _args_agree(spec_arg, probe_arg):
     return True, ""
 
 
-def check_isolation_profile():
+def _isolation_findings(spec, recorded):
     """The literal launch arguments, bound to the probes that demonstrate them.
 
     spec/isolation-profile-v1.json is where T7's driver reads its arguments from. Nothing
@@ -725,8 +725,10 @@ def check_isolation_profile():
     7b6e931-F2 ("AppArmor is not available" counted among enforced bounds) made permanent
     rather than fixed once.
     """
-    print("== isolation profile ==")
-    spec = load("spec/isolation-profile-v1.json")
+    bad, good = [], []
+
+    def fail(message):
+        bad.append(message)
 
     # Demand the data before looping over it. Three checkers in this runner have now
     # needed this guard (c4087cd-F2 and the two before it): a loop over supplied data
@@ -737,26 +739,25 @@ def check_isolation_profile():
     if "build-worker" not in profiles:
         fail("spec/isolation-profile-v1.json declares no build-worker profile; every "
              "check below would pass for free")
-        return
+        return bad, good
     if not runtimes:
         fail("spec/isolation-profile-v1.json declares no runtimes; the seam's selectable "
              "rule would check nothing")
-        return
+        return bad, good
 
     bounds = profiles["build-worker"].get("bounds") or {}
     if not bounds:
         fail("build-worker declares no bounds; the probe correspondence below would be "
              "vacuous in both directions")
-        return
+        return bad, good
 
-    recorded = _probe_records()
     probe_bounds = {n for n, (k, _) in recorded.items() if k == "bound"}
     probe_facts = {n for n, (k, _) in recorded.items() if k == "fact"}
     recorded_args = {n: a for n, (_, a) in recorded.items()}
     if not probe_bounds:
         fail("parsed no kind='bound' records out of dev/sandbox-probe.py; the parser "
              "broke, and every correspondence below would pass for free")
-        return
+        return bad, good
 
     claimed = {}
     for name, b in sorted(bounds.items()):
@@ -876,14 +877,26 @@ def check_isolation_profile():
         fail("no runtime is selectable, so the seam's rule constrains nothing")
 
     n_ph = sum(len(b.get("placeholders") or []) for b in bounds.values())
-    print("  ok   %d bound(s), each proved by a distinct probe that measured the SAME "
-          "literal argument" % len(claimed))
-    print("  ok   %d declared placeholder(s); every varying value is named, so nothing "
-          "fixed can become configurable unnoticed" % n_ph)
-    print("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent from "
-          "the launch line" % (len(probe_facts), len(forbidden)))
-    print("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
-          % (", ".join(selectable), len(runtimes) - len(selectable)))
+    good.append("  ok   %d bound(s), each proved by a distinct probe that measured the "
+                "SAME literal argument" % len(claimed))
+    good.append("  ok   %d declared placeholder(s); every varying value is named, so "
+                "nothing fixed can become configurable unnoticed" % n_ph)
+    good.append("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent "
+                "from the launch line" % (len(probe_facts), len(forbidden)))
+    good.append("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
+                % (", ".join(selectable), len(runtimes) - len(selectable)))
+    return bad, good
+
+
+def check_isolation_profile():
+    """The literal launch arguments, bound to the probes that demonstrate them."""
+    print("== isolation profile ==")
+    bad, good = _isolation_findings(load("spec/isolation-profile-v1.json"),
+                                    _probe_records())
+    for m in bad:
+        fail(m)
+    for m in good:
+        print(m)
 
 
 def check_descriptor_round_trip():
@@ -924,6 +937,161 @@ def check_descriptor_round_trip():
         print("       %s" % p)
     print()
 
+
+# --- self-test -------------------------------------------------------------------
+# The isolation checks had no negative fixture: 23 mutations existed, but they were run
+# by hand against a copy of the tree and recorded in commit messages, so reverting a fix
+# left the suite vouching for it in the same words it used while the hole was open
+# (finding 29f0ba0-F1). T5 requires a permanent test per finding class, and a mutation
+# table in a commit message is not one.
+#
+# Each case asserts the SUBSTRING of the branch it targets, not merely that something
+# failed. Asserting only "it was caught" is what let a branch go uncovered while a summary
+# reported every case green (f1078e5-F1).
+
+def _mutate(spec, fn):
+    import copy
+    d = copy.deepcopy(spec)
+    fn(d)
+    return d
+
+
+def _b(d):
+    return d["profiles"]["build-worker"]["bounds"]
+
+
+def _rt(d):
+    return d["seam"]["runtimes"]
+
+
+ISOLATION_CASES = [
+    ("a bound dropped from the profile",
+     lambda d: _b(d).pop("seccomp"), "no profile claims"),
+    ("a bound citing a probe that does not exist",
+     lambda d: _b(d)["cpu"].__setitem__("probe", "no such probe"), "does not record"),
+    ("a bound citing a FACT as its proof",
+     lambda d: _b(d)["seccomp"].__setitem__("probe", "apparmor"),
+     "records that as a FACT"),
+    ("two bounds claiming one probe",
+     lambda d: _b(d)["memory"].__setitem__("probe", "cpu quota"), "claimed by both"),
+    ("a bound specifying a different flag than the probe ran",
+     lambda d: _b(d)["cpu"].__setitem__("argument", "--cpu-shares=<cpu_quota>"),
+     "flag '--cpu-shares' vs measured '--cpus'"),
+    ("a bound dropping an option the probe measured",
+     lambda d: _b(d)["scratch"].__setitem__("argument", "--tmpfs=/tmp:rw,size=<tmpfs_size>"),
+     "option(s) specified, 6 measured"),
+    ("a bound adding an option the probe never measured",
+     lambda d: _b(d)["scratch"].__setitem__(
+         "argument", "--tmpfs=/tmp:rw,noexec,nosuid,nodev,ro,size=<tmpfs_size>"),
+     "7 option(s) specified, 6 measured"),
+    ("a bound with no argument at all",
+     lambda d: _b(d)["memory"].pop("argument"), "specifies no argument"),
+    # aa906db-F1: a name outside [a-z_] was a wildcard to the comparison and invisible to
+    # the declaration check. Both spellings stay, because widening an alphabet is what
+    # failed twice before deriving from one predicate closed it.
+    ("a fixed security option turned into a placeholder",
+     lambda d: _b(d)["scratch"].__setitem__(
+         "argument", "--tmpfs=/tmp:rw,<exec_policy>,nosuid,nodev,size=<tmpfs_size>"),
+     "undeclared placeholder(s) <exec_policy>"),
+    ("a placeholder name containing a digit",
+     lambda d: _b(d)["scratch"].__setitem__(
+         "argument", "--tmpfs=/tmp:rw,<exec2>,nosuid,nodev,size=<tmpfs_size>"),
+     "undeclared placeholder(s) <exec2>"),
+    ("a placeholder name in capitals",
+     lambda d: _b(d)["scratch"].__setitem__(
+         "argument", "--tmpfs=/tmp:rw,<EXEC>,nosuid,nodev,size=<tmpfs_size>"),
+     "undeclared placeholder(s) <EXEC>"),
+    ("a bound with no placeholders list",
+     lambda d: _b(d)["cpu"].pop("placeholders"), "declares no placeholders list"),
+    ("a placeholder declared but not used",
+     lambda d: _b(d)["read_only_rootfs"].__setitem__("placeholders", ["nope"]),
+     "does not use"),
+    ("a forbidden argument used as a bound",
+     lambda d: _b(d)["cpu"].__setitem__("argument", "--privileged"),
+     "decision 6 forbids"),
+    ("the forbidden list emptied",
+     lambda d: d["profiles"]["build-worker"].__setitem__("forbidden_arguments", []),
+     "lists no forbidden arguments"),
+    ("an unmeasured runtime marked selectable",
+     lambda d: _rt(d)["runc-rootless"].__setitem__("selectable", True),
+     "only a measured runtime"),
+    ("a selectable runtime missing a bound",
+     lambda d: _rt(d)["runc-rootful"].__setitem__(
+         "enforces", [e for e in _rt(d)["runc-rootful"]["enforces"]
+                      if e != "network none"]),
+     "refuse-to-start, not run-weaker"),
+    ("a runtime enforcing something unmeasured",
+     lambda d: _rt(d)["runsc"].__setitem__("enforces", ["telepathy"]),
+     "not a measured bound"),
+    # Needs BOTH edits: clearing the flag alone is caught by the measured-but-not-
+    # selectable branch instead, which would leave this one untested (f1078e5-F1).
+    ("no runtime selectable at all",
+     lambda d: (_rt(d)["runc-rootful"].__setitem__("selectable", False),
+                _rt(d)["runc-rootful"].__setitem__("status", "unmeasured")),
+     "constrains nothing"),
+    ("the build-worker profile deleted",
+     lambda d: d.__setitem__("profiles", {}), "declares no build-worker"),
+    ("the runtimes map emptied",
+     lambda d: d["seam"].__setitem__("runtimes", {}), "declares no runtimes"),
+    ("the bounds map emptied",
+     lambda d: d["profiles"]["build-worker"].__setitem__("bounds", {}),
+     "declares no bounds"),
+]
+
+
+def self_test():
+    print("== self-test: every isolation check must fail FOR ITS STATED REASON ==")
+    spec = load("spec/isolation-profile-v1.json")
+    recorded = _probe_records()
+
+    bad, good = _isolation_findings(spec, recorded)
+    if bad:
+        print("  FAIL the unmutated tree is not green; nothing below means anything")
+        for m in bad:
+            print("       %s" % m)
+        return 1
+    print("  ok   control: unmutated tree green, %d line(s)" % len(good))
+
+    missed = []
+    for label, mutate, expect in ISOLATION_CASES:
+        found, _ = _isolation_findings(_mutate(spec, mutate), recorded)
+        if not found:
+            print("  FAIL not caught at all: %s" % label)
+            missed.append(label)
+        elif not any(expect in m for m in found):
+            print("  FAIL caught for the WRONG REASON: %s" % label)
+            print("       expected to contain: %r" % expect)
+            for m in found:
+                print("       got: %s" % m)
+            missed.append(label)
+        else:
+            print("  ok   %s" % label)
+
+    # The probe side, mutated in the parsed records rather than on disk.
+    for label, rec, expect in (
+            ("the probe parser returning nothing", {}, "parser broke"),
+            ("a probe that records no literal argument",
+             dict(recorded, **{"cpu quota": ("bound", None)}),
+             "records no literal argument"),
+    ):
+        found, _ = _isolation_findings(spec, rec)
+        if not any(expect in m for m in found):
+            print("  FAIL not caught for its reason: %s" % label)
+            missed.append(label)
+        else:
+            print("  ok   %s" % label)
+
+    total = len(ISOLATION_CASES) + 2
+    if missed:
+        print("\nRESULT: self-test FAILED, %d of %d case(s) not caught for their stated "
+              "reason" % (len(missed), total))
+        return 1
+    print("\nRESULT: self-test passed -- all %d cases fail for the reason claimed" % total)
+    return 0
+
+
+if "--self-test" in sys.argv:
+    sys.exit(self_test())
 
 print("validator: python jsonschema %s | dialect 2020-12" % _pkg_version("jsonschema"))
 print()
