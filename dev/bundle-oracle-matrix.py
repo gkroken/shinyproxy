@@ -138,6 +138,18 @@ SCENARIOS = [
      [("pos-r-root", "wrong-output")],
      "accepting is not enough: the tree has to be the one the manifest described"),
 
+    ("symlinked root refused", ["--symlinked-root"], "clean",
+     "the root is a symlink to a real directory; every fixture must be rejected and "
+     "nothing may appear through the link. Not expressible as a fixture: every path "
+     "check passes and every member still lands wherever the link points"),
+
+    ("symlinked root followed", ["--symlinked-root", "--", "--without", "path"],
+     [("pos-r-root", "outside-root-change"),
+      ("pos-r-root", "unexpected-accept")],
+     "the same root with the path guard removed, so the oracle is shown to notice -- "
+     "before this check the guarded extractor wrote three files through the link and "
+     "reported accept"),
+
     ("unrecognised decision", ["--only", "pos-r-root",
                                "--extractor", DEGENERATE, "--", "--mode", "nonsense"],
      [("pos-r-root", "bad-decision")],

@@ -360,6 +360,8 @@ class Extractor:
         state = {"entries": 0, "total": 0, "paths": {}, "manifest": None,
                  "digests": {}, "sizes": {}, "first_regular": None}
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.on("path"):
+            self.check_root()
         seen = {}
         try:
             tar = tarfile.open(self.archive, mode="r|gz")
@@ -517,9 +519,32 @@ class Extractor:
         except OSError:
             pass
 
+    def check_root(self):
+        """The root itself must be a real directory, not a link to one.
+
+        "A substituted or symlinked root/parent must fail closed" is in the contract, and
+        it is not a property of any archive: hand this extractor a root that is a symlink
+        and every member lands wherever the link points, with each individual path check
+        passing. Before this, extracting pos-r-root into <world>/via-symlink wrote three
+        files into <world>/via-symlink-target and reported "accept".
+        """
+        if self.root.is_symlink():
+            raise Reject("root-is-a-symlink", str(self.root)[:60])
+        try:
+            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as e:
+            raise Reject("root-not-a-directory", "%s: %s" % (type(e).__name__,
+                                                             str(self.root)[:50]))
+        os.close(fd)
+
     def open_parent(self, rel, create_last=False):
-        """Walk to rel's parent one component at a time, refusing to follow links."""
-        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        """Walk to rel's parent one component at a time, refusing to follow links.
+
+        O_NOFOLLOW on the ROOT as well, not only on the components below it: a root that
+        is swapped for a symlink between the check and the walk would otherwise be
+        followed on every reopen.
+        """
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         parts = rel.split("/")
         walk = parts if create_last else parts[:-1]
         for part in walk:

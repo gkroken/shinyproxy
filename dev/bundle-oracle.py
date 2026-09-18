@@ -12,6 +12,8 @@ the outcome was acceptable -- which is more than "did the return code match":
     extra files and no privileged modes
   * the extractor stayed inside the outer test limits -- a wall-clock deadline and a disk
     budget -- so a bomb that is "rejected" only after filling the disk still fails
+  * with `--symlinked-root`, that it fails closed when its root is a symlink rather than
+    a directory -- which is not a property of any archive, so no fixture can express it
 
 It imports no Skald class and no extractor. The extractor is a subprocess named by
 `--extractor`, so the same oracle judges the real one at T5 by being pointed at it.
@@ -23,7 +25,7 @@ bombs alone would write about three gigabytes per pass. `--full` uses the defaul
 Usage:
     python3 dev/bundle-oracle.py [--full] [--keep] [--json] [--only FIXTURE]
                                  [--deadline SECONDS] [--disk-budget BYTES]
-                                 [--extractor PATH]
+                                 [--extractor PATH] [--symlinked-root]
     python3 dev/bundle-oracle.py --kinds
                                  [-- EXTRACTOR ARGS...]
 
@@ -114,10 +116,11 @@ def tree_bytes(path):
     return total
 
 
-def judge(fixture, world, verdict, before, after, elapsed, limits, timed_out, budget):
+def judge(fixture, world, root_path, expect, verdict, before, after, elapsed,
+          timed_out, budget):
     """Everything that has to be true, not only the decision."""
     out = []
-    root = str(world.root)
+    root = str(root_path)
 
     if timed_out:
         out.append(Failure("timeout", "killed after %.1fs" % elapsed))
@@ -138,28 +141,27 @@ def judge(fixture, world, verdict, before, after, elapsed, limits, timed_out, bu
         # report, not die on.
         out.append(Failure("bad-decision", "decision %r is not accept, reject or crash"
                            % (verdict.get("decision"),)))
-    elif verdict["decision"] != fixture["expect"]:
+    elif verdict["decision"] != expect:
         out.append(Failure("unexpected-" + verdict["decision"],
-                           "expected %s; %s" % (fixture["expect"],
-                                                verdict.get("rule", ""))))
+                           "expected %s; %s" % (expect, verdict.get("rule", ""))))
 
     escaped = [(p, w) for p, w in changes(before, after)
                if p != root and not p.startswith(root + os.sep)]
     for path, what in escaped[:4]:
         out.append(Failure("outside-root-change", "%s (%s)" % (path, what[:60])))
 
-    written = tree_bytes(world.root)
+    written = tree_bytes(root_path)
     if written > budget:
         out.append(Failure("over-disk-budget", "%d bytes written, budget %d"
                            % (written, budget)))
 
     if verdict and verdict.get("decision") == "reject":
-        residue = sorted(p.name for p in world.root.iterdir()) if world.root.is_dir() else []
+        residue = sorted(p.name for p in root_path.iterdir()) if root_path.is_dir() else []
         if residue:
             out.append(Failure("residue", "root not emptied: %s" % residue[:4]))
 
-    if verdict and verdict.get("decision") == "accept" and fixture["expect"] == "accept":
-        out.extend(check_produced(world.root))
+    if verdict and verdict.get("decision") == "accept" and expect == "accept":
+        out.extend(check_produced(root_path))
     return out, written
 
 
@@ -220,6 +222,11 @@ def run(argv):
                          if "--deadline" in argv else None)
     budget_override = (int(argv[argv.index("--disk-budget") + 1])
                        if "--disk-budget" in argv else None)
+    # Hand the subject a root that is a SYMLINK to a real directory, which the world
+    # already builds. Not a property of any archive: every path check can pass and every
+    # member still lands wherever the link points. The contract says fail closed, so in
+    # this mode every fixture -- positives included -- must be rejected.
+    symlinked_root = "--symlinked-root" in argv
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     head = argv[:argv.index("--")] if "--" in argv else argv
     extractor = pathlib.Path(head[head.index("--extractor") + 1]) \
@@ -259,6 +266,9 @@ def run(argv):
         print("== oracle: %d fixtures, %s profile ==" %
               (len(fixtures), "default" if full else "reduced"))
         print("   subject: %s %s" % (extractor, " ".join(extra) or "(all guards on)"))
+        if symlinked_root:
+            print("   root is a SYMLINK to a real directory; every fixture must be "
+                  "rejected")
         print("   outer limits: %.0fs deadline, %d MiB disk budget per fixture"
               % (deadline, budget // (1 << 20)))
         if regime != "strictatime":
@@ -275,10 +285,12 @@ def run(argv):
         here = base / ("w%03d" % i)
         shutil.rmtree(here, ignore_errors=True)
         world = World(here)
+        root_path = world.path / "via-symlink" if symlinked_root else world.root
+        expect = "reject" if symlinked_root else f["expect"]
         archive = corpus / (f["name"] + ".tar.gz")
         watched = world.watched()
         before = snapshot(watched)
-        cmd = [sys.executable, str(extractor), "--root", str(world.root),
+        cmd = [sys.executable, str(extractor), "--root", str(root_path),
                "--archive", str(archive), "--limits", json.dumps(limits)] + extra
         started, timed_out, verdict = time.time(), False, None
         try:
@@ -291,8 +303,8 @@ def run(argv):
             timed_out = True
         elapsed = time.time() - started
         after = snapshot(watched)
-        bad, written = judge(f, world, verdict, before, after, elapsed, limits,
-                             timed_out, budget)
+        bad, written = judge(f, world, root_path, expect, verdict, before, after,
+                             elapsed, timed_out, budget)
         if bad:
             failures += 1
             for b in bad:

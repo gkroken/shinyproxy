@@ -1228,7 +1228,7 @@ below are marked passed by this planning document.
         `--full` uses the defaults.
 
       - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
-        and `dev/validate-oracle-matrix.sh` hand the oracle sixteen subjects, each
+        and `dev/validate-oracle-matrix.sh` hand the oracle eighteen subjects, each
         wrong in one specific way, and assert *which* finding comes back on *which*
         fixture — not that something failed, which an oracle failing everything for the
         wrong reason would satisfy. ~87s.
@@ -1266,10 +1266,17 @@ below are marked passed by this planning document.
         exactly their own; and declaring a kind with no scenario behind it fails the
         coverage check.
 
-      Still owed for T2: the rename race during extraction, and extraction into a
-      pre-existing symlinked root (the world provides one; nothing points an extractor at
-      it yet). Both are in the plan's links row and neither is expressible in archive
-      bytes, so they wait on a concurrency harness.
+      - **A symlinked root fails closed** (2026-09-18). `--symlinked-root` points the
+        subject at `<world>/via-symlink` instead of the real root, and every fixture —
+        positives included — must then be rejected. This is not expressible as a fixture:
+        every path check passes and every member still lands wherever the link points.
+        The guarded extractor got it wrong until this was measured — extracting
+        `pos-r-root` into the symlinked root wrote three files into
+        `via-symlink-target` and reported **accept**. It now refuses the root up front,
+        and `O_NOFOLLOW` covers the root itself and not only the components below it.
+
+      Still owed for T2: the rename race during extraction. It is the plan's last links
+      case, is not expressible in archive bytes, and needs a concurrency harness.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,
