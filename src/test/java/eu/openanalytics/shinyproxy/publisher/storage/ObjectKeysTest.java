@@ -263,8 +263,22 @@ class ObjectKeysTest {
                 "NFD was accepted, so one filename is two objects in one rendition");
         assertTrue(e.getMessage().contains("NFC"), e.getMessage());
 
-        // Not rewritten into NFC on the way through, which would be the other failure.
-        assertFalse(ObjectKeys.validatedRenditionPath(nfc).equals(nfd));
+        // An accepted path is returned byte-identical. The obvious assertion here --
+        // assertFalse(validatedRenditionPath(nfc).equals(nfd)) -- feeds NFC in and compares
+        // against NFD, so it cannot fail; it was removed rather than left looking like
+        // coverage. This one can fail: trimming, case folding or any encoding introduced
+        // into the validator changes at least one of these.
+        // The whitespace cases are the load-bearing ones and they were added after a
+        // mutation proved their absence: with only the names above, replacing the return
+        // with relativePath.trim() changed nothing and the suite stayed green. A leading or
+        // trailing space is a legal filename on Linux, so preserving it is the correct
+        // behaviour AND the thing that makes "does not rewrite" testable.
+        for (String accepted : new String[]{nfc, "report.html", "a file with spaces.html",
+                "100%.html", "plus+and&amp.html", "\u65e5\u672c\u8a9e/x.html",
+                " leading-space.html", "trailing-space.html ", "inner dir /file.html"}) {
+            assertEquals(accepted, ObjectKeys.validatedRenditionPath(accepted),
+                    "the validator altered a path it accepted: " + quoted(accepted));
+        }
     }
 
     @Test

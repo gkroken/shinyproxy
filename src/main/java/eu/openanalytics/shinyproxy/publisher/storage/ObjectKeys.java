@@ -115,7 +115,7 @@ public final class ObjectKeys {
      */
     public static final int RENDITION_PREFIX_BYTES =
             (renditionPrefix(new UUID(0L, 0L), new UUID(0L, 0L), new UUID(0L, 0L))
-                    + "/files/").length();
+                    + "/files/").getBytes(StandardCharsets.UTF_8).length;
 
     /**
      * What is actually left for a rendition path: {@value #MAX_KEY_BYTES} minus the prefix.
