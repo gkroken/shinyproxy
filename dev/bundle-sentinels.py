@@ -63,8 +63,12 @@ def _entry(path):
     kind = ("dir" if stat.S_ISDIR(st.st_mode) else
             "link" if stat.S_ISLNK(st.st_mode) else
             "file" if stat.S_ISREG(st.st_mode) else "other")
+    # ctime is recorded because it is the one timestamp the writer cannot set. Above
+    # HASH_LIMIT there is no digest to compare, and mtime can be restored with utime --
+    # which advances ctime, so the rewrite is still visible (finding 6d7b790-F1).
     rec = {"kind": kind, "mode": stat.S_IMODE(st.st_mode), "uid": st.st_uid,
-           "gid": st.st_gid, "nlink": st.st_nlink, "atime_ns": st.st_atime_ns}
+           "gid": st.st_gid, "nlink": st.st_nlink, "atime_ns": st.st_atime_ns,
+           "ctime_ns": st.st_ctime_ns}
     if kind == "link":
         rec["target"] = os.readlink(path)
     elif kind == "file":
@@ -84,6 +88,12 @@ def _entry(path):
                 rec["unreadable"] = type(e).__name__
             else:
                 rec["sha256"] = h.hexdigest()
+            # Hashing IS a read, so it moves the clock reads() watches. Where it left it
+            # is recorded, for the same reason the directory walk records its own effect.
+            try:
+                rec["atime_after_ns"] = os.lstat(path).st_atime_ns
+            except OSError:
+                pass
         rec["hashed"] = "sha256" in rec
     return rec
 
@@ -121,6 +131,12 @@ def snapshot(roots):
                     stack.extend(os.path.join(path, n) for n in os.listdir(path))
                 except OSError:
                     pass
+                else:
+                    # Where our own listing left this directory's atime. See reads().
+                    try:
+                        rec["atime_after_ns"] = os.lstat(path).st_atime_ns
+                    except OSError:
+                        pass
     return out
 
 
@@ -136,12 +152,18 @@ def _compare(before, after, key):
     fields = [f for f in ("mode", "uid", "gid", "target", "size", "sha256", "ino", "nlink")
               if f in b or f in a]
     diffs = ["%s %r -> %r" % (f, b.get(f), a.get(f)) for f in fields if b.get(f) != a.get(f)]
-    if not diffs and b["kind"] == "file" and not b.get("hashed"):
-        # Not hashed, so a same-size rewrite is only visible through mtime. Reported as a
-        # distinct, weaker signal rather than folded in with the certain ones.
-        if b.get("mtime_ns") != a.get("mtime_ns"):
-            return "mtime changed (too large to hash, so content is unverified)"
-    return ", ".join(diffs)
+    if diffs:
+        return ", ".join(diffs)
+    # Nothing certain changed. An inode whose ctime advanced was still written to or
+    # re-moded by somebody, and ctime is not settable -- restoring mtime after a
+    # same-size overwrite leaves it behind. For an entry too large to hash this is the
+    # only evidence there is, so it is reported as its own, weaker finding rather than
+    # dropped into silence.
+    if b.get("ctime_ns") != a.get("ctime_ns"):
+        return ("ctime advanced (unhashed, too large to compare content)"
+                if b["kind"] == "file" and not b.get("hashed")
+                else "ctime advanced")
+    return ""
 
 
 def changes(before, after):
@@ -160,26 +182,56 @@ def reads(before, after):
     relatime, noatime and lazytime all make this silent, which is why
     atime_is_observable() exists and why the caller is expected to report the answer
     alongside any claim that nothing was read.
+
+    The baseline is the atime AFTER the earlier snapshot touched the path, not before.
+    Taking the picture is itself a read -- listing a directory, hashing a file -- so
+    comparing pre-access atimes reported every watched path as read by whatever ran in
+    between, including nothing at all (finding 6d7b790-F2). Re-lstatting after the access
+    in both snapshots does not fix it either, because the later snapshot's own access
+    moves the clock again; the comparison has to be "after the earlier walk" against
+    "before the later walk", which is what these two fields are.
+
+    That removes the false positives. It does not make the signal useful under the
+    default relatime mount, where our own access consumes the single update a file gets
+    and a subsequent read by the subject leaves nothing behind. read_detection() measures
+    which regime is in force, and a caller must report "no reads observed" only when it
+    says "strictatime". Anything stronger needs a different mechanism -- tracing the
+    extractor's syscalls -- which belongs with the extractor, not here.
     """
     out = []
     for key in sorted(set(before) & set(after)):
         b, a = before[key], after[key]
-        if b.get("atime_ns") is not None and a.get("atime_ns", 0) > b["atime_ns"]:
+        base = b.get("atime_after_ns", b.get("atime_ns"))
+        if base is not None and a.get("atime_ns", 0) > base:
             out.append(key)
     return out
 
 
-def atime_is_observable(where):
-    """Does reading a file move its atime on this filesystem? Measured, not assumed."""
+def read_detection(where):
+    """Whether reads() can see anything on this filesystem. Measured, not assumed.
+
+    Two questions, because the first one on its own is misleading. "Does a read move
+    atime?" is usually yes. The question that decides whether reads() works is "does a
+    read move atime when atime is already recent?", because the snapshot itself reads
+    every file it hashes and lists every directory it walks. Under the default relatime,
+    the answer is no: our own picture consumes the one update, and a subject that reads
+    the same file afterwards leaves no trace.
+
+    Returns "strictatime", "relatime" or "off".
+    """
     probe = pathlib.Path(where) / ".atime-probe"
     probe.write_bytes(b"x")
     os.utime(probe, ns=(0, 0))
-    before = os.lstat(probe).st_atime_ns
     time.sleep(0.01)
     probe.read_bytes()
-    after = os.lstat(probe).st_atime_ns
+    first = os.lstat(probe).st_atime_ns
+    time.sleep(0.01)
+    probe.read_bytes()
+    second = os.lstat(probe).st_atime_ns
     probe.unlink()
-    return after > before
+    if first == 0:
+        return "off"
+    return "strictatime" if second > first else "relatime"
 
 
 class World:
@@ -282,6 +334,22 @@ def self_test(base):
             (x.path / "pax-escape.txt").unlink()
             (x.path / "pax-escape.txt").mkdir()
 
+        def stealth_small(x):
+            # Same size, mtime put back. The digest catches this one.
+            f = x.path / "escape.txt"
+            st = os.lstat(f)
+            f.write_bytes(b"X" * st.st_size)
+            os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+        def stealth_large(x):
+            # The same trick above HASH_LIMIT, where there is no digest to compare. Only
+            # ctime survives it, and ctime is not settable (finding 6d7b790-F1).
+            f = x.path / "neighbour" / "large.bin"
+            st = os.lstat(f)
+            with open(f, "r+b") as fh:
+                fh.write(b"owned")
+            os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
         def through_symlinked_root(x):
             # An extractor handed <world>/via-symlink as its root writes through a link.
             # Anything it creates lands in via-symlink-target, which is watched.
@@ -293,9 +361,14 @@ def self_test(base):
                  ("change an outside mode", remode),
                  ("retarget an outside symlink", retarget),
                  ("replace an outside file with a directory", swap_kind),
+                 ("same-size rewrite, mtime restored (hashed)", stealth_small),
+                 ("same-size rewrite, mtime restored (too large to hash)", stealth_large),
                  ("write through a symlinked root", through_symlinked_root)]
         for i, (label, mutate) in enumerate(cases):
             fresh = World(pathlib.Path(tmp) / ("w%d" % i))
+            # An outside file too large to hash, so the unhashed path is exercised by a
+            # real sentinel rather than only in theory.
+            (fresh.path / "neighbour" / "large.bin").write_bytes(b"\0" * (HASH_LIMIT + 4096))
             paths = fresh.watched()
             b = snapshot(paths)
             mutate(fresh)
@@ -304,6 +377,9 @@ def self_test(base):
             # so the filter has to be "inside my world", not a prefix like "/tmp".
             got = [c for c in changes(b, snapshot(paths))
                    if str(c[0]).startswith(str(fresh.path) + os.sep)]
+            # A create or delete also advances the parent directory's ctime, and that
+            # parent usually sorts first. Report the strongest evidence, not the first.
+            got.sort(key=lambda c: c[1].startswith("ctime advanced"))
             if got:
                 print("  ok   detected: %-42s (%s)" % (label, got[0][1][:44]))
             else:
@@ -332,12 +408,45 @@ def self_test(base):
                   "them proves nothing. Run the oracle as root in a disposable "
                   "container." % len(vacuous))
 
-        # 4. Read detection, measured rather than claimed.
-        observable = atime_is_observable(tmp)
-        print("  %s atime moves on reads: %s%s"
-              % ("ok  " if observable else "note", observable,
-                 "" if observable else "  -- read detection is unavailable here and must "
-                                       "not be reported as 'nothing was read'"))
+        # 4. Read detection, measured rather than claimed, and checked in both
+        #    directions: silent when nothing read, and not silent when something did.
+        regime = read_detection(tmp)
+        print("  note atime regime: %s -- read detection is %s here"
+              % (regime, "available" if regime == "strictatime" else
+                 "UNAVAILABLE, so no caller may report 'nothing was read'"))
+
+        quiet = World(pathlib.Path(tmp) / "reads")
+        qpaths = [quiet.path / "escape.txt", quiet.path / "neighbour"]
+        r0 = snapshot(qpaths)
+        spurious = reads(r0, snapshot(qpaths))
+        if spurious:
+            ok = False
+            print("  FAIL two back-to-back snapshots report %d read(s): %s"
+                  % (len(spurious), spurious[0]))
+        else:
+            print("  ok   taking the picture is not itself reported as a read")
+
+        time.sleep(0.01)
+        (quiet.path / "escape.txt").read_bytes()
+        os.listdir(quiet.path / "neighbour")
+        got = set(reads(r0, snapshot(qpaths)))
+        missed = [q for q in (quiet.path / "escape.txt", quiet.path / "neighbour")
+                  if str(q) not in got]
+        if regime == "strictatime":
+            if missed:
+                ok = False
+                print("  FAIL a real read was not reported: %s" % missed[0])
+            else:
+                print("  ok   a real read of a file and of a directory is reported")
+        elif not missed:
+            # Worth knowing, and worth failing on: it would mean the regime measurement
+            # is wrong, and a wrong measurement is how a blind check gets believed.
+            ok = False
+            print("  FAIL reads were reported although the regime says they cannot be")
+        else:
+            print("  ok   under %s a real read is invisible, and the harness says so "
+                  "rather than reporting 'no reads'" % regime)
+        quiet.destroy()
 
         # 5. The bound is an error, not a quieter snapshot.
         deep = pathlib.Path(tmp) / "many"

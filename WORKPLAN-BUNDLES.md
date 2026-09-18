@@ -1173,12 +1173,25 @@ below are marked passed by this planning document.
         photographs it again.
       - The suite's job is to prove the harness **can fail**. It performs each change it
         claims to detect — overwrite, create, delete, re-mode, retarget a symlink,
-        replace a file with a directory, write through a symlinked root — and asserts the
-        diff reports it. Three things it refuses to fake: a walk that hits its bound
-        raises instead of returning a shorter snapshot; a sentinel target this process
-        cannot write to is reported WEAK and fails the run, because watching an
-        unwritable path reports "unchanged" forever; and read detection is *measured*
-        (does atime move on this filesystem?) rather than claimed.
+        replace a file with a directory, write through a symlinked root, and rewrite a
+        file in place at the same size with mtime restored — and asserts the diff reports
+        it. Three things it refuses to fake: a walk that hits its bound raises instead of
+        returning a shorter snapshot; a sentinel target this process cannot write to is
+        reported WEAK and fails the run, because watching an unwritable path reports
+        "unchanged" forever; and read detection is *measured* rather than claimed.
+      - Two of those came from review (6d7b790-F1/F2) and are worth keeping in mind for
+        anything else that watches a filesystem. **ctime is the timestamp a writer cannot
+        set**: above the hash limit, mtime can be restored after a same-size overwrite,
+        and ctime is what survives it. And **taking the picture is itself an access** —
+        hashing a file and listing a directory both move atime, so each entry records
+        where the snapshot's own access left the clock, and a comparison runs "after the
+        earlier walk" against "before the later walk".
+      - Read detection is honestly unavailable. `read_detection()` asks the question that
+        actually decides it — does a read move atime when atime is *already recent*? —
+        and the answer under the default relatime is no, because the snapshot's own read
+        consumes the single update. The harness prints the regime and the self-test
+        asserts the blindness rather than papering over it. Verifying "reject without
+        outside reads" needs syscall tracing, which belongs with the extractor.
       - It therefore runs as root in a disposable container with `--network none` and the
         repository mounted read-only. Unprivileged, the same suite exits 1 with "2
         sentinel target(s) this process cannot touch, so watching them proves nothing" —
