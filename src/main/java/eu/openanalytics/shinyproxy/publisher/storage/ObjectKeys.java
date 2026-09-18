@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.storage;
 
+import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -38,9 +40,18 @@ import java.util.UUID;
  * server-generated UUID or a fixed literal — except the relative path inside a rendition,
  * which comes from what a render produced. That one is validated by
  * {@link #renditionFile}, and it is validated <em>here</em> because the output-descriptor
- * schema deliberately does not: its {@code renditionPath} says containment, {@code .} and
- * {@code ..} segments and empty segments "are the writer's to enforce". This class is the
- * writer.
+ * schema deliberately does not. Its {@code renditionPath} says, in full:
+ *
+ * <blockquote>"Containment, '.' and '..' segments, empty segments, NFC normalisation and
+ * case collisions are the writer's to enforce, exactly as on the input side."</blockquote>
+ *
+ * This class is the writer, and it enforces four of those five. <b>Case collisions it
+ * cannot</b>: two paths collide only relative to each other, so the obligation belongs to
+ * whatever assembles a rendition's complete file list, exactly as the input side assigns it
+ * to the semantic validator's rule S3. It is named here rather than omitted, because an
+ * earlier revision of this javadoc quoted the sentence above with "NFC normalisation and
+ * case collisions" trimmed out — which removed from the record precisely the two
+ * obligations the class did not meet (finding {@code 2b483fb-F2}).
  *
  * <p><b>No encoding happens here.</b> An S3 key is a byte string and the literal path is
  * what belongs in it; percent-encoding is the HTTP client's job at its own boundary. T1(b)
@@ -85,8 +96,39 @@ public final class ObjectKeys {
     /**
      * Matches {@code renditionPath}/{@code payloadPath} in the released schemas, which
      * dev/validate-manifests.sh already asserts have not drifted from each other.
+     *
+     * <p>This is the <em>weaker</em> of the two limits and it is not the one that protects
+     * storage: it counts Java chars and spends the whole budget on the path, ignoring the
+     * prefix every key carries. See {@link #MAX_RENDITION_PATH_BYTES}.
      */
     public static final int MAX_RENDITION_PATH_LENGTH = 1024;
+
+    /** The key-length limit S3-compatible object stores impose, counted in UTF-8 bytes. */
+    public static final int MAX_KEY_BYTES = 1024;
+
+    /**
+     * Width of {@code v1/content/C/versions/V/renditions/R/files/}.
+     *
+     * <p>Computed, not written down, so it cannot drift from the builder above. It is a
+     * constant because every component is fixed-width: three canonical UUIDs at 36 ASCII
+     * characters each plus fixed literals.
+     */
+    public static final int RENDITION_PREFIX_BYTES =
+            (renditionPrefix(new UUID(0L, 0L), new UUID(0L, 0L), new UUID(0L, 0L))
+                    + "/files/").length();
+
+    /**
+     * What is actually left for a rendition path: {@value #MAX_KEY_BYTES} minus the prefix.
+     *
+     * <p>The schema's 1024 is a limit on the path; this is the limit on the <em>key</em>,
+     * which is the one the object store enforces and the only one that knows the prefix
+     * exists. Checking only the schema's limit accepted a 1024-character ASCII path as a
+     * 1172-byte key, and 400 Japanese characters — comfortably inside 1024 chars — as a
+     * 1348-byte key (finding {@code 2b483fb-F1}). The store would then refuse the PUT, and
+     * because a rendition writes its files before its descriptor, it would refuse it after
+     * earlier files of the same rendition were already written.
+     */
+    public static final int MAX_RENDITION_PATH_BYTES = MAX_KEY_BYTES - RENDITION_PREFIX_BYTES;
 
     private ObjectKeys() {
     }
@@ -162,7 +204,30 @@ public final class ObjectKeys {
         }
         if (relativePath.length() > MAX_RENDITION_PATH_LENGTH) {
             throw new IllegalArgumentException(
-                    "rendition path exceeds " + MAX_RENDITION_PATH_LENGTH + " characters");
+                    "rendition path is " + relativePath.length() + " characters, over the "
+                            + "schema limit of " + MAX_RENDITION_PATH_LENGTH);
+        }
+        // The limit that actually protects the PUT. Both are named in the message because
+        // they fail at very different lengths and a publisher needs to know which one.
+        int bytes = relativePath.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > MAX_RENDITION_PATH_BYTES) {
+            throw new IllegalArgumentException(
+                    "rendition path is " + bytes + " UTF-8 bytes, over the "
+                            + MAX_RENDITION_PATH_BYTES + " a key leaves for it ("
+                            + MAX_KEY_BYTES + "-byte key limit minus a "
+                            + RENDITION_PREFIX_BYTES + "-byte prefix); the schema's "
+                            + MAX_RENDITION_PATH_LENGTH + "-character limit is weaker and "
+                            + "counts characters, not bytes");
+        }
+        // Reject, never normalise. WORKPLAN-BUNDLES.md: "Paths must be relative
+        // slash-separated UTF-8 in NFC. Reject, rather than normalize away, ..." --
+        // normalising would silently rewrite a publisher's filename, and the descriptor
+        // that names the original would then not describe the object that exists.
+        if (!Normalizer.isNormalized(relativePath, Normalizer.Form.NFC)) {
+            throw new IllegalArgumentException(
+                    "rendition path is not in Unicode NFC: " + quoted(relativePath)
+                            + "; the same name in two normalisations is two objects, so it "
+                            + "is refused rather than rewritten");
         }
         if (relativePath.charAt(0) == '/') {
             throw new IllegalArgumentException(

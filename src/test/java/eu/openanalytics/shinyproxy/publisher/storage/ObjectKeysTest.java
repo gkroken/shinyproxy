@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -207,6 +208,78 @@ class ObjectKeysTest {
         }
         assertThrows(IllegalArgumentException.class,
                 () -> ObjectKeys.renditionFile(C, V, R, "a".repeat(1025)));
+    }
+
+    @Test
+    @DisplayName("the assembled KEY is bounded, not just the path")
+    void assembledKeyStaysWithinTheStorageLimit() {
+        // 2b483fb-F1. The schema's limit is on the path and spends the whole budget on it;
+        // the store's limit is on the key and counts UTF-8 bytes. Measured on the parent:
+        // 1024 ASCII chars produced a 1172-byte key and 400 Japanese characters a 1348-byte
+        // one, both accepted.
+        assertEquals(148, ObjectKeys.RENDITION_PREFIX_BYTES,
+                "the rendition prefix changed width; the path budget below is derived from "
+                        + "it and every bound in this test moves with it");
+        assertEquals(ObjectKeys.MAX_KEY_BYTES - ObjectKeys.RENDITION_PREFIX_BYTES,
+                ObjectKeys.MAX_RENDITION_PATH_BYTES);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ObjectKeys.renditionFile(C, V, R, "a".repeat(1024)),
+                "a path the SCHEMA allows still produced an over-length key");
+        assertThrows(IllegalArgumentException.class,
+                () -> ObjectKeys.renditionFile(C, V, R, "\u65e5".repeat(400)),
+                "400 multi-byte characters are inside 1024 chars but over the byte budget");
+
+        // The boundary, both halves, in bytes rather than characters.
+        String atLimit = "a".repeat(ObjectKeys.MAX_RENDITION_PATH_BYTES);
+        String key = ObjectKeys.renditionFile(C, V, R, atLimit);
+        assertEquals(ObjectKeys.MAX_KEY_BYTES, key.getBytes(StandardCharsets.UTF_8).length,
+                "a path at the budget must produce a key exactly at the limit");
+        assertThrows(IllegalArgumentException.class,
+                () -> ObjectKeys.renditionFile(C, V, R, "a".repeat(
+                        ObjectKeys.MAX_RENDITION_PATH_BYTES + 1)));
+
+        // And a multi-byte path at the same BYTE budget, which has far fewer characters.
+        String jp = "\u65e5".repeat(ObjectKeys.MAX_RENDITION_PATH_BYTES / 3);
+        assertEquals(ObjectKeys.MAX_KEY_BYTES,
+                ObjectKeys.renditionFile(C, V, R, jp).getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    @Test
+    @DisplayName("a path that is not NFC is refused, not silently normalised")
+    void nonNfcPathsAreRefused() {
+        // 2b483fb-F2. The plan says "Reject, rather than normalize away" -- normalising
+        // rewrites a publisher's filename, and a descriptor naming the original would then
+        // not describe the object that exists.
+        String nfc = Normalizer.normalize("r\u00e9sum\u00e9.pdf", Normalizer.Form.NFC);
+        String nfd = Normalizer.normalize("r\u00e9sum\u00e9.pdf", Normalizer.Form.NFD);
+        assertFalse(nfc.equals(nfd), "the fixture is not exercising two normalisations");
+
+        String key = ObjectKeys.renditionFile(C, V, R, nfc);
+        assertTrue(key.endsWith("/files/" + nfc), "NFC must pass through untouched");
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> ObjectKeys.renditionFile(C, V, R, nfd),
+                "NFD was accepted, so one filename is two objects in one rendition");
+        assertTrue(e.getMessage().contains("NFC"), e.getMessage());
+
+        // Not rewritten into NFC on the way through, which would be the other failure.
+        assertFalse(ObjectKeys.validatedRenditionPath(nfc).equals(nfd));
+    }
+
+    @Test
+    @DisplayName("case collisions are NOT this class's to refuse, and it says so")
+    void caseCollisionsAreLeftToTheFileListOwner() {
+        // Deliberately asserting the gap rather than leaving it undocumented. Two paths
+        // collide only relative to each other, so a per-path validator cannot decide it;
+        // the obligation belongs to whatever assembles a rendition's complete file list.
+        // If that ever moves here, this test fails and names what has to change.
+        String upper = ObjectKeys.renditionFile(C, V, R, "Report.html");
+        String lower = ObjectKeys.renditionFile(C, V, R, "report.html");
+        assertFalse(upper.equals(lower),
+                "case is preserved, so these are two distinct keys");
+        assertTrue(upper.endsWith("/Report.html") && lower.endsWith("/report.html"),
+                "case must be preserved, never folded");
     }
 
     @Test
