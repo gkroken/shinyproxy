@@ -6,6 +6,12 @@ bound the isolation contract requires is exercised against a container that trie
 exceed it, and a bound that is not demonstrably enforced FAILS this suite. A probe that
 reports "enforced" without a number is the kind of check this project keeps deleting.
 
+A probe is either a BOUND -- something the isolation contract requires, which must be
+demonstrated against a container that tries to exceed it -- or a FACT about what the host
+offers, which is recorded and cannot fail. The two are counted separately, because
+"apparmor is not available" is not an enforced bound however prominently the detail line
+says so.
+
 Each probe prints what it claims, what it measured, and a verdict. Where "enforced" could
 be confused with "the workload never got that far", there is a positive control: the CPU
 quota is measured against an unrestricted run of the same busy loop, and no-new-privileges
@@ -34,10 +40,19 @@ VOLUME = "skald-sandbox-probe"
 results = []
 
 
-def record(name, claim, measured, ok, note=""):
+def record(name, claim, measured, ok, note="", kind="bound"):
+    """A bound is enforced or it is not. A fact is recorded and cannot fail.
+
+    Two of these probes report what the host offers rather than testing a bound the
+    contract requires, and one of them reports a MISSING capability. Printing "ok" beside
+    "apparmor ... = N" and rolling it into "11 of 11 enforced" made a recorded limitation
+    read as an enforced bound, and the headline is what gets quoted into a sign-off
+    (finding 7b6e931-F2). Facts are counted separately and never affect the exit code.
+    """
     results.append({"name": name, "claim": claim, "measured": measured, "ok": ok,
-                    "note": note})
-    print("  %-4s %-34s %s" % ("ok" if ok else "FAIL", name, measured))
+                    "note": note, "kind": kind})
+    prefix = "note" if kind == "fact" else ("ok" if ok else "FAIL")
+    print("  %-4s %-34s %s" % (prefix, name, measured))
     if note:
         print("       %s" % note)
 
@@ -157,9 +172,9 @@ def probe_storage_opt():
     record("--storage-opt size", "a per-container disk quota",
            "%s on %s: %s" % (driver, backing,
                              "supported" if supported else "REFUSED by the daemon"),
-           True,
-           "" if supported else "not a failure of the host, but it is why a bounded "
-                                "workspace needs the loop-backed volume below")
+           True, kind="fact",
+           note="" if supported else "not a failure of the host, but it is why a bounded "
+                                     "workspace needs the loop-backed volume below")
 
 
 def probe_loop_volume():
@@ -224,9 +239,10 @@ def probe_confinement():
                    "{{range .SecurityOptions}}{{println .}}{{end}}"]).stdout.split()
     seccomp = any("seccomp" in o for o in opts)
     record("apparmor", "AppArmor confinement is available",
-           "/sys/module/apparmor/parameters/enabled = %s" % apparmor, True,
-           "" if apparmor == "Y" else "NOT available here, so no profile may claim it; "
-                                      "confinement rests on userns + seccomp + cgroups")
+           "/sys/module/apparmor/parameters/enabled = %s" % apparmor, True, kind="fact",
+           note="" if apparmor == "Y" else "NOT available here, so no profile may claim "
+                                           "it; confinement rests on userns + seccomp + "
+                                           "cgroups")
     record("seccomp", "the daemon applies a seccomp profile",
            ", ".join(opts) or "none reported", seccomp)
 
@@ -255,10 +271,12 @@ def main(argv):
         except Exception as e:
             record(probe.__name__, "-", "the probe itself failed: %s: %s"
                    % (type(e).__name__, str(e)[:60]), False)
-    bad = [r for r in results if not r["ok"]]
+    bounds = [r for r in results if r["kind"] == "bound"]
+    facts = [r for r in results if r["kind"] == "fact"]
+    bad = [r for r in bounds if not r["ok"]]
     print()
-    print("  %d of %d probes enforced as required" % (len(results) - len(bad),
-                                                      len(results)))
+    print("  %d of %d bounds enforced; %d fact(s) recorded"
+          % (len(bounds) - len(bad), len(bounds), len(facts)))
     print()
     print("RESULT:", "this host can bound a worker as the contract requires"
           if not bad else "%d required bound(s) NOT enforced" % len(bad))
