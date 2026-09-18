@@ -1,5 +1,5 @@
 {
-  "note": "The literal launch arguments a build worker is started with, and the runtime seam decision 6 requires. Not a JSON Schema and not under schemas/, for the reason recorded in spec/lifecycle-v1.json. T1 fixes the shape; T3 measures each runtime; T7 writes the driver from this file. Every bound here names the probe in dev/sandbox-probe.py that demonstrates it, and dev/schema-fixture-check.py requires that correspondence in BOTH directions -- a bound whose probe does not exist, and a probe no bound claims, are each a failure. That is the whole point of the file: a launch argument nobody measured is a sentence, not a bound.",
+  "note": "The literal launch arguments a build worker is started with, and the runtime seam decision 6 requires. Not a JSON Schema and not under schemas/, for the reason recorded in spec/lifecycle-v1.json. T1 fixes the shape; T3 measures each runtime; T7 writes the driver from this file. Every bound here names the probe in dev/sandbox-probe.py that demonstrates it, and dev/schema-fixture-check.py requires that correspondence in BOTH directions -- a bound whose probe does not exist, and a probe no bound claims, are each a failure. It also compares the LITERAL ARGUMENT specified here against the literal argument that probe ran, in both directions, because matching only the probe's NAME let a bound specify --cpu-shares (a relative weight that bounds nothing on an idle host) under a green 'proved by a distinct probe' (finding 0164896-F1). That is the whole point of the file: a launch argument nobody measured is a sentence, not a bound.",
   "layout_version": 1,
 
   "seam": {
@@ -105,7 +105,8 @@
           "probe": "sized tmpfs",
           "configurable": true,
           "enforced_by": "tmpfs size=, refusing writes past the cap",
-          "why": "Scratch has to exist under a read-only root. noexec is not decoration: /tmp is where a downloaded payload lands."
+          "why": "Scratch has to exist under a read-only root. noexec is not decoration: /tmp is where a downloaded payload lands.",
+          "measured": "The size cap, noexec behaviourally (an executable script in the tmpfs is refused with Permission denied), and all three mount options read back from /proc/mounts. Until 0164896-F1 only the size was measured while the argument specified four options -- three of them unproved, on the bound whose rationale is the sentence above."
         },
         "workspace": {
           "argument": "--volume=<quota_volume>:/workspace",
@@ -126,7 +127,8 @@
           "probe": "seccomp",
           "configurable": true,
           "enforced_by": "a seccomp BPF filter applied by the runtime",
-          "why": "With AppArmor unavailable here, seccomp and user namespaces are the confinement. That is a reason to state it precisely, not loosely."
+          "why": "With AppArmor unavailable here, seccomp and user namespaces are the confinement. That is a reason to state it precisely, not loosely.",
+          "measured": "Inside the worker, with a negative control: a CONFIGURED profile gives Seccomp: 2 in /proc/self/status and denies a syscall the profile lists, while --security-opt=seccomp=unconfined gives Seccomp: 0 and allows it. Until 0164896-F2 this bound was proved by docker info reporting that the daemon supports seccomp -- a string that does not change when a worker runs wholly unconfined, and exactly the flag-reading isolation test that decision 6 rejects by name."
         }
       },
 
@@ -164,6 +166,8 @@
 
   "invariants": [
     "Every bound names a probe that dev/sandbox-probe.py records with kind='bound', and every such probe is claimed by exactly one bound. Neither direction alone is enough: the first lets a probe go unclaimed, the second lets a bound go unproved.",
+    "The literal argument a bound specifies must be the literal argument its probe ran, compared flag-first and then option by option, with <placeholder> values matching anything. Lengths must agree, so an option dropped from the profile fails as surely as one the probe never measured.",
+    "A bound is proved by observing the WORKER, never by reading what the daemon or the host supports. A capability read does not change when the worker runs unconfined, so it cannot distinguish an enforced bound from an absent one.",
     "A name the probe records as kind='fact' may never be a bound's proof.",
     "No forbidden argument may appear in any bound's argument.",
     "A runtime is selectable only if it is measured and enforces every bound. The default is not exempt.",

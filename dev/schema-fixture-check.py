@@ -574,32 +574,120 @@ def check_image_references():
     print()
 
 
+def _literal_arg(node, scope):
+    """The literal text of a record(args=...) expression, as far as it is knowable.
+
+    Resolves a name against the probe's own scope, because the probes deliberately pass a
+    variable -- TMPFS_ARG, vol_arg -- so that the argument they RUN and the argument they
+    RECORD cannot drift apart. Insisting on a literal at the record() call would break that
+    guarantee to make this parser's job easier, which is the wrong trade.
+    A %-formatted argument contributes its constant template with %s left in place; the
+    comparison treats %s as a placeholder like <name>.
+    """
+    import ast
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _literal_arg(node.left, scope)
+    if isinstance(node, ast.Name):
+        return scope.get(node.id)
+    return None
+
+
+def _assign_map(body, scope):
+    """Name -> literal text, for simple `NAME = "..."` assignments in a body."""
+    import ast
+    out = dict(scope)
+    for n in body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], ast.Name):
+            lit = _literal_arg(n.value, out)
+            if lit is not None:
+                out[n.targets[0].id] = lit
+    return out
+
+
 def _probe_records():
     """What dev/sandbox-probe.py actually records, parsed rather than assumed.
 
     Static, via ast, so this runs in the fixture container with no Docker and no host.
-    A record() whose name is not a literal (the generic handler in main()) is skipped:
-    it names whichever probe threw, so it is not a bound anything can claim.
+    Returns name -> (kind, literal argument). A record() whose name is not a literal (the
+    generic handler in main()) is skipped: it names whichever probe threw, so it is not a
+    bound anything can claim.
     """
     import ast
     tree = ast.parse(pathlib.Path("dev/sandbox-probe.py").read_text(encoding="utf-8"))
+    module_scope = _assign_map(tree.body, {})
     found = {}
-    for n in ast.walk(tree):
-        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                and n.func.id == "record"):
-            continue
-        if not n.args or not isinstance(n.args[0], ast.Constant) \
-                or not isinstance(n.args[0].value, str):
-            continue
-        kind = "bound"
-        for kw in n.keywords:
-            if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
-                kind = kw.value.value
-        # A name recorded anywhere as a fact is a fact: the failure path of a bound
-        # reuses the bound's name, but nothing reuses a fact's.
-        if found.get(n.args[0].value) != "fact":
-            found[n.args[0].value] = kind
+
+    def collect(nodes, scope):
+        for n in nodes:
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                    and n.func.id == "record":
+                if not n.args or not isinstance(n.args[0], ast.Constant) \
+                        or not isinstance(n.args[0].value, str):
+                    continue
+                kind, args = "bound", None
+                for kw in n.keywords:
+                    if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
+                        kind = kw.value.value
+                    elif kw.arg == "args":
+                        args = _literal_arg(kw.value, scope)
+                name = n.args[0].value
+                prev_kind, prev_args = found.get(name, (None, None))
+                # A name recorded anywhere as a fact is a fact: a bound's error path
+                # reuses the bound's name, but nothing reuses a fact's. That error path
+                # also records args=None, so the real argument is kept.
+                if prev_kind != "fact":
+                    found[name] = (kind, args if args is not None else prev_args)
+
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef):
+            scope = _assign_map([n for n in ast.walk(fn)
+                                 if isinstance(n, ast.Assign)], module_scope)
+            collect(list(ast.walk(fn)), scope)
+    collect(list(ast.walk(tree)), module_scope)
     return found
+
+
+def _arg_tokens(arg):
+    """A launch argument as (flag, ordered value tokens)."""
+    flag, _, value = arg.partition("=")
+    if not value:
+        return flag, []
+    return flag, [t for t in re.split(r"[,:]", value) if t != ""]
+
+
+def _is_wildcard(tok):
+    return tok.startswith("<") and tok.endswith(">") or tok == "%s"
+
+
+def _args_agree(spec_arg, probe_arg):
+    """Does the argument the profile SPECIFIES match the one the probe MEASURED?
+
+    Compared as flag plus an ordered token list, with <placeholder> and %s matching any
+    single value. Both directions matter, which is why the lengths must be equal: the
+    profile dropping an option the probe measured is as wrong as the profile adding one
+    the probe did not (finding 0164896-F1, where three of four tmpfs mount options were
+    specified and only the size was measured).
+    """
+    sf, st = _arg_tokens(spec_arg)
+    pf, pt = _arg_tokens(probe_arg)
+    if sf != pf:
+        return False, "flag %r vs measured %r" % (sf, pf)
+    if len(st) != len(pt):
+        return False, ("%d option(s) specified, %d measured: %r vs %r"
+                       % (len(st), len(pt), st, pt))
+    for a, b in zip(st, pt):
+        if _is_wildcard(a) or _is_wildcard(b):
+            continue
+        ak, _, av = a.partition("=")
+        bk, _, bv = b.partition("=")
+        if ak != bk:
+            return False, "option %r vs measured %r" % (a, b)
+        if av and bv and not _is_wildcard(av) and not _is_wildcard(bv) and av != bv:
+            return False, "option %r vs measured %r" % (a, b)
+    return True, ""
 
 
 def check_isolation_profile():
@@ -638,8 +726,9 @@ def check_isolation_profile():
         return
 
     recorded = _probe_records()
-    probe_bounds = {n for n, k in recorded.items() if k == "bound"}
-    probe_facts = {n for n, k in recorded.items() if k == "fact"}
+    probe_bounds = {n for n, (k, _) in recorded.items() if k == "bound"}
+    probe_facts = {n for n, (k, _) in recorded.items() if k == "fact"}
+    recorded_args = {n: a for n, (_, a) in recorded.items()}
     if not probe_bounds:
         fail("parsed no kind='bound' records out of dev/sandbox-probe.py; the parser "
              "broke, and every correspondence below would pass for free")
@@ -664,6 +753,24 @@ def check_isolation_profile():
         if probe in claimed:
             fail("probe %r is claimed by both %s and %s; one probe cannot demonstrate "
                  "two different bounds" % (probe, claimed[probe], name))
+            continue
+        # The argument, not only the name. Until this existed a bound could specify
+        # --cpu-shares (a relative weight, bounding nothing on an idle host) and be
+        # reported as "proved by a distinct probe" (0164896-F1).
+        spec_arg = b.get("argument")
+        probe_arg = recorded_args.get(probe)
+        if not spec_arg:
+            fail("bound %s specifies no argument; the file's whole content is the "
+                 "literal arguments" % name)
+            continue
+        if probe_arg is None:
+            fail("probe %r records no literal argument, so nothing can confirm that %s's "
+                 "%r is what was measured" % (probe, name, spec_arg))
+            continue
+        agree, why = _args_agree(spec_arg, probe_arg)
+        if not agree:
+            fail("bound %s specifies %r but probe %r measured %r -- %s"
+                 % (name, spec_arg, probe, probe_arg, why))
             continue
         claimed[probe] = name
 
@@ -719,8 +826,8 @@ def check_isolation_profile():
     if not selectable:
         fail("no runtime is selectable, so the seam's rule constrains nothing")
 
-    print("  ok   %d bound(s), each proved by a distinct probe, and every enforced probe "
-          "claimed" % len(claimed))
+    print("  ok   %d bound(s), each proved by a distinct probe that measured the SAME "
+          "literal argument" % len(claimed))
     print("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent from "
           "the launch line" % (len(probe_facts), len(forbidden)))
     print("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"

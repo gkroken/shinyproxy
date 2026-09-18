@@ -1127,6 +1127,23 @@ below are marked passed by this planning document.
       - `bash dev/validate-sandbox.sh` re-run on the host the same day rather than quoted
         from T3(a): **9 of 9 bounds, 2 facts**, docker 27.1.2. The `measured` status in the
         file is that run, not a recollection of one.
+      - **Corrected before T1 could be relied on (`0164896-F1`, `0164896-F2`).** The first
+        version of this file matched a bound to a probe by NAME only, and the sentence
+        above — "each carrying its literal argument and the probe that proves it" — was
+        therefore false for two of the nine. A bound could specify `--cpu-shares`, a
+        relative weight that bounds nothing on an idle host, and be reported green as
+        "proved by a distinct probe"; and two bounds in the shipping file were already
+        wrong that way. The tmpfs bound specified `noexec,nosuid,nodev` while the probe
+        measured only the size cap — on the bound whose own rationale is "noexec is not
+        decoration". The seccomp bound was proved by `docker info` reporting that the
+        **daemon supports** seccomp, a string that does not change when a worker runs
+        `seccomp=unconfined`, which is the "flag-reading isolation test" decision 6 rejects
+        by name. Both are now measured on the worker: noexec demonstrated behaviourally
+        with the mount options read back from `/proc/mounts`, and seccomp shown as
+        `Seccomp: 2` plus a denied syscall against an unconfined control at `Seccomp: 0`.
+        The checker now compares the **literal argument** in both directions, so an option
+        dropped from the profile fails as surely as one the probe never ran. Eighteen
+        mutations, each caught by its own branch.
 
 - [x] **T2. Author the adversarial corpus independently — before extractor code.**
       Depends T1. Implement the corpus/oracle and external sentinel harness described above

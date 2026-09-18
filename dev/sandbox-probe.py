@@ -40,8 +40,16 @@ VOLUME = "skald-sandbox-probe"
 results = []
 
 
-def record(name, claim, measured, ok, note="", kind="bound"):
+def record(name, claim, measured, ok, note="", kind="bound", args=None):
     """A bound is enforced or it is not. A fact is recorded and cannot fail.
+
+    `args` is the LITERAL launch argument this probe ran, and it is not decoration:
+    spec/isolation-profile-v1.json names a probe per bound, and until this existed the
+    correspondence was only between a bound and a probe NAME. A bound could specify
+    `--cpu-shares` -- a relative weight that bounds nothing on an idle host -- and be
+    reported as "proved by a distinct probe", because nothing compared the argument
+    written down with the argument measured (finding 0164896-F1). The profile's argument
+    and this one are now required to agree.
 
     Two of these probes report what the host offers rather than testing a bound the
     contract requires, and one of them reports a MISSING capability. Printing "ok" beside
@@ -50,7 +58,7 @@ def record(name, claim, measured, ok, note="", kind="bound"):
     (finding 7b6e931-F2). Facts are counted separately and never affect the exit code.
     """
     results.append({"name": name, "claim": claim, "measured": measured, "ok": ok,
-                    "note": note, "kind": kind})
+                    "note": note, "kind": kind, "args": args})
     prefix = "note" if kind == "fact" else ("ok" if ok else "FAIL")
     print("  %-4s %-34s %s" % (prefix, name, measured))
     if note:
@@ -95,7 +103,8 @@ def probe_cpu():
     record("cpu quota", "--cpus bounds CPU",
            "0.5 -> %.2f cores, 2.0 -> %.2f cores, unrestricted -> %.2f cores"
            % (seen["0.5"], seen["2.0"], seen["none"]), ok,
-           "" if ok else "the quota did not scale, so what was measured is not the quota")
+           "" if ok else "the quota did not scale, so what was measured is not the quota",
+           args="--cpus=0.5")
 
 
 def probe_memory():
@@ -106,7 +115,8 @@ def probe_memory():
     record("memory limit", "--memory OOM-kills an overrun",
            "allocating 256 MiB under a 64 MiB limit exited %d%s"
            % (r.returncode, " (SIGKILL)" if killed else ""), killed,
-           "" if killed else "the allocation succeeded, so memory is not bounded")
+           "" if killed else "the allocation succeeded, so memory is not bounded",
+           args="--memory=64m")
 
 
 def probe_pids():
@@ -121,7 +131,8 @@ def probe_pids():
     m = re.search(r"blocked at (\d+)", out)
     ok = bool(m) and int(m.group(1)) <= 32
     record("pid limit", "--pids-limit blocks fork",
-           "%s against a limit of 32" % (out or "no output"), ok)
+           "%s against a limit of 32" % (out or "no output"), ok,
+           args="--pids-limit=32")
 
 
 def probe_no_new_privs():
@@ -132,7 +143,8 @@ def probe_no_new_privs():
     record("no-new-privileges", "the flag sets NoNewPrivs",
            "with the flag %r, without it %r" % (with_flag, without), ok,
            "" if ok else "without the contrast this reads the same whether or not the "
-                         "flag did anything")
+                         "flag did anything",
+           args="--security-opt=no-new-privileges")
 
 
 def probe_read_only_rootfs():
@@ -144,21 +156,49 @@ def probe_read_only_rootfs():
     refused = both.count("Read-only file system") >= 2
     record("read-only rootfs", "--read-only refuses every write",
            "writes to /root and /tmp both refused" if refused
-           else "a write succeeded: %r" % both.strip()[:70], refused)
+           else "a write succeeded: %r" % both.strip()[:70], refused,
+           args="--read-only")
+
+
+TMPFS_ARG = "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m"
 
 
 def probe_tmpfs_size():
-    r = run_in(["--read-only", "--tmpfs", "/scratch:rw,size=64m"],
-               "dd if=/dev/zero of=/scratch/f bs=1M count=200 2>/dev/null; "
-               "stat -c %s /scratch/f")
+    """The size cap AND the mount options, because the profile specifies all four.
+
+    Only size was measured until 0164896-F1: three of the four options in the shipping
+    argument were unproved, on the bound whose own rationale says "noexec is not
+    decoration: /tmp is where a downloaded payload lands". noexec is demonstrated
+    behaviourally -- an executable script in the tmpfs must not run -- and the full option
+    set is read back from /proc/mounts, because an option the kernel did not apply does
+    not appear there.
+    """
+    r = run_in(["--read-only", TMPFS_ARG],
+               "dd if=/dev/zero of=/tmp/f bs=1M count=200 2>/dev/null; "
+               "stat -c %s /tmp/f; "
+               "printf '#!/bin/sh\\necho RAN\\n' > /tmp/x; chmod +x /tmp/x; "
+               "/tmp/x 2>&1 | tail -1; "
+               "awk '$2==\"/tmp\"{print $4}' /proc/mounts")
+    lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
     try:
-        written = int(r.stdout.strip().splitlines()[-1])
+        written = int(lines[0])
     except (ValueError, IndexError):
         written = -1
-    ok = 0 < written <= 64 * 1024 * 1024
-    record("sized tmpfs", "a tmpfs with size= caps writes",
-           "asked for 200 MiB, wrote %d bytes" % written, ok,
-           "tmpfs is RAM, so this bounds a small scratch and not a 10 GiB one")
+    exec_out = lines[1] if len(lines) > 1 else ""
+    mount_opts = lines[2] if len(lines) > 2 else ""
+    capped = 0 < written <= 64 * 1024 * 1024
+    # The payload must not run. "Permission denied" is the refusal; "RAN" is the failure.
+    noexec = "RAN" not in exec_out and exec_out != ""
+    present = [o for o in ("noexec", "nosuid", "nodev")
+               if o in mount_opts.split(",")]
+    ok = capped and noexec and len(present) == 3
+    record("sized tmpfs", "a tmpfs with size= caps writes and noexec refuses a payload",
+           "asked for 200 MiB, wrote %d bytes; exec gave %r; /proc/mounts says %s"
+           % (written, exec_out[:40], mount_opts or "nothing"), ok,
+           "tmpfs is RAM, so this bounds a small scratch and not a 10 GiB one"
+           if ok else "capped=%s noexec=%s options present=%s"
+           % (capped, noexec, ",".join(present) or "none"),
+           args=TMPFS_ARG)
 
 
 def probe_storage_opt():
@@ -211,9 +251,10 @@ def probe_loop_volume():
             record("loop-backed volume", "a real disk quota",
                    "volume create failed: %s" % cv.stderr.strip()[-70:], False)
             return
-        r = run_in(["--read-only", "-v", "%s:/scratch" % VOLUME],
-                   "dd if=/dev/zero of=/scratch/f bs=1M count=200 2>/dev/null; "
-                   "stat -c %s /scratch/f")
+        vol_arg = "--volume=%s:/workspace" % VOLUME
+        r = run_in(["--read-only", vol_arg],
+                   "dd if=/dev/zero of=/workspace/f bs=1M count=200 2>/dev/null; "
+                   "stat -c %s /workspace/f")
         try:
             written = int(r.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -222,7 +263,8 @@ def probe_loop_volume():
         record("loop-backed volume", "a real disk quota, no bind mount, no xfs",
                "asked for 200 MiB into a 64 MiB volume, wrote %d bytes" % written, ok,
                "the loop device is attached by a one-off privileged setup container; "
-               "the worker gets the volume, never the device")
+               "the worker gets the volume, never the device",
+               args=vol_arg)
     finally:
         docker(["volume", "rm", "-f", VOLUME])
         if loop:
@@ -235,16 +277,63 @@ def probe_confinement():
     """What the host offers, recorded rather than claimed."""
     enabled = pathlib.Path("/sys/module/apparmor/parameters/enabled")
     apparmor = enabled.read_text().strip() if enabled.exists() else "absent"
-    opts = docker(["info", "--format",
-                   "{{range .SecurityOptions}}{{println .}}{{end}}"]).stdout.split()
-    seccomp = any("seccomp" in o for o in opts)
     record("apparmor", "AppArmor confinement is available",
            "/sys/module/apparmor/parameters/enabled = %s" % apparmor, True, kind="fact",
            note="" if apparmor == "Y" else "NOT available here, so no profile may claim "
                                            "it; confinement rests on userns + seccomp + "
                                            "cgroups")
-    record("seccomp", "the daemon applies a seccomp profile",
-           ", ".join(opts) or "none reported", seccomp)
+
+
+# A configured profile, not the daemon default: the bound's argument names one, so one
+# has to be applied for the argument to be the thing measured. defaultAction ALLOW with a
+# single denied family keeps the container working while making the filter observable.
+SECCOMP_PROFILE = {
+    "defaultAction": "SCMP_ACT_ALLOW",
+    "syscalls": [{"names": ["chmod", "fchmod", "fchmodat", "fchmodat2"],
+                  "action": "SCMP_ACT_ERRNO", "errnoRet": 1}],
+}
+
+
+def probe_seccomp():
+    """Measured on the worker, with a negative control -- not read off the daemon.
+
+    This replaces a `docker info` capability read (finding 0164896-F2). That output
+    describes what the daemon SUPPORTS and does not vary with what a worker is running:
+    a worker started with seccomp=unconfined produced the identical "ok seccomp
+    name=seccomp,profile=builtin" line. Decision 6 names "a flag-reading isolation test"
+    among the things this track exists to refuse, so a bound proved that way was the
+    rejected thing wearing the name of the accepted one.
+
+    Two signals, both from inside the worker: the kernel's own filter mode, and a syscall
+    the configured profile denies. The unconfined run is the control -- without it, a
+    profile that silently failed to apply would read exactly like one that worked.
+    """
+    tmp = tempfile.mkdtemp(prefix="skald-seccomp-")
+    try:
+        prof = pathlib.Path(tmp) / "profile.json"
+        prof.write_text(json.dumps(SECCOMP_PROFILE))
+        prof.chmod(0o644)
+        script = ("grep Seccomp: /proc/self/status | tr -d '\\t'; "
+                  "chmod 700 /etc/hostname 2>&1 | tail -1 || true")
+        applied = run_in(["--security-opt=seccomp=%s" % prof], script)
+        control = run_in(["--security-opt=seccomp=unconfined"], script)
+        a_out, c_out = applied.stdout.strip(), control.stdout.strip()
+        # Mode 2 is SECCOMP_MODE_FILTER; 0 is no filter at all.
+        a_mode = "Seccomp:2" in a_out.replace(" ", "")
+        c_mode = "Seccomp:0" in c_out.replace(" ", "")
+        denied = "Operation not permitted" in a_out or "Permission denied" in a_out
+        allowed = "not permitted" not in c_out and "denied" not in c_out
+        ok = a_mode and c_mode and denied and allowed
+        record("seccomp", "a CONFIGURED seccomp profile filters the worker's syscalls",
+               "with the profile %r; unconfined %r"
+               % (a_out.replace("\n", " | ")[:60], c_out.replace("\n", " | ")[:40]), ok,
+               "" if ok else "filter=%s control-unfiltered=%s chmod-denied=%s "
+                             "chmod-allowed-unconfined=%s -- without all four this is a "
+                             "capability read, not a measurement"
+                             % (a_mode, c_mode, denied, allowed),
+               args="--security-opt=seccomp=%s" % prof)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def probe_network_none():
@@ -253,7 +342,8 @@ def probe_network_none():
     isolated = "Network is unreachable" in r.stdout or "timed out" in r.stdout
     record("network none", "--network none has no egress",
            "outbound connect %s" % ("refused" if isolated else "SUCCEEDED: " +
-                                    r.stdout.strip()[-50:]), isolated)
+                                    r.stdout.strip()[-50:]), isolated,
+           args="--network=none")
 
 
 def main(argv):
@@ -265,7 +355,8 @@ def main(argv):
     print()
     for probe in (probe_cpu, probe_memory, probe_pids, probe_no_new_privs,
                   probe_read_only_rootfs, probe_tmpfs_size, probe_storage_opt,
-                  probe_loop_volume, probe_confinement, probe_network_none):
+                  probe_loop_volume, probe_confinement, probe_seccomp,
+                  probe_network_none):
         try:
             probe()
         except Exception as e:
