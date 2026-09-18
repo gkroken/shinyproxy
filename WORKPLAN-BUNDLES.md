@@ -1304,7 +1304,7 @@ below are marked passed by this planning document.
       silence. Verifying it needs syscall tracing of the extractor, which belongs with
       the extractor at T5.
 
-- [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
+- [~] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,
       quota enforcement, egress gateway and trusted registry transport. Exercise malicious
       code in a real dependency-install hook, not merely a sibling test container. Include
@@ -1312,6 +1312,50 @@ below are marked passed by this planning document.
       above and an allowed package build/push as positive controls. **Pass:** measured
       containment and cleanup plus the exact deployment profile. If it requires a weakened
       invariant, stop and present the failed probe and alternatives for Q2 sign-off.
+
+      **T3(a) done 2026-09-18 — what this host can actually enforce.**
+      `dev/sandbox-probe.py` and `dev/validate-sandbox.sh`. Eleven probes, each exercising
+      a bound against a container that tries to exceed it; a bound that is not
+      demonstrably enforced fails the run. It runs on the host, not in a container,
+      because the host is the subject.
+
+      | Bound | Measured |
+      |---|---|
+      | CPU | `--cpus=0.5` → 0.51 cores, `--cpus=2` → 2.01, unrestricted → 3.99 |
+      | Memory | 256 MiB allocated under a 64 MiB limit → exit 137 (SIGKILL) |
+      | PIDs | `--pids-limit=32` → fork blocked at 30 |
+      | no-new-privileges | `NoNewPrivs: 1` with the flag, `0` without |
+      | Read-only rootfs | writes to `/root` and `/tmp` both refused |
+      | Sized tmpfs | 200 MiB asked, 64 MiB written |
+      | Loop-backed volume | 200 MiB asked into a 64 MiB volume, 53 MiB written |
+      | Network | `--network none` → outbound connect refused |
+      | seccomp | `name=seccomp,profile=builtin` |
+
+      **Q2 — the CPU worry T0 raised does not apply, and the disk one is solved.**
+      - T0 recorded that the user session delegates only `memory pids`. That path
+        (`/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service`) **does not exist
+        on this host**; this shell's cgroup is `0::/` and the root cgroup delegates
+        `cpuset cpu io memory hugetlb pids rdma`. Workers run under the rootful Docker
+        daemon, which applies the quota itself — measured above, scaling exactly. The
+        finding was recorded honestly and is simply superseded by measurement.
+      - **Disk was the real gap.** `--storage-opt size=` is refused outright (overlay2 on
+        extfs needs xfs with `pquota`), and an unbounded container wrote 200 MiB into its
+        own layer at 3.4 GB/s. The contract calls for a real quota, not a free-space
+        check. Solved without changing the host filesystem: a **loop-backed ext4 volume**
+        plus `--read-only`. A sparse image is made and attached by one-off *privileged
+        setup containers* — that privilege is the trusted launcher's; the worker receives
+        the volume, never the device, and cannot write anywhere else.
+      - **AppArmor stays unavailable** (`enabled = N`), confirming T0. Confinement here
+        rests on user namespaces, seccomp and cgroups, and no profile may claim otherwise.
+
+      Mutation-tested, because a probe suite that cannot fail measures nothing: dropping
+      the CPU quota reports `0.5 -> 4.00 cores`; dropping the memory limit reports
+      `exited 0`; swapping the 64 MiB volume for a 1 GiB tmpfs reports the full 200 MiB
+      written. Each turns the run red.
+
+      Still owed for T3: rootless BuildKit itself, the launcher/worker contract, the
+      egress gateway and allowlist, trusted registry transport, malicious code in a real
+      dependency-install hook, and the second worker/canary.
 
 - [ ] **T4. S3 adapter and layout proof.** Depends T1. Use real MinIO and scoped service
       credentials; implement immutable artifacts, checksums, completion descriptors,
