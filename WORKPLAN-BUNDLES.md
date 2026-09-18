@@ -1227,9 +1227,33 @@ below are marked passed by this planning document.
         per pass; the boundary properties are parameterised, so they hold at any profile.
         `--full` uses the defaults.
 
-      Still owed for T2(b): the guard-removal matrix as a policed suite rather than a
-      one-off run, and the unbounded variant under outer limits. That is what the Pass
-      line turns on.
+      - **The Pass line is met and policed** (2026-09-18). `dev/bundle-oracle-matrix.py`
+        and `dev/validate-oracle-matrix.sh` hand the oracle eleven subjects, each wrong
+        in one specific way, and assert *which* finding comes back on *which* fixture —
+        not that something failed, which an oracle failing everything for the wrong
+        reason would satisfy. 84s for eleven full corpus passes.
+      - The four classes the Pass line names, each with the subject that demonstrates it:
+        outside-root change (an extractor whose *decisions are all correct* and which
+        plants one file outside the root — a decision-only oracle passes it), duplicate
+        overwrite, limit bypass, and unexpected acceptance. Plus residue after rejection,
+        unexpected *rejection*, and the outer deadline.
+      - The most useful row is "rejects everything": it passes **71 of 90**, and the 19
+        it fails are exactly the accepted fixtures. The positive controls are the only
+        thing between a do-nothing extractor and a clean report.
+      - **Removing one bound is usually masked by another guard.** With only `--without
+        limits`, the inventory check rejects most bombs first — a bomb that ships an
+        undeclared file is caught as inventory-extra-file long before any cap is
+        consulted; `dup-regular` is likewise caught by the manifest hash check, not by
+        the duplicate guard. Good news about layering, bad news for single-guard
+        matrices, and the reason the limit-bypass and duplicate-overwrite scenarios
+        remove two guards: to isolate the guard under test, not to inflate the numbers.
+      - The matrix was itself mutation-tested: removing the oracle's outside-root
+        detection fails three scenarios, removing its residue check fails one.
+
+      Still owed for T2: the rename race during extraction, and extraction into a
+      pre-existing symlinked root (the world provides one; nothing points an extractor at
+      it yet). Both are in the plan's links row and neither is expressible in archive
+      bytes, so they wait on a concurrency harness.
 
 - [ ] **T3. Prove the sandbox on the actual Docker host — Opus 5 leads.** Depends T0/T2.
       Pin a rootless BuildKit candidate and prototype only the launcher/worker contract,

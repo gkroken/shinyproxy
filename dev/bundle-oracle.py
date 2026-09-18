@@ -21,8 +21,12 @@ the limits, so the properties hold at any profile, and at the documented default
 bombs alone would write about three gigabytes per pass. `--full` uses the defaults.
 
 Usage:
-    python3 dev/bundle-oracle.py [--full] [--keep] [--extractor PATH]
+    python3 dev/bundle-oracle.py [--full] [--keep] [--json] [--only FIXTURE]
+                                 [--deadline SECONDS] [--extractor PATH]
                                  [-- EXTRACTOR ARGS...]
+
+`--json` prints the findings as one object instead of a report, which is how
+dev/bundle-oracle-matrix.py consumes a run.
 
 Anything after `--` is appended to the extractor's argv, which is how a guard is removed
 (`-- --without duplicates`) or a variant selected (`-- --unsafe`). The subject is invoked
@@ -170,6 +174,14 @@ def check_produced(root):
 def run(argv):
     full = "--full" in argv
     keep = "--keep" in argv
+    as_json = "--json" in argv
+    # One fixture, for the checks whose cost is per-run rather than per-corpus -- the
+    # deadline probe sleeps past it, and doing that ninety times would take an hour.
+    only = argv[argv.index("--only") + 1] if "--only" in argv else None
+    # The outer deadline, overridable so the matrix can prove it bites without waiting
+    # two minutes for a subject that is sleeping on purpose.
+    deadline_override = (int(argv[argv.index("--deadline") + 1])
+                         if "--deadline" in argv else None)
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     head = argv[:argv.index("--")] if "--" in argv else argv
     extractor = pathlib.Path(head[head.index("--extractor") + 1]) \
@@ -193,20 +205,29 @@ def run(argv):
         return 1
     doc = json.loads(produced.stdout.decode())
     limits, fixtures = doc["limits"], doc["fixtures"]
+    if only:
+        fixtures = [f for f in fixtures if f["name"] == only]
+        if not fixtures:
+            print("  FAIL no fixture named %r" % only)
+            return 1
+    if deadline_override is not None:
+        limits["extraction_deadline_seconds"] = deadline_override
     budget = limits["max_expanded_bytes"] * DISK_BUDGET_FACTOR
     deadline = limits["extraction_deadline_seconds"] * DEADLINE_SLACK
 
-    print("== oracle: %d fixtures, %s profile ==" %
-          (len(fixtures), "default" if full else "reduced"))
-    print("   subject: %s %s" % (extractor, " ".join(extra) or "(all guards on)"))
-    print("   outer limits: %.0fs deadline, %d MiB disk budget per fixture"
-          % (deadline, budget // (1 << 20)))
     regime = read_detection(str(base))
-    if regime != "strictatime":
-        print("   note: atime regime is %s, so 'nothing was read' is NOT claimed" % regime)
-    print()
+    if not as_json:
+        print("== oracle: %d fixtures, %s profile ==" %
+              (len(fixtures), "default" if full else "reduced"))
+        print("   subject: %s %s" % (extractor, " ".join(extra) or "(all guards on)"))
+        print("   outer limits: %.0fs deadline, %d MiB disk budget per fixture"
+              % (deadline, budget // (1 << 20)))
+        if regime != "strictatime":
+            print("   note: atime regime is %s, so 'nothing was read' is NOT claimed"
+                  % regime)
+        print()
 
-    failures, kinds, worst = 0, {}, []
+    failures, kinds, worst, records = 0, {}, [], []
     for i, f in enumerate(fixtures):
         world = World(base / ("w%03d" % i))
         archive = corpus / (f["name"] + ".tar.gz")
@@ -231,10 +252,23 @@ def run(argv):
             failures += 1
             for b in bad:
                 kinds[b.kind] = kinds.get(b.kind, 0) + 1
+            records.append({"name": f["name"], "expect": f["expect"], "group": f["group"],
+                            "findings": [{"kind": b.kind, "detail": b.detail}
+                                         for b in bad]})
             if len(worst) < 25:
                 worst.append((f["name"], f["expect"], bad))
         if not keep:
             world.destroy()
+
+    if as_json:
+        if not keep:
+            shutil.rmtree(corpus, ignore_errors=True)
+        print(json.dumps({"fixtures": len(fixtures), "clean": len(fixtures) - failures,
+                          "profile": "full" if full else "reduced",
+                          "subject": str(extractor), "args": extra,
+                          "atime_regime": regime, "kinds": kinds,
+                          "failures": records}))
+        return 0 if not failures else 1
 
     for name, expect, bad in worst:
         print("  FAIL %-34s (want %s)" % (name, expect))
