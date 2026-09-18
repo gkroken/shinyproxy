@@ -662,6 +662,30 @@ def _is_wildcard(tok):
     return tok.startswith("<") and tok.endswith(">") or tok == "%s"
 
 
+def _placeholders_in(arg):
+    """The placeholder NAMES in an argument, by the same predicate that accepts them.
+
+    Derived from _is_wildcard rather than from a regex of its own. A separate
+    r"<([a-z_]+)>" was narrower than the predicate it guarded, so `<exec2>` or `<EXEC>`
+    was a wildcard to the comparison and invisible to the declaration check -- and the
+    runner printed "nothing fixed can become configurable unnoticed" in a run where
+    noexec had just become configurable (finding aa906db-F1). One concept described by
+    two patterns is the same defect as the count-claim spellings (f1078e5-F2, b16b1e4-F1);
+    the fix is one predicate, not a wider alphabet.
+    """
+    names = set()
+    _, tokens = _arg_tokens(arg)
+    for tok in tokens:
+        candidates = [tok]
+        key, sep, value = tok.partition("=")
+        if sep:
+            candidates.append(value)
+        for c in candidates:
+            if _is_wildcard(c):
+                names.add(c[1:-1] if c.startswith("<") else c)
+    return names
+
+
 def _args_agree(spec_arg, probe_arg):
     """Does the argument the profile SPECIFIES match the one the probe MEASURED?
 
@@ -780,7 +804,7 @@ def check_isolation_profile():
                  "silently widens what may vary, so the list is required even when empty"
                  % name)
             continue
-        used = set(re.findall(r"<([a-z_]+)>", spec_arg))
+        used = _placeholders_in(spec_arg)
         undeclared = sorted(used - set(declared))
         unused = sorted(set(declared) - used)
         if undeclared:
