@@ -151,14 +151,21 @@
              output (ADR-0007, spine #2 T4). Apache License 2.0, as is every artifact it
              resolves; flagged under Q4 before adding.
 
-             VERSION IS PINNED TO THE ENGINE'S, NOT TO THE NEWEST. ContainerProxy 1.2.4
-             already puts the AWS SDK on this classpath: sso, sts, ecs and their protocol
-             modules arrive transitively at 2.31.21. Declaring s3 at the then-latest 2.55.0
-             produced a MIXED-VERSION classpath, with 2.55.0 sdk-core underneath 2.31.21
-             service modules that were compiled against 2.31.21. AWS publishes a BOM
+             THIS DOES NOT ADD THE SDK; IT PINS ONE THAT IS ALREADY HERE. ContainerProxy
+             1.2.4 brings the whole 2.31.21 module set transitively, s3 INCLUDED, along with
+             sso, sts, ecs and their protocol modules. Measured against the parent commit:
+             33 awssdk artifacts before, 34 after, and the single new jar is
+             url-connection-client. Nothing else was added, removed or version-changed.
+             What this declaration buys is that an inherited dependency becomes an
+             intentional one with a version this repository controls.
+
+             VERSION IS PINNED TO THE ENGINE'S, NOT TO THE NEWEST, and that is the whole
+             point. Declaring s3 at the then-latest 2.55.0 did not sit alongside the
+             engine's set, it UPGRADED the engine's own s3 to 2.55.0 and left sso, sts, ecs
+             and the protocol modules at 2.31.21, a mixed-version classpath with 2.55.0
+             core underneath service modules compiled against 2.31.21. AWS publishes a BOM
              precisely to stop that, and mixing 2.x module versions is unsupported.
-             Matching 2.31.21 keeps all 34 awssdk artifacts on one version and changes
-             nothing the engine ships. AwsSdkClasspathTest fails if that ever stops holding.
+             AwsSdkClasspathTest fails if that ever stops holding.
 
              Upgrading the whole set to a newer SDK is a separate decision, because it
              changes what ContainerProxy runs with and not only what Skald runs with.

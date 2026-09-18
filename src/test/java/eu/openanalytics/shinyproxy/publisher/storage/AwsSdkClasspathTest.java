@@ -41,12 +41,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The AWS SDK must be on this classpath exactly once, at one version.
  *
- * <p>ContainerProxy 1.2.4 already brings the SDK in transitively — {@code sso}, {@code sts},
- * {@code ecs} and their protocol modules at 2.31.21 — which is not obvious from this
- * repository's {@code pom.xml} and was not noticed until the resolved list was actually
- * read. Declaring {@code s3} at the newest release put 2.55.0 {@code sdk-core} underneath
- * 2.31.21 service modules compiled against 2.31.21. AWS ships a BOM to prevent exactly
- * that, and mixing 2.x module versions is unsupported.
+ * <p>ContainerProxy 1.2.4 already brings the whole SDK in transitively at 2.31.21 —
+ * {@code s3} itself, plus {@code sso}, {@code sts}, {@code ecs} and their protocol modules
+ * — which is not obvious from this repository's {@code pom.xml} and was not noticed until
+ * the resolved list was actually read. So declaring {@code s3} at the newest release did
+ * not add a module beside the engine's: it <em>upgraded the engine's own</em> {@code s3}
+ * to 2.55.0 and left the rest at 2.31.21, putting 2.55.0 {@code sdk-core} underneath
+ * service modules compiled against 2.31.21. AWS ships a BOM to prevent exactly that, and
+ * mixing 2.x module versions is unsupported.
  *
  * <p>Nothing else in the build would notice. Maven's nearest-wins mediation resolves a
  * mixed set silently and the jar builds, so the failure would arrive at runtime as a
@@ -86,13 +88,16 @@ class AwsSdkClasspathTest {
         Map<String, String> artifacts = sdkArtifacts();
 
         // Without this the loop below passes for free on an empty map, which is the shape
-        // this project has produced at three levels already. s3 is declared in the pom, so
-        // its absence means the classpath probe has broken, not that the SDK is gone.
+        // this project has produced at three levels already.
         assertFalse(artifacts.isEmpty(),
                 "found no software.amazon.awssdk jars on the test classpath; the probe has "
                         + "broken and the version check below would assert nothing");
+        // s3 reaches the classpath through ContainerProxy whether or not this repository
+        // declares it, so its absence means the probe broke rather than that a declaration
+        // was dropped.
         assertTrue(artifacts.containsKey("s3"),
-                "the s3 module is declared in pom.xml but is not on the classpath: "
+                "no s3 module on the classpath; ContainerProxy brings one transitively and "
+                        + "pom.xml pins it, so the classpath probe has broken: "
                         + artifacts.keySet());
 
         TreeSet<String> versions = new TreeSet<>(artifacts.values());
@@ -113,9 +118,10 @@ class AwsSdkClasspathTest {
                     "the AWS SDK is on this classpath at " + versions.size() + " different "
                             + "versions. Service modules are compiled against their own "
                             + "core, so a mixed set fails at runtime, not at build time. "
-                            + "ContainerProxy contributes sso/sts/ecs transitively, so "
-                            + "aws-sdk.version in pom.xml must match whatever the engine "
-                            + "brings.\n  " + String.join("\n  ", detail));
+                            + "ContainerProxy contributes s3, sso, sts and ecs "
+                            + "transitively, so aws-sdk.version in pom.xml must match "
+                            + "whatever the engine brings.\n  "
+                            + String.join("\n  ", detail));
         }
 
         assertEquals(1, versions.size());
@@ -128,7 +134,7 @@ class AwsSdkClasspathTest {
         // These arrive only through ContainerProxy. If they vanish, the version this
         // project pins is no longer constrained by the engine and the choice should be
         // revisited deliberately rather than inherited from a stale comment in the pom.
-        for (String engineModule : new String[]{"sso", "sts", "ecs"}) {
+        for (String engineModule : new String[]{"sso", "sts", "ecs", "s3"}) {
             assertTrue(artifacts.containsKey(engineModule),
                     "ContainerProxy no longer contributes " + engineModule + "; "
                             + "aws-sdk.version is pinned to match the engine and that "
