@@ -50,6 +50,12 @@ OUTER_NET = "skald-egress-outer"
 GATEWAY = "skald-egress-gateway"
 ALLOWED = "allowed-repo"
 DENIED = "denied-host"
+# A name an attacker owns outright that EXTENDS an allowlisted one. This is the classic
+# bypass of a host allowlist: tinyproxy matches filter entries as regexes against the
+# destination host, so an unanchored `pypi.org` also matches `pypi.org.attacker.net`.
+# Q3's rule is "deny all except the configured repository hosts", and this is the name
+# that defeats it the moment the anchors are dropped.
+SUFFIX_ATTACK = "allowed-repo.evil"
 GATEWAY_IMAGE = "skald-egress-gateway:local"
 CLIENT_IMAGE = os.environ.get("EGRESS_CLIENT_IMAGE", "alpine:3.20")
 PORT = 8888
@@ -69,10 +75,15 @@ def docker(args, **kw):
     return subprocess.run(["docker"] + args, capture_output=True, text=True, **kw)
 
 
-def build_gateway(directory, allowlist, default_deny=True):
-    """tinyproxy with a default-deny filter: the allowlist IS the configuration."""
+def build_gateway(directory, allowlist, default_deny=True, anchored=True):
+    """tinyproxy with a default-deny filter: the allowlist IS the configuration.
+
+    Anchored, and that is load-bearing rather than tidy: an unanchored entry matches any
+    host CONTAINING it, so `allowed-repo` would also admit `allowed-repo.evil`.
+    """
     d = pathlib.Path(directory)
-    (d / "filter").write_text("".join("^%s$\n" % h for h in allowlist))
+    pattern = "^%s$\n" if anchored else "%s\n"
+    (d / "filter").write_text("".join(pattern % h for h in allowlist))
     (d / "tinyproxy.conf").write_text(
         "User nobody\nGroup nobody\n"
         "Port %d\nListen 0.0.0.0\nTimeout 60\n" % PORT +
@@ -96,7 +107,7 @@ def build_gateway(directory, allowlist, default_deny=True):
 
 
 def cleanup():
-    for name in (GATEWAY, ALLOWED, DENIED):
+    for name in (GATEWAY, ALLOWED, DENIED, SUFFIX_ATTACK):
         docker(["rm", "-f", name])
     # Anything else still attached, which is not hypothetical: a `docker run --rm` whose
     # CLIENT is killed by a timeout leaves the container running, and it then holds the
@@ -119,13 +130,13 @@ def from_worker(script, network=None):
                    CLIENT_IMAGE, "sh", "-c", script], timeout=180)
 
 
-def bring_up(tmp, allowlist, default_deny=True):
-    """A gateway with the given configuration, and the two servers behind it."""
+def bring_up(tmp, allowlist, default_deny=True, anchored=True):
+    """A gateway with the given configuration, and the servers behind it."""
     cleanup()
-    build_gateway(tmp, allowlist, default_deny)
+    build_gateway(tmp, allowlist, default_deny, anchored)
     docker(["network", "create", "--internal", INNER_NET])
     docker(["network", "create", OUTER_NET])
-    for name in (ALLOWED, DENIED):
+    for name in (ALLOWED, DENIED, SUFFIX_ATTACK):
         docker(["run", "-d", "--name", name, "--network", OUTER_NET,
                 "--network-alias", name, "alpine:3.20", "sh", "-c",
                 "while true; do printf 'HTTP/1.1 200 OK\\r\\n"
@@ -192,6 +203,18 @@ def self_test(tmp):
          lambda: connects(ALLOWED, OUTER_NET),
          "the bypass checks must be the internal network, not the absence of a route")
 
+    # The reviewer's own weakening: anchors dropped. It must fail the suffix check and
+    # nothing else, which is what proves that check sees its own hole rather than
+    # inheriting a pass from one of the others.
+    bring_up(tmp, [ALLOWED], anchored=False)
+    case("the allowlist is unanchored",
+         lambda: reaches(SUFFIX_ATTACK),
+         "an unanchored entry must admit a host that extends an allowed name")
+    case("  ... and only that check notices",
+         lambda: reaches(ALLOWED) and not reaches(DENIED),
+         "the allowed host still works and the unrelated host is still refused, so the "
+         "suffix check is the one that moved")
+
     bring_up(tmp, [])
     case("the allowlist is emptied",
          lambda: not reaches(ALLOWED),
@@ -201,7 +224,7 @@ def self_test(tmp):
     cleanup()
     print()
     if missed:
-        print("RESULT: self-test FAILED, %d of 5 weakening(s) undetected" % len(missed))
+        print("RESULT: self-test FAILED, %d of 7 weakening(s) undetected" % len(missed))
         return 1
     print("RESULT: self-test passed -- every check fails when its rule is removed")
     return 0
@@ -249,7 +272,20 @@ def main(argv):
         record("no direct route off-host", "the internal network has no default route",
                "refused" if no_internet else "CONNECTED to 1.1.1.1", no_internet)
 
-        # 5. An IP literal through the gateway. Allowlisting by NAME is worthless if a
+        # 5. A host the attacker owns that EXTENDS an allowlisted name. If the filter is
+        #    unanchored this is admitted, and it is the bypass that matters in production:
+        #    an attacker who registers pypi.org.example.net gets through a filter written
+        #    without anchors.
+        suffix = from_worker("wget -q -T 10 -O - http://%s/ 2>&1; echo rc=$?"
+                             % SUFFIX_ATTACK)
+        suffix_blocked = "rc=0" not in suffix.stdout
+        record("suffix of an allowed name refused",
+               "the allowlist is anchored, so extending a name does not admit it",
+               "refused" if suffix_blocked
+               else "REACHED %s, so the allowlist is not anchored" % SUFFIX_ATTACK,
+               suffix_blocked)
+
+        # 6. An IP literal through the gateway. Allowlisting by NAME is worthless if a
         #    numeric destination skips the filter.
         addr = docker(["inspect", "-f",
                        "{{(index .NetworkSettings.Networks \"%s\").IPAddress}}" % OUTER_NET,
