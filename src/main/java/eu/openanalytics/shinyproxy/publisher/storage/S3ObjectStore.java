@@ -112,22 +112,44 @@ public class S3ObjectStore implements ObjectStore {
     @Override
     public StoredObject putStreaming(String bucket, String key, InputStream content,
                                      long declaredLength, String contentType) {
+        return writeStreaming(bucket, key, content, declaredLength, contentType, false)
+                .orElseThrow(() -> new ObjectStoreException(
+                        "unconditional streaming put reported a conflict for "
+                                + bucket + "/" + key));
+    }
+
+    @Override
+    public Optional<StoredObject> putStreamingIfAbsent(String bucket, String key,
+                                                       InputStream content,
+                                                       long declaredLength,
+                                                       String contentType) {
+        return writeStreaming(bucket, key, content, declaredLength, contentType, true);
+    }
+
+    private Optional<StoredObject> writeStreaming(String bucket, String key,
+                                                  InputStream content, long declaredLength,
+                                                  String contentType, boolean onlyIfAbsent) {
         MessageDigest digest = newDigest();
         CountingStream counted = new CountingStream(new DigestInputStream(content, digest));
-        PutObjectRequest request = PutObjectRequest.builder()
+        PutObjectRequest.Builder request = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key)
                 .contentType(contentType)
-                .contentLength(declaredLength)
-                .build();
+                .contentLength(declaredLength);
+        if (onlyIfAbsent) {
+            request.ifNoneMatch("*");
+        }
         PutObjectResponse response;
         try {
             // fromInputStream with an explicit length, so the SDK streams rather than
             // buffering to discover the size. No metadata digest here: headers are sent
             // before the body is read, so there is nothing to put in them yet.
-            response = client.putObject(request,
+            response = client.putObject(request.build(),
                     RequestBody.fromInputStream(counted, declaredLength));
         } catch (S3Exception e) {
+            if (onlyIfAbsent && e.statusCode() == 412) {
+                return Optional.empty();
+            }
             throw new ObjectStoreException(
                     "could not write " + bucket + "/" + key + ": " + describe(e), e);
         } catch (RuntimeException e) {
@@ -166,8 +188,8 @@ public class S3ObjectStore implements ObjectStore {
                             + "is truncated. An upload whose receipt is never committed is "
                             + "inert and is collected by the incomplete-upload rule.");
         }
-        return StoredObject.digested(bucket, key, counted.count(), hex(digest),
-                response.eTag());
+        return Optional.of(StoredObject.digested(bucket, key, counted.count(), hex(digest),
+                response.eTag()));
     }
 
     @Override

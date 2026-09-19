@@ -82,6 +82,23 @@ public interface ObjectStore {
                               long declaredLength, String contentType);
 
     /**
+     * The create-only counterpart of {@link #putStreaming}.
+     *
+     * <p>Every object inside one bundle's prefix is written this way, because the frozen
+     * admin transport says a bundle id names <em>particular</em> bytes:
+     * {@code spec/admin-transport-v1.json}, {@code bundle.upload} — "Different bytes at the
+     * same id are the same 409 -- replacing content means a fresh bundle id, because a
+     * bundle id names particular bytes that a build may already have read." Enforcing that
+     * with the store rather than with a read-then-write is what makes it hold when two
+     * uploads race.
+     *
+     * @return the stored object, or empty if something was already at that key
+     */
+    Optional<StoredObject> putStreamingIfAbsent(String bucket, String key,
+                                                InputStream content, long declaredLength,
+                                                String contentType);
+
+    /**
      * Writes an object only if the key does not already exist.
      *
      * <p>Used for log chunks, where "a single trusted log writer conditionally creates
