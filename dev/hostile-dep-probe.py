@@ -212,16 +212,21 @@ with open("/proc/self/status") as fh:
     if "Seccomp:\t2" not in fh.read():
         findings.append("no seccomp filter is loaded")
 
-# 9. A denied syscall. ptrace is the one an attacker reaches for to read another
-#    process's memory, and no dependency install has ever needed it.
+# 9. A denied syscall, behaviourally. ptrace is the one an attacker reaches for to read
+#    another process's memory, no dependency install has ever needed it, and it is the
+#    one that DISCRIMINATES: unconfined it succeeds here, confined the filter refuses it.
 import ctypes
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 if libc.syscall(101, 0, 0, 0, 0) == 0:           # SYS_ptrace on x86-64
     findings.append("ptrace SUCCEEDED despite the seccomp profile")
 
-# 10. Loading a kernel module, the most direct escape there is.
-if libc.syscall(313, 0, 0, 0) == 0:              # SYS_finit_module on x86-64
-    findings.append("finit_module SUCCEEDED despite the seccomp profile")
+# There is deliberately no finit_module check here. It was tried and removed: loading a
+# kernel module needs CAP_SYS_MODULE, which this container never has, so the call fails
+# with EPERM whether or not seccomp is loaded -- and the filter's own errnoRet is EPERM
+# too. Its "succeeded" branch is unreachable, which makes it a check that cannot fire.
+# The stricter self-test matcher is what exposed it; under an `any` match it sat unnoticed
+# behind ptrace. The module-loading family stays DENIED in the profile, because defence
+# does not depend on being observable.
 
 with open(EVIDENCE, "w") as fh:
     fh.write("%s\\n" + "|".join(findings) + "\\n")
@@ -273,11 +278,15 @@ def run_install(args, mount_dir, extra=()):
                  timeout=300)
 
 
-def attack_findings(args, pkg_parent, extra=()):
+def attack_findings(args, pkg_parent, extra=(), prepare=None):
     """Run the hostile install and return (ran, findings)."""
+    # Everything, not just the two obvious paths: a case that plants a credential file
+    # in the workspace would otherwise leave it there for the next case to find.
     docker(["run", "--rm", "-v", "%s:/workspace" % VOLUME, SETUP_IMAGE,
-            "sh", "-c", "rm -rf /workspace/src /workspace/hook-evidence.txt"],
+            "sh", "-c", "rm -rf /workspace/..?* /workspace/.[!.]* /workspace/*"],
            timeout=120)
+    if prepare is not None:
+        prepare()
     run_install(args, pkg_parent, extra)
     evidence = docker(["run", "--rm", "-v", "%s:/workspace:ro" % VOLUME, SETUP_IMAGE,
                        "sh", "-c", "cat /workspace/hook-evidence.txt 2>/dev/null"],
@@ -287,37 +296,66 @@ def attack_findings(args, pkg_parent, extra=()):
     return ran, [f for f in (lines[1].split("|") if ran and len(lines) > 1 else []) if f]
 
 
+def plant_credential():
+    """Leaves a credential file where the hook looks, for the case that needs one."""
+    docker(["run", "--rm", "-v", "%s:/workspace" % VOLUME, SETUP_IMAGE,
+            "sh", "-c", "mkdir -p /workspace/.aws && echo 'key' > /workspace/.aws/creds"],
+           timeout=120)
+
+
 def self_test(args, pkg_parent):
-    """Weaken one bound at a time; the matching attack must notice."""
+    """Weaken one bound at a time; the matching attack must notice.
+
+    Every expectation is a LIST and all of it must appear. `any` was the first shape and
+    it hid two detections behind their neighbours: the Docker-socket case passed on the
+    stat-based finding alone, so the connect() half could break unnoticed, and the seccomp
+    case passed on ptrace alone, so finit_module could. A case that passes without
+    exercising the thing it is named for is the defect this suite exists to refuse
+    (finding 66a59e9-F1).
+    """
     print("== self-test: each attack must detect its own hole ==")
     without = lambda flag: [a for a in args if not a.startswith(flag)]
     cases = [
+        # Both halves required: presence AND a successful connect, since the socket being
+        # visible and the socket being usable are different failures.
         ("the Docker socket is mounted", args,
-         ("-v", "/var/run/docker.sock:/var/run/docker.sock"), "docker socket present"),
-        ("the root filesystem is writable", without("--read-only"), (), "WROTE "),
-        ("the worker is given a network", without("--network"), (), "REACHED the network"),
+         ("-v", "/var/run/docker.sock:/var/run/docker.sock"), None,
+         ["docker socket present", "CONNECTED to"]),
+        ("the root filesystem is writable", without("--read-only"), (), None, ["WROTE "]),
+        ("the worker is given a network", without("--network"), (), None,
+         ["REACHED the network"]),
         ("a sibling workspace is mounted", args,
-         ("-v", "%s:/canary" % SIBLING_VOLUME), "sibling workspace visible"),
+         ("-v", "%s:/canary" % SIBLING_VOLUME), None, ["sibling workspace visible"]),
+        # Both denied syscalls required, or one can rot behind the other.
         ("seccomp is unconfined", without("--security-opt=seccomp"),
-         ("--security-opt", "seccomp=unconfined"), "SUCCEEDED despite the seccomp"),
+         ("--security-opt", "seccomp=unconfined"), None,
+         ["ptrace SUCCEEDED", "no seccomp filter is loaded"]),
         ("no-new-privileges is dropped", without("--security-opt=no-new-privileges"), (),
-         "NoNewPrivs is not set"),
+         None, ["NoNewPrivs is not set"]),
         ("a credential is injected", args,
-         ("-e", "AWS_SECRET_ACCESS_KEY=leaked"), "credential-shaped env var"),
+         ("-e", "AWS_SECRET_ACCESS_KEY=leaked"), None,
+         ["credential-shaped env var"]),
+        # The two the reviewer showed could be killed silently: nothing exercised the
+        # host-path list or the credential-FILE list at all.
+        ("a host directory is mounted", args, ("-v", "/etc:/host:ro"), None,
+         ["readable host-ish path /host"]),
+        ("a credential file is left in the workspace", args, (), plant_credential,
+         ["credential file /workspace/.aws"]),
     ]
     missed = []
-    for label, case_args, extra, expect in cases:
-        ran, findings = attack_findings(case_args, pkg_parent, extra)
+    for label, case_args, extra, prepare, expected in cases:
+        ran, findings = attack_findings(case_args, pkg_parent, extra, prepare)
+        absent = [e for e in expected if not any(e in f for f in findings)]
         if not ran:
             print("  FAIL hook did not run: %s" % label)
             missed.append(label)
-        elif not any(expect in f for f in findings):
-            print("  FAIL not detected: %s" % label)
-            print("       expected a finding containing %r" % expect)
+        elif absent:
+            print("  FAIL not fully detected: %s" % label)
+            print("       missing finding(s) containing: %s" % ", ".join(map(repr, absent)))
             print("       got: %s" % (findings or "nothing"))
             missed.append(label)
         else:
-            print("  ok   detected: %s" % label)
+            print("  ok   detected (%d finding(s)): %s" % (len(expected), label))
     print()
     if missed:
         print("RESULT: self-test FAILED, %d of %d hole(s) undetected"
