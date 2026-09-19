@@ -1455,9 +1455,50 @@ below are marked passed by this planning document.
       `exited 0`; swapping the 64 MiB volume for a 1 GiB tmpfs reports the full 200 MiB
       written. Each turns the run red.
 
-      Still owed for T3: rootless BuildKit itself, the launcher/worker contract, the
-      egress gateway and allowlist, trusted registry transport, malicious code in a real
-      dependency-install hook, and the second worker/canary.
+      **T3(b) done 2026-09-19 — five of the six owed items, and the sixth is blocked.**
+      Four new suites, each with a self-test that weakens the thing it measures and
+      requires the matching check to notice.
+
+      | Owed item | Suite | Outcome |
+      |---|---|---|
+      | Malicious code in a real dependency-install hook | `dev/validate-hostile-deps.sh` | Ten escape attempts from inside a real `setup.py`, all contained; 9 deliberate holes, all detected |
+      | Second worker/canary | same | A sibling workspace with data in it, looked for and not found; proved by mounting it |
+      | Egress gateway and allowlist | `dev/validate-egress.sh` | Deny-all except the configured host, 6 checks, 7 weakenings detected |
+      | Rootless BuildKit | `dev/validate-rootless-buildkit.sh` | Builds under Docker's **deny-by-default** profile plus 2 syscalls, `process-mode:sandbox` intact |
+      | Launcher/worker contract | `dev/validate-launcher-contract.sh` | One daemon per attempt by its own id, no socket, no context mount, no credentials, none outliving its attempt |
+      | Trusted registry transport | same | Base pulled from the registry **through** the allowlisted gateway; pushing a built image is part of the blocked item below |
+
+      **Q2's default needed no relaxation.** Every published rootless-BuildKit recipe
+      reaches it through `seccomp=unconfined`, `apparmor=unconfined` or
+      `--oci-worker-no-process-sandbox`. Decision 6 rejects all three and the first is in
+      the isolation profile's own `forbidden_arguments`. None is used: Docker's default
+      profile plus `clone` and `mount` is enough, which is a *named* profile rather than
+      the absence of one. No sign-off was required and none is requested.
+
+      **A minimal syscall set is a property of a configuration, not of a program.** The
+      two above were measured where the base is pulled over ordinary Docker egress. Where
+      a layer is *extracted* from a registry pull, that set intermittently fails on
+      `umount2`, so `umount2` is carried in a separate `INTERMITTENTLY_NEEDED` list — its
+      justification is an observed flake, and the self-test would rightly refuse to
+      certify it as required.
+
+      **BLOCKED, and this gates T7.** The nested `RUN` step does not reliably complete in
+      the full configuration — internal network, proxied egress, registry pull,
+      TCP-addressed worker, session-streamed context. Two intermittent failures seen,
+      `failed to unmount ...: operation not permitted` and `nsexec: failed to sync with
+      stage-1`, and widening the syscall set to
+      `clone,mount,umount2,setns,unshare,pivot_root` did not help (0 of 2). The host is
+      not the cause: `dev/validate-rootless-buildkit.sh`, which builds on the default
+      bridge with a mounted context, passed 5/5 immediately before and after. The launcher
+      suite therefore asserts reaching build stage 2 — which proves the context streamed
+      and the base pulled through the gateway — and does not claim the RUN or the push.
+      **Decision 6's gate holds: no production build driver connects until this is
+      understood.**
+
+      One finding against the earlier work, recorded because no review caught it:
+      `dev/rootless-buildkit-probe.py` bind-mounts the build context into the worker,
+      which decision 6 forbids in terms. The launcher suite streams instead and asserts
+      the mount's absence by reading the container.
 
 - [x] **T4. S3 adapter and layout proof.** Depends T1. Use real MinIO and scoped service
       credentials; implement immutable artifacts, checksums, completion descriptors,
