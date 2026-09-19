@@ -193,6 +193,33 @@ class S3ObjectStoreTest {
     }
 
     @Test
+    @DisplayName("putIfMatch refuses once the object has changed under it")
+    void compareAndSwapIsEnforcedByTheStore() {
+        // Whether MinIO honours If-Match on PutObject decides whether the log index's
+        // generation guard is a real fence or decoration, so it is measured here rather
+        // than assumed -- the same question If-None-Match needed answering for.
+        String k = key(ObjectKeys.BUNDLE_MANIFEST);
+        StoredObject first = store.put(BUCKET, k, "{\"v\":1}".getBytes(StandardCharsets.UTF_8),
+                "application/json");
+
+        StoredObject second = store.putIfMatch(BUCKET, k,
+                "{\"v\":2}".getBytes(StandardCharsets.UTF_8), "application/json",
+                first.etag()).orElseThrow();
+        assertNotEquals(first.etag(), second.etag(), "the object changed, so must its tag");
+
+        // A writer still holding the FIRST tag is now stale, exactly as a fenced-out
+        // worker would be, and must be refused.
+        assertTrue(store.putIfMatch(BUCKET, k,
+                        "{\"v\":3}".getBytes(StandardCharsets.UTF_8), "application/json",
+                        first.etag()).isEmpty(),
+                "a stale ETag must be refused; without this the generation guard below is "
+                        + "a read-then-write with a window in it");
+        assertArrayEquals("{\"v\":2}".getBytes(StandardCharsets.UTF_8),
+                store.readVerified(BUCKET, k, second.sha256().orElseThrow()),
+                "the refused write must not have landed");
+    }
+
+    @Test
     @DisplayName("an absent object is absent, not an exception, on head")
     void headOfAbsentObject() {
         assertTrue(store.head(BUCKET, key(ObjectKeys.BUNDLE_RECEIPT)).isEmpty());

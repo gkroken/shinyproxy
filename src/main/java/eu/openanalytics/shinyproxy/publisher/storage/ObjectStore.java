@@ -129,6 +129,21 @@ public interface ObjectStore {
      */
     List<StoredObject> list(String bucket, String prefix);
 
+    /**
+     * Replaces an object only if it still carries {@code expectedEtag}: compare-and-swap.
+     *
+     * <p>The missing half of a read-then-write guard. A generation check that reads,
+     * compares and then writes unconditionally holds sequentially and not under
+     * concurrency, which is the only condition a lease generation exists for — a stale
+     * writer that read before a newer one published will still land its write afterwards
+     * (finding {@code 4f81ee0-F1}). Carrying the ETag the read observed turns that into a
+     * refusal.
+     *
+     * @return the stored object, or empty if it had changed since {@code expectedEtag}
+     */
+    Optional<StoredObject> putIfMatch(String bucket, String key, byte[] content,
+                                      String contentType, String expectedEtag);
+
     /** Metadata for an object, or empty if it is not there. */
     Optional<StoredObject> head(String bucket, String key);
 

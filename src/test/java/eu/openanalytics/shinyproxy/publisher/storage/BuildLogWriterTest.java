@@ -213,6 +213,95 @@ class BuildLogWriterTest {
     }
 
     @Test
+    @DisplayName("a stale writer is refused even when its write lands after the newer one")
+    void fencingHoldsWhenWritesInterleave() {
+        // 4f81ee0-F1. The sequential test above passes against a read-then-write guard,
+        // because the stale writer reads AFTER the newer generation published. The window
+        // is between the read and the write, so it has to be forced open there.
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        logs.appendChunk(c, b, 1, line(1));
+        logs.appendChunk(c, b, 2, line(2));
+
+        // An index MUST already exist, or the write takes the create-only branch and the
+        // compare-and-swap is never exercised. The first version of this test omitted
+        // this line and passed against an unconditional write -- it was testing
+        // putIfAbsent while claiming to test the CAS.
+        assertTrue(logs.publishIndex(c, b, 3).isPresent(), "generation 3 publishes first");
+        assertEquals(3, logs.readIndex(c, b).orElseThrow().generation());
+
+        // The stale writer (still generation 3) uses a store that pauses at its index
+        // write; the newer generation (5) publishes during that pause, so the tag the
+        // stale writer is holding goes out of date between its read and its write.
+        InterleavingStore interleaved = new InterleavingStore(store,
+                ObjectKeys.logObject(c, b, ObjectKeys.LOG_INDEX),
+                () -> new BuildLogWriter(store, BUCKET).publishIndex(c, b, 5));
+        BuildLogWriter stale = new BuildLogWriter(interleaved, BUCKET);
+
+        assertTrue(stale.publishIndex(c, b, 3).isEmpty(),
+                "the stale generation read before 5 published and wrote after; the store "
+                        + "must refuse it on the tag it was holding");
+        assertTrue(interleaved.firedOnSwap,
+                "the interleaving must happen on the compare-and-swap path; if it fired on "
+                        + "the create path instead, this test is not exercising the CAS");
+        assertEquals(5, logs.readIndex(c, b).orElseThrow().generation(),
+                "the index must still belong to the newer generation");
+    }
+
+    /**
+     * Runs a hook once, at the moment a particular key is about to be written.
+     *
+     * <p>Records WHICH write path it fired on, because that distinction is the whole
+     * test: firing on putIfAbsent proves nothing about the compare-and-swap.
+     */
+    private static final class InterleavingStore extends ForwardingObjectStore {
+        private final String key;
+        private final Runnable hook;
+        boolean firedOnSwap;
+        boolean firedOnCreate;
+
+        InterleavingStore(ObjectStore delegate, String key, Runnable hook) {
+            super(delegate);
+            this.key = key;
+            this.hook = hook;
+        }
+
+        private boolean fired() {
+            return firedOnSwap || firedOnCreate;
+        }
+
+        @Override
+        public Optional<StoredObject> putIfMatch(String bucket, String k, byte[] content,
+                                                 String contentType, String expectedEtag) {
+            if (k.equals(key) && !fired()) {
+                firedOnSwap = true;
+                hook.run();
+            }
+            return super.putIfMatch(bucket, k, content, contentType, expectedEtag);
+        }
+
+        @Override
+        public Optional<StoredObject> putIfAbsent(String bucket, String k, byte[] content,
+                                                  String contentType) {
+            if (k.equals(key) && !fired()) {
+                firedOnCreate = true;
+                hook.run();
+            }
+            return super.putIfAbsent(bucket, k, content, contentType);
+        }
+
+        @Override
+        public StoredObject put(String bucket, String k, byte[] content, String contentType) {
+            if (k.equals(key) && !fired()) {
+                // An unconditional write to the index is the defect 4f81ee0-F1 named. It
+                // is hooked so that a reversion takes this path and fails loudly, rather
+                // than slipping past a hook that only watches the conditional ones.
+                hook.run();
+            }
+            return super.put(bucket, k, content, contentType);
+        }
+    }
+
+    @Test
     @DisplayName("completion happens once")
     void finalIsWrittenOnce() {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();

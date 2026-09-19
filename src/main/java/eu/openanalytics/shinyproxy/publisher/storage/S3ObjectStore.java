@@ -78,8 +78,20 @@ public class S3ObjectStore implements ObjectStore {
         return write(bucket, key, content, contentType, true);
     }
 
+    @Override
+    public Optional<StoredObject> putIfMatch(String bucket, String key, byte[] content,
+                                             String contentType, String expectedEtag) {
+        return write(bucket, key, content, contentType, false, expectedEtag);
+    }
+
     private Optional<StoredObject> write(String bucket, String key, byte[] content,
                                          String contentType, boolean onlyIfAbsent) {
+        return write(bucket, key, content, contentType, onlyIfAbsent, null);
+    }
+
+    private Optional<StoredObject> write(String bucket, String key, byte[] content,
+                                         String contentType, boolean onlyIfAbsent,
+                                         String expectedEtag) {
         String sha256 = sha256(content);
         PutObjectRequest.Builder request = PutObjectRequest.builder()
                 .bucket(bucket)
@@ -94,15 +106,18 @@ public class S3ObjectStore implements ObjectStore {
             // writers both observe absence and both write.
             request.ifNoneMatch("*");
         }
+        if (expectedEtag != null) {
+            request.ifMatch(expectedEtag);
+        }
         try {
             PutObjectResponse response =
                     client.putObject(request.build(), RequestBody.fromBytes(content));
             return Optional.of(StoredObject.digested(bucket, key, content.length, sha256,
                     response.eTag()));
         } catch (S3Exception e) {
-            if (onlyIfAbsent && e.statusCode() == 412) {
-                // Precondition failed: something is already there. Not an error for a
-                // caller that asked for create-only semantics.
+            if ((onlyIfAbsent || expectedEtag != null) && e.statusCode() == 412) {
+                // Precondition failed: something is already there, or it changed under us.
+                // Not an error for a caller that asked for conditional semantics.
                 return Optional.empty();
             }
             throw new ObjectStoreException(

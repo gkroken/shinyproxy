@@ -53,11 +53,17 @@ import java.util.regex.Pattern;
  * <h2>What fences a stale writer, and what does not</h2>
  *
  * <p>Every mutation carries a lease generation and is refused if the stored artifact was
- * written by a higher one. This is the storage half of the plan's fencing, and it is not
- * the authoritative half: "the DB's fenced committed cursor is authoritative while
- * building". That cursor is T6's. What is here stops a fenced-out worker from moving the
- * index or publishing completion through storage alone; it does not make the storage the
- * source of truth, and nothing in this class should be read as claiming it does.
+ * written by a higher one. The comparison is a <em>compare-and-swap</em>, not a
+ * read-then-write: the index is read with its ETag and rewritten with {@code If-Match}, so
+ * a stale writer that read before a newer generation published is refused by the store
+ * when its write lands. A read-then-write held sequentially and not under concurrency,
+ * which is the only condition a lease generation exists for (finding {@code 4f81ee0-F1}).
+ *
+ * <p>This is still the storage half of the plan's fencing and not the authoritative half:
+ * "the DB's fenced committed cursor is authoritative while building". That cursor is T6's.
+ * What is here stops a fenced-out worker from moving the index or publishing completion
+ * through storage alone; it does not make the storage the source of truth, and nothing in
+ * this class should be read as claiming it does.
  */
 public class BuildLogWriter {
 
@@ -135,13 +141,38 @@ public class BuildLogWriter {
      * @return the published index, or empty if a newer generation already published one
      */
     public Optional<LogIndex> publishIndex(UUID contentId, UUID buildId, long generation) {
-        Optional<LogIndex> current = readIndex(contentId, buildId);
-        if (current.isPresent() && current.get().generation() > generation) {
-            return Optional.empty();
+        return swapIndex(contentId, buildId, generation,
+                () -> scan(contentId, buildId, generation));
+    }
+
+    /**
+     * Reads the index with its tag, checks the generation, and writes conditionally.
+     *
+     * <p>Losing the swap is not an error. The index is a progress hint that a running build
+     * republishes as chunks land, so a writer that loses a race simply publishes on its
+     * next tick — and the writer that won wrote from its own fresh scan, so nothing is
+     * lost meanwhile.
+     */
+    private Optional<LogIndex> swapIndex(UUID contentId, UUID buildId, long generation,
+                                         java.util.function.Supplier<LogIndex> next) {
+        String key = ObjectKeys.logObject(contentId, buildId, ObjectKeys.LOG_INDEX);
+        Optional<StoredObject> existing = store.head(bucket, key);
+        if (existing.isPresent()) {
+            Optional<LogIndex> current = read(key, LogIndex.class);
+            if (current.isPresent() && current.get().generation() > generation) {
+                return Optional.empty();
+            }
+            LogIndex index = next.get();
+            // If-Match against the tag observed above: a newer generation that published
+            // in the window invalidates it and this write is refused.
+            return store.putIfMatch(bucket, key, serialise(index), "application/json",
+                            existing.get().etag())
+                    .map(stored -> index);
         }
-        LogIndex index = scan(contentId, buildId, generation);
-        write(ObjectKeys.logObject(contentId, buildId, ObjectKeys.LOG_INDEX), index);
-        return Optional.of(index);
+        LogIndex index = next.get();
+        // No index yet, so create-only: two writers both seeing absence must not both write.
+        return store.putIfAbsent(bucket, key, serialise(index), "application/json")
+                .map(stored -> index);
     }
 
     /**
@@ -177,9 +208,11 @@ public class BuildLogWriter {
             return Optional.empty();
         }
         // The index is brought level last, so a reader that saw completion first is never
-        // sent further than the final record allows.
-        write(ObjectKeys.logObject(contentId, buildId, ObjectKeys.LOG_INDEX),
-                new LogIndex(generation, run.lastSequence(), run.bytes()));
+        // sent further than the final record allows. Conditionally, like every other index
+        // write: losing here is harmless, because final.json is already the durable answer
+        // and a reader that lags behind it is within contract.
+        swapIndex(contentId, buildId, generation,
+                () -> new LogIndex(generation, run.lastSequence(), run.bytes()));
         return Optional.of(record);
     }
 
@@ -204,10 +237,6 @@ public class BuildLogWriter {
             }
         }
         return highest;
-    }
-
-    private void write(String key, Object value) {
-        store.put(bucket, key, serialise(value), "application/json");
     }
 
     private byte[] serialise(Object value) {
