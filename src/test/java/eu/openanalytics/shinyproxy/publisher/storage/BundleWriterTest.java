@@ -201,6 +201,47 @@ class BundleWriterTest {
     }
 
     @Test
+    @DisplayName("a receipt whose claims misdescribe the objects is refused")
+    void receiptClaimsAreCheckedAgainstTheObjects() {
+        // d319b14-F1. commit() promised, in its own javadoc, that it was the last moment
+        // anything could tell whether the receipt's claims were true -- and checked only
+        // that the objects existed. Three of the four claims are answerable from the HEADs
+        // it already issues.
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        BundleReceipt honest = writeThreeObjects(c, b);
+
+        BundleReceipt wrongSize = new BundleReceipt(1, 1, c, b,
+                honest.archiveSha256(), honest.archiveBytes() + 99999,
+                honest.manifestSha256(), honest.inventorySha256());
+        ObjectStoreException size = assertThrows(ObjectStoreException.class,
+                () -> writer.commit(wrongSize));
+        assertTrue(size.getMessage().contains("archiveBytes"), size.getMessage());
+
+        BundleReceipt wrongManifest = new BundleReceipt(1, 1, c, b,
+                honest.archiveSha256(), honest.archiveBytes(),
+                S3ObjectStore.sha256("not the manifest".getBytes(StandardCharsets.UTF_8)),
+                honest.inventorySha256());
+        ObjectStoreException manifest = assertThrows(ObjectStoreException.class,
+                () -> writer.commit(wrongManifest));
+        assertTrue(manifest.getMessage().contains(ObjectKeys.BUNDLE_MANIFEST),
+                manifest.getMessage());
+
+        BundleReceipt wrongInventory = new BundleReceipt(1, 1, c, b,
+                honest.archiveSha256(), honest.archiveBytes(), honest.manifestSha256(),
+                S3ObjectStore.sha256("not the inventory".getBytes(StandardCharsets.UTF_8)));
+        ObjectStoreException inventory = assertThrows(ObjectStoreException.class,
+                () -> writer.commit(wrongInventory));
+        assertTrue(inventory.getMessage().contains(ObjectKeys.BUNDLE_INVENTORY),
+                inventory.getMessage());
+
+        // None of those refusals may have completed the bundle on the way past.
+        assertTrue(writer.readReceipt(c, b).isEmpty(),
+                "a refused commit must leave the bundle incomplete");
+        // And the honest one still works, so the check is not simply refusing everything.
+        assertTrue(writer.commit(honest).isPresent());
+    }
+
+    @Test
     @DisplayName("a bundle id names particular bytes; a second writer is refused")
     void bundleBytesAreImmutable() {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();

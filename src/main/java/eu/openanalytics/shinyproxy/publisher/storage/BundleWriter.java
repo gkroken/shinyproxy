@@ -96,19 +96,44 @@ public class BundleWriter {
     /**
      * Commits the receipt, which is what completes the bundle.
      *
-     * <p>Refuses unless the archive, manifest and inventory are all present. That check is
-     * not belt-and-braces: a receipt is a claim that those three objects exist with those
-     * digests, and this is the last moment anything can tell whether the claim is true.
+     * <p>Refuses unless the archive, manifest and inventory are all present <em>and</em>
+     * the receipt's claims about them are true. A receipt is a claim, and this is the last
+     * moment anything can test it: after this, {@code readReceipt} reports the bundle as
+     * usable and a reader will fetch bytes using digests taken from here.
+     *
+     * <p><b>Three of the four claims are checked; one is taken on trust, and the asymmetry
+     * is deliberate.</b> {@code archiveBytes}, {@code manifestSha256} and
+     * {@code inventorySha256} all come back in the {@code HEAD} responses this method
+     * already issues, so checking them costs nothing. {@code archiveSha256} does not: a
+     * streamed put records no digest as metadata, because metadata travels in headers sent
+     * before the body is read ({@code f440ce4-F2}). Verifying it would mean re-reading the
+     * whole archive, which would defeat the streaming the transport requires. It is
+     * therefore trusted, and its only trustworthy source is the {@link StoredObject}
+     * {@link #writeArchive} returned — computed in flight over the bytes that were written.
+     * A caller that invents it instead will not be caught here.
+     *
+     * <p>That gap is also why {@code archiveBytes} is worth checking: the receipt is the
+     * durable record of a streamed archive's size, so nothing else in the system holds that
+     * number to disagree with.
      *
      * @return the receipt as stored, or empty if this bundle was already committed
-     * @throws ObjectStoreException if an object the receipt would describe is missing
+     * @throws ObjectStoreException if an object is missing or the receipt misdescribes it
      */
     public Optional<BundleReceipt> commit(BundleReceipt receipt) {
         UUID c = receipt.contentId();
         UUID b = receipt.bundleId();
-        requirePresent(c, b, ObjectKeys.BUNDLE_ARCHIVE);
-        requirePresent(c, b, ObjectKeys.BUNDLE_MANIFEST);
-        requirePresent(c, b, ObjectKeys.BUNDLE_INVENTORY);
+        StoredObject archive = requirePresent(c, b, ObjectKeys.BUNDLE_ARCHIVE);
+        StoredObject manifest = requirePresent(c, b, ObjectKeys.BUNDLE_MANIFEST);
+        StoredObject inventory = requirePresent(c, b, ObjectKeys.BUNDLE_INVENTORY);
+
+        if (archive.size() != receipt.archiveBytes()) {
+            throw new ObjectStoreException(refusal(c, b, ObjectKeys.BUNDLE_ARCHIVE)
+                    + ": the receipt claims archiveBytes " + receipt.archiveBytes()
+                    + " but the stored object is " + archive.size() + " bytes");
+        }
+        requireDigest(c, b, ObjectKeys.BUNDLE_MANIFEST, manifest, receipt.manifestSha256());
+        requireDigest(c, b, ObjectKeys.BUNDLE_INVENTORY, inventory,
+                receipt.inventorySha256());
 
         byte[] body;
         try {
@@ -144,14 +169,38 @@ public class BundleWriter {
         }
     }
 
-    private void requirePresent(UUID contentId, UUID bundleId, String name) {
+    private StoredObject requirePresent(UUID contentId, UUID bundleId, String name) {
         String key = ObjectKeys.bundleObject(contentId, bundleId, name);
-        if (store.head(bucket, key).isEmpty()) {
-            throw new ObjectStoreException(
-                    "refusing to commit a receipt for " + contentId + "/" + bundleId
-                            + ": " + name + " is not there. A receipt is a claim that the "
-                            + "objects it describes exist, and this is the last moment "
-                            + "anything can check it.");
+        return store.head(bucket, key).orElseThrow(() -> new ObjectStoreException(
+                refusal(contentId, bundleId, name) + ": it is not there. A receipt is a "
+                        + "claim that the objects it describes exist, and this is the last "
+                        + "moment anything can check it."));
+    }
+
+    /**
+     * Compares a claimed digest against the one the store recorded as metadata.
+     *
+     * <p>Only usable for the objects written by a buffered put. A streamed object has no
+     * recorded digest by design, which is why the archive is not checked this way.
+     */
+    private void requireDigest(UUID contentId, UUID bundleId, String name,
+                               StoredObject stored, String claimed) {
+        Optional<String> actual = stored.sha256();
+        if (actual.isEmpty()) {
+            throw new ObjectStoreException(refusal(contentId, bundleId, name)
+                    + ": the store holds no recorded digest for it, so the receipt's claim "
+                    + "cannot be checked. Only a streamed put omits that, and this object "
+                    + "is not written by one.");
         }
+        if (!actual.get().equals(claimed)) {
+            throw new ObjectStoreException(refusal(contentId, bundleId, name)
+                    + ": the receipt claims " + claimed + " but the stored object is "
+                    + actual.get());
+        }
+    }
+
+    private static String refusal(UUID contentId, UUID bundleId, String name) {
+        return "refusing to commit a receipt for " + contentId + "/" + bundleId
+                + ": " + name;
     }
 }
