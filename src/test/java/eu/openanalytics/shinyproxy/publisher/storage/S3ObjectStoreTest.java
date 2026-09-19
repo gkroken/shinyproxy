@@ -491,6 +491,111 @@ class S3ObjectStoreTest {
         }
     }
 
+    @Test
+    @DisplayName("an interrupted streaming put leaves no object and no multipart upload")
+    void interruptedStreamLeavesNothingBehind() {
+        // T4 lists "multipart abort" as owed, so the first question is whether these
+        // writes ever create a multipart upload. Answered by measurement rather than by
+        // reasoning about the SDK: S3Client.putObject with an explicit content length is a
+        // single PUT, and a single PUT is atomic -- an interrupted one stores nothing, so
+        // there is no partial object to advertise and nothing to abort.
+        String k = key(ObjectKeys.BUNDLE_ARCHIVE);
+        int declared = 8 * 1024 * 1024;
+
+        InputStream failsHalfway = new InputStream() {
+            private int position;
+
+            @Override
+            public int read() {
+                return read(new byte[1], 0, 1) == -1 ? -1 : 0;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) {
+                if (position > declared / 2) {
+                    throw new java.io.UncheckedIOException(
+                            new java.io.IOException("the publisher's connection dropped"));
+                }
+                int n = Math.min(len, 64 * 1024);
+                position += n;
+                return n;
+            }
+        };
+
+        assertThrows(RuntimeException.class,
+                () -> store.putStreaming(BUCKET, k, failsHalfway, declared,
+                        "application/gzip"),
+                "an interrupted upload must fail rather than store what arrived");
+
+        assertTrue(store.head(BUCKET, k).isEmpty(),
+                "a half-sent single PUT must leave no object; if this ever fails, the "
+                        + "completion protocol is no longer the only thing standing "
+                        + "between a partial upload and a readable artifact");
+
+        // CONTROL. The assertion above passes for free if a write of this size never
+        // lands at all, so the same size is written successfully to a sibling key and
+        // asserted present. That is the difference between "interrupted leaves nothing"
+        // and "nothing gets written".
+        String control = key(ObjectKeys.BUNDLE_ARCHIVE);
+        store.putStreaming(BUCKET, control, generated(declared), declared,
+                "application/gzip");
+        assertEquals(declared, store.head(BUCKET, control).orElseThrow().size(),
+                "a write of the same size must succeed, or the assertion above proves "
+                        + "nothing about interruption");
+
+        // And no dangling multipart upload to clean up, which is what the owed item was
+        // about. If the SDK ever starts chunking these, this fails and says so.
+        assertTrue(client.listMultipartUploads(b -> b.bucket(BUCKET)).uploads().isEmpty(),
+                "these writes must not create multipart uploads; if they do, an abort path "
+                        + "is owed and the retention rule for incomplete uploads applies");
+
+        // CONTROL for that too: listMultipartUploads has to be capable of reporting one,
+        // or "no multipart uploads" is a sentence about a call that never returns any.
+        String deliberate = key(ObjectKeys.BUNDLE_ARCHIVE);
+        String uploadId = client.createMultipartUpload(
+                b -> b.bucket(BUCKET).key(deliberate)).uploadId();
+        try {
+            assertFalse(client.listMultipartUploads(b -> b.bucket(BUCKET)).uploads().isEmpty(),
+                    "the probe cannot see a multipart upload that certainly exists, so its "
+                            + "emptiness above meant nothing");
+        } finally {
+            client.abortMultipartUpload(
+                    b -> b.bucket(BUCKET).key(deliberate).uploadId(uploadId));
+        }
+        assertTrue(client.listMultipartUploads(b -> b.bucket(BUCKET)).uploads().isEmpty(),
+                "and an abort clears it, which is the cleanup path this layer would need "
+                        + "if it ever did use multipart");
+    }
+
+    @Test
+    @DisplayName("replaying the same write after a restart converges")
+    void retryingTheSameWriteIsSafe() {
+        // "restart-safe retries": a coordinator that crashed mid-upload re-runs the same
+        // steps with the same ids. The second run must not produce a second object, change
+        // the bytes, or report success for a write it did not perform.
+        String k = key(ObjectKeys.BUNDLE_MANIFEST);
+        byte[] content = "{\"schema_version\":1}".getBytes(StandardCharsets.UTF_8);
+
+        StoredObject first = store.putIfAbsent(BUCKET, k, content, "application/json")
+                .orElseThrow();
+        assertTrue(store.putIfAbsent(BUCKET, k, content, "application/json").isEmpty(),
+                "the replay must be refused even though the bytes are identical: the "
+                        + "caller learns it did not write, which is what lets it tell a "
+                        + "resumed step from a fresh one");
+        assertEquals(first.sha256(), store.head(BUCKET, k).orElseThrow().sha256(),
+                "the stored object must be untouched by the replay");
+
+        // A streamed replay behaves the same way, and is the case that matters: the
+        // archive is the object a crashed upload is most likely to be part-way through.
+        String archive = key(ObjectKeys.BUNDLE_ARCHIVE);
+        assertTrue(store.putStreamingIfAbsent(BUCKET, archive,
+                new ByteArrayInputStream(content), content.length, "application/gzip")
+                .isPresent());
+        assertTrue(store.putStreamingIfAbsent(BUCKET, archive,
+                new ByteArrayInputStream(content), content.length, "application/gzip")
+                .isEmpty(), "a streamed replay must be refused too");
+    }
+
     private static String stripQuotes(String etag) {
         return etag == null ? null : etag.replace("\"", "");
     }
