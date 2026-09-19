@@ -1459,13 +1459,51 @@ below are marked passed by this planning document.
       egress gateway and allowlist, trusted registry transport, malicious code in a real
       dependency-install hook, and the second worker/canary.
 
-- [ ] **T4. S3 adapter and layout proof.** Depends T1. Use real MinIO and scoped service
+- [x] **T4. S3 adapter and layout proof.** Depends T1. Use real MinIO and scoped service
       credentials; implement immutable artifacts, checksums, completion descriptors,
       multipart abort and log chunk replay. Round-trip bundle/log/output descriptors
       through an independent small reader, including filenames requiring URL encoding.
       Kill writes between object and descriptor completion; revoke permissions and stop
       MinIO. **Pass:** no partial artifact advertised, no public/cross-key read, observable
       storage failure, restart-safe retries and no filesystem durability fallback.
+
+      **T4 done 2026-09-19.** `publisher/storage/`: `ObjectKeys`, `ObjectStore` +
+      `S3ObjectStore`, `BundleWriter` + `BundleReceipt`, `BuildLogWriter` + `LogIndex` +
+      `LogFinal`. 36 tests, every one against a real MinIO container pinned by digest.
+      `make test` 184/184.
+
+      - **The key layout is parsed from this file's storage table, not restated.** A
+        mistake in a key is a migration, not a bug fix. The one component the platform does
+        not generate — the path inside a rendition — is validated here, because the output
+        descriptor schema says containment "is the writer's to enforce"; and the limit that
+        binds is the **key** in UTF-8 bytes, not the path in characters, which a
+        1024-character path producing a 1172-byte key made plain (`2b483fb-F1`).
+      - **Digests are ours.** SHA-256 computed over the bytes that moved, never the ETag,
+        and recomputed on a verified read. A streamed put cannot record its digest as
+        metadata — headers precede the body — so `receipt.json` is the durable record and
+        `StoredObject.sha256()` is an `Optional` so that absence cannot be missed
+        (`f440ce4-F2`).
+      - **Completion is the receipt and nothing else.** Bytes first, `receipt.json` last,
+        every object create-only, and `readReceipt` deliberately never looks at the archive.
+        Commit checks the receipt's claims against the objects rather than only their
+        existence (`d319b14-F1`); `archiveSha256` is the one claim taken on trust, because
+        verifying it would mean re-reading the archive, and the javadoc says so.
+      - **The log index advertises a contiguous run**, never the highest sequence present,
+        so completion can never point past a hole. `complete`, `truncated` and the build
+        outcome are three separate facts. The generation guard is a **compare-and-swap**,
+        not a read-then-write, after the read-then-write was shown to fail under
+        interleaving (`4f81ee0-F1`).
+      - **Every Pass condition has a control.** The scoped-credential denials are measured
+        against an object placed by the root user and asserted present; "no multipart
+        upload to abort" is measured against one created deliberately, seen, and aborted.
+        An absence proves nothing unless the probe can see a presence.
+
+      **Not covered, and not claimed.** Chunk replay against a *committed cursor* is T6's,
+      since the cursor is the DB's; this track built the storage half. Stopping MinIO is
+      exercised as an unreachable endpoint rather than by killing the container mid-write.
+      `head()` returning 403 rather than 404 for a forbidden object is MinIO's behaviour;
+      real S3 depends on whether the caller holds `s3:ListBucket`, and that is unverified
+      here.
 
 - [ ] **T5. Extractor plus mandatory independent mid-track security review.** Depends
       T1–T4. Implement bounded extraction, validation and private workspace handling,
