@@ -1469,8 +1469,10 @@ below are marked passed by this planning document.
 
       **T4 done 2026-09-19.** `publisher/storage/`: `ObjectKeys`, `ObjectStore` +
       `S3ObjectStore`, `BundleWriter` + `BundleReceipt`, `BuildLogWriter` + `LogIndex` +
-      `LogFinal`. 36 tests, every one against a real MinIO container pinned by digest.
-      `make test` 184/184.
+      `LogFinal`. **46 tests** in that package, 32 of them against a real MinIO container
+      pinned by digest and 14 needing none — `ObjectKeysTest` and `AwsSdkClasspathTest`
+      earn their keep precisely by being true without a container. `make test` 184/184,
+      up from 138 before this track.
 
       - **The key layout is parsed from this file's storage table, not restated.** A
         mistake in a key is a migration, not a bug fix. The one component the platform does

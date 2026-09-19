@@ -86,6 +86,13 @@ COUNTED_RANGE = re.compile(
 # reaches. An unrecognised word is a loud failure below; being unseen is not.
 LOOSE_COUNT = re.compile(r"Across\s+([\w-]+)\s+review\s+cycles\b")
 
+# "**46 tests** in that package" -- a count of @Test methods, which is derivable and has
+# now been wrong three times in this document (7bd7d18-F2, a0d3ce1-F2, 525199b-F1). The
+# package it refers to is named in the same entry, so the claim carries its own subject.
+TEST_COUNT = re.compile(r"\*\*(\d+) tests\*\* in (?:that|the) package")
+# Which package: the last `publisher/<name>/` path mentioned before the claim.
+PACKAGE = re.compile(r"`publisher/([a-z]+)/`")
+
 
 def git(*args):
     r = subprocess.run(("git",) + args, cwd=REPO, capture_output=True, text=True)
@@ -155,6 +162,30 @@ def check_doc(path, failures):
         else:
             print(f"  ok   {path.name}: '{word} review cycles' == "
                   f"{out} in {a}..{b}")
+
+    # "N tests" claims, counted from the tree rather than trusted.
+    for m in TEST_COUNT.finditer(text):
+        n_counts += 1
+        claimed = int(m.group(1))
+        packages = PACKAGE.findall(text[:m.start()])
+        if not packages:
+            failures.append(f"{path.name}: '**{claimed} tests** in that package' names no "
+                            f"`publisher/<name>/` package before it, so nothing says what "
+                            f"to count")
+            continue
+        pkg = packages[-1]
+        root = REPO / "src/test/java/eu/openanalytics/shinyproxy/publisher" / pkg
+        if not root.is_dir():
+            failures.append(f"{path.name}: '**{claimed} tests**' refers to package "
+                            f"{pkg!r}, which has no test directory")
+            continue
+        actual = sum(f.read_text(encoding="utf-8", errors="replace").count("@Test")
+                     for f in root.glob("*.java"))
+        if actual != claimed:
+            failures.append(f"{path.name}: '**{claimed} tests** in that package' -- "
+                            f"{pkg} actually has {actual} @Test methods")
+        else:
+            print(f"  ok   {path.name}: {claimed} tests in publisher/{pkg}")
 
     # Coverage, not enumeration: a count claim this checker did not pair with a
     # range is an UNCHECKED claim, and must fail rather than pass in silence.
@@ -243,6 +274,14 @@ def self_test():
         ("a count claim with no range following it at all",
          "Across nineteen review cycles the reviewer found things.",
          "count claim NOT CHECKED"),
+        # 525199b-F1: a test count in the durable record, wrong, beside a number that was
+        # right -- which is what makes a reader trust it.
+        ("a wrong test count for a real package",
+         "See `publisher/storage/`. **999 tests** in that package.",
+         "actually has"),
+        ("a test count naming no package",
+         "**12 tests** in that package, somewhere.",
+         "names no"),
         # Regression: b16b1e4-F1. `\w` excluded the hyphen, so this matched neither
         # pattern and twenty-one-against-twenty passed silently.
         ("a hyphenated number word, which must at least be SEEN",
