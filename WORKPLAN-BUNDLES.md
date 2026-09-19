@@ -1461,7 +1461,7 @@ below are marked passed by this planning document.
 
       | Owed item | Suite | Outcome |
       |---|---|---|
-      | Malicious code in a real dependency-install hook | `dev/validate-hostile-deps.sh` | Ten escape attempts from inside a real `setup.py`, all contained; 9 deliberate holes, all detected |
+      | Malicious code in a real dependency-install hook | `dev/validate-hostile-deps.sh` | **9 escape attempts** in `dev/hostile-dep-probe.py` from inside a real `setup.py`, across 11 detection sites, all contained; 9 deliberate holes, all detected |
       | Second worker/canary | same | A sibling workspace with data in it, looked for and not found; proved by mounting it |
       | Egress gateway and allowlist | `dev/validate-egress.sh` | Deny-all except the configured host, 6 checks, 7 weakenings detected |
       | Rootless BuildKit | `dev/validate-rootless-buildkit.sh` | Builds under Docker's **deny-by-default** profile plus 2 syscalls, `process-mode:sandbox` intact |

@@ -93,6 +93,16 @@ TEST_COUNT = re.compile(r"\*\*(\d+) tests\*\* in (?:that|the) package")
 # Which package: the last `publisher/<name>/` path mentioned before the claim.
 PACKAGE = re.compile(r"`publisher/([a-z]+)/`")
 
+# "**9 escape attempts** in `dev/hostile-dep-probe.py`" -- a count of numbered attacks in
+# a named file, derivable the same way the test count is. This is the FOURTH wrong count
+# in this document (7bd7d18-F2, a0d3ce1-F2, 525199b-F1, adf3024-F1); each time the number
+# was fixed and a form the checker did not recognise let the next one through. The claim
+# has to carry its own subject, which is why the file is named in the sentence.
+ATTEMPT_COUNT = re.compile(
+    r"\*\*(\d+) escape attempts\*\* in `(dev/[A-Za-z0-9_.-]+)`")
+# A numbered attack: a comment line "# <n>. ..." at the start of a line.
+NUMBERED = re.compile(r"^# \d+\. ", re.M)
+
 
 def git(*args):
     r = subprocess.run(("git",) + args, cwd=REPO, capture_output=True, text=True)
@@ -186,6 +196,23 @@ def check_doc(path, failures):
                             f"{pkg} actually has {actual} @Test methods")
         else:
             print(f"  ok   {path.name}: {claimed} tests in publisher/{pkg}")
+
+    # "N escape attempts" claims, counted from the named file.
+    for m in ATTEMPT_COUNT.finditer(text):
+        n_counts += 1
+        claimed, target = int(m.group(1)), m.group(2)
+        probe = REPO / target
+        if not probe.is_file():
+            failures.append(f"{path.name}: '**{claimed} escape attempts** in {target}' "
+                            f"names a file that does not exist")
+            continue
+        actual = len(NUMBERED.findall(probe.read_text(encoding="utf-8",
+                                                      errors="replace")))
+        if actual != claimed:
+            failures.append(f"{path.name}: '**{claimed} escape attempts** in {target}' "
+                            f"-- that file has {actual} numbered attacks")
+        else:
+            print(f"  ok   {path.name}: {claimed} escape attempts in {target}")
 
     # Coverage, not enumeration: a count claim this checker did not pair with a
     # range is an UNCHECKED claim, and must fail rather than pass in silence.
@@ -282,6 +309,13 @@ def self_test():
         ("a test count naming no package",
          "**12 tests** in that package, somewhere.",
          "names no"),
+        # adf3024-F1: the fourth wrong count, in a form the checker did not know.
+        ("a wrong escape-attempt count for a real probe",
+         "**99 escape attempts** in `dev/hostile-dep-probe.py`.",
+         "numbered attacks"),
+        ("an escape-attempt count naming a missing file",
+         "**3 escape attempts** in `dev/no-such-probe.py`.",
+         "does not exist"),
         # Regression: b16b1e4-F1. `\w` excluded the hyphen, so this matched neither
         # pattern and twenty-one-against-twenty passed silently.
         ("a hyphenated number word, which must at least be SEEN",
