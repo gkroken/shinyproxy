@@ -196,8 +196,16 @@ def main(argv):
                   timeout=600).returncode != 0:
             raise SystemExit("could not seed the base image; nothing below would build")
 
-        workers, built, pushed = [], [], []
+        workers, worker_ids, built, pushed = [], [], [], []
+        survivors_at_start, offenders, inspected = [], [], []
         for attempt in range(1, ATTEMPTS + 1):
+            # Before this attempt starts, no PREVIOUS attempt's worker may still be
+            # running. This is the disposability property: the launcher tears a worker
+            # down as part of the attempt, so by the time the next one begins there is
+            # nothing left. Checking after the probe's own `docker rm -f` would only
+            # prove that force-removal works.
+            survivors_at_start.append(docker(
+                ["ps", "-q", "--filter", "name=" + WORKER_PREFIX]).stdout.split())
             ctx = pathlib.Path(tmp) / ("ctx%d" % attempt)
             ctx.mkdir()
             marker = "ATTEMPT-%d-RAN" % attempt
@@ -207,7 +215,16 @@ def main(argv):
             worker = start_worker(tmp, profile, attempt)
             workers.append(worker)
             if not worker:
+                worker_ids.append(None)
                 continue
+            # The daemon's OWN worker id, not a name this probe chose. Two names drawn
+            # from a loop counter cannot collide, so comparing them proves nothing about
+            # whether two distinct daemons ran.
+            dbg = docker(["run", "--rm", "--network", INNER, "--entrypoint", "buildctl",
+                          BUILDKIT_IMAGE, "--addr", "tcp://%s:1234" % worker,
+                          "debug", "workers", "--format", "{{range .}}{{.ID}}\n{{end}}"],
+                         timeout=180).stdout.strip().splitlines()
+            worker_ids.append(dbg[0] if dbg else None)
             tag = "%s:5000/built/attempt%d:1" % (REGISTRY, attempt)
             # Reaching stage 2 means the context streamed in AND the base resolved and
             # pulled through the gateway. That is what this probe asserts; whether the
@@ -223,10 +240,37 @@ def main(argv):
                     pushed.append(True)
             built.append(reached == BUILD_REPEATS)
 
-        record("one worker per attempt",
-               "%d attempts start %d distinct workers" % (ATTEMPTS, ATTEMPTS),
-               "started %s" % ", ".join(w or "FAILED" for w in workers),
-               all(workers) and len(set(workers)) == ATTEMPTS)
+            # Inspected while the worker is ALIVE, because that is when the contract is
+            # about it, and because the launcher disposes of it two lines below.
+            mounts = json.loads(docker(["inspect", "-f", "{{json .Mounts}}",
+                                        worker]).stdout or "[]")
+            env = json.loads(docker(["inspect", "-f", "{{json .Config.Env}}",
+                                     worker]).stdout or "[]")
+            for m in mounts:
+                src, dst = m.get("Source", ""), m.get("Destination", "")
+                if "docker.sock" in src or "docker.sock" in dst:
+                    offenders.append("%s: docker socket at %s" % (worker, dst))
+                if dst.startswith("/ctx") or "ctx" in pathlib.Path(src).name:
+                    offenders.append("%s: context bind mount at %s" % (worker, dst))
+            for var in env:
+                key = var.split("=", 1)[0].upper()
+                if any(k in key for k in ("AWS", "SECRET", "TOKEN", "PASSWORD",
+                                          "REGISTRY_")):
+                    offenders.append("%s: credential-shaped env %s" % (worker, key))
+            inspected.append(worker)
+
+            # The launcher disposes of the worker as part of the attempt, which is what
+            # the next iteration's survivors check then observes.
+            docker(["rm", "-f", worker])
+
+        known = [i for i in worker_ids if i]
+        record("one daemon per attempt, not reused",
+               "%d attempts report %d distinct BuildKit worker ids" % (ATTEMPTS, ATTEMPTS),
+               ", ".join(i[:12] for i in known) if known else "no worker id readable",
+               len(known) == ATTEMPTS and len(set(known)) == ATTEMPTS,
+               "" if len(known) == ATTEMPTS else "the id comes from the daemon itself; "
+                                                 "without it this only compares names "
+                                                 "this probe chose")
 
         record("context streamed and base pulled",
                "every build reaches stage 2, %d/%d times" % (BUILD_REPEATS,
@@ -236,28 +280,13 @@ def main(argv):
                "" if all(built) else "the context or the gateway pull failed, which is "
                                      "what this asserts; the RUN step is not asserted")
 
-        # The contract's own list, read off the running container rather than assumed.
-        offenders = []
-        for worker in filter(None, workers):
-            mounts = json.loads(docker(["inspect", "-f", "{{json .Mounts}}",
-                                        worker]).stdout or "[]")
-            for m in mounts:
-                src, dst = m.get("Source", ""), m.get("Destination", "")
-                if "docker.sock" in src or "docker.sock" in dst:
-                    offenders.append("%s: docker socket at %s" % (worker, dst))
-                if dst.startswith("/ctx") or "ctx" in pathlib.Path(src).name:
-                    offenders.append("%s: context bind mount at %s" % (worker, dst))
-            env = json.loads(docker(["inspect", "-f", "{{json .Config.Env}}",
-                                     worker]).stdout or "[]")
-            for var in env:
-                key = var.split("=", 1)[0].upper()
-                if any(k in key for k in ("AWS", "SECRET", "TOKEN", "PASSWORD",
-                                          "REGISTRY_")):
-                    offenders.append("%s: credential-shaped env %s" % (worker, key))
         record("nothing forbidden reaches the worker",
                "no docker socket, no context mount, no credentials",
-               "clean across %d worker(s)" % len(list(filter(None, workers)))
-               if not offenders else "; ".join(offenders), not offenders)
+               "clean across %d inspected worker(s)" % len(inspected)
+               if not offenders else "; ".join(offenders),
+               not offenders and len(inspected) == ATTEMPTS,
+               "" if len(inspected) == ATTEMPTS else "a worker was never inspected, so "
+                                                     "this examined fewer than it claims")
 
         # The registry is reachable from the gateway's side and holds the seeded base,
         # which is what makes the pull above a pull THROUGH the gateway rather than a
@@ -272,14 +301,15 @@ def main(argv):
                tags.strip()[:80] if tags.strip() else "catalog unreadable",
                "base/alpine" in tags)
 
-        # Disposable: the launcher tears each worker down and none survives.
-        for worker in filter(None, workers):
-            docker(["rm", "-f", worker])
-        left = docker(["ps", "-aq", "--filter",
-                       "name=" + WORKER_PREFIX]).stdout.split()
-        record("workers are disposable",
-               "no worker survives its attempt",
-               "none left" if not left else "%d still present" % len(left), not left)
+        # Disposability, observed rather than arranged: at the start of every attempt
+        # after the first, no earlier worker was still running.
+        lingered = [n for n, s in enumerate(survivors_at_start[1:], start=2) if s]
+        record("no worker outlives its attempt",
+               "each attempt begins with no previous worker running",
+               "clean at the start of every attempt" if not lingered
+               else "attempt(s) %s began with a previous worker still up"
+                    % ", ".join(map(str, lingered)),
+               not lingered and len(survivors_at_start) == ATTEMPTS)
     finally:
         cleanup()
         shutil.rmtree(tmp, ignore_errors=True)
