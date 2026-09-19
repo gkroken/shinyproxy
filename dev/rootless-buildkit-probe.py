@@ -74,6 +74,12 @@ FORBIDDEN = ["--privileged", "seccomp=unconfined", "apparmor=unconfined",
              "--oci-worker-no-process-sandbox", "/var/run/docker.sock"]
 
 results = []
+# Every `docker run` argv this probe actually issued. Check 4 scans THESE rather than a
+# string it composes for itself: the first version examined only
+# `" ".join(["--security-opt", "seccomp=" + path])`, which cannot contain a flag passed
+# through try_build's `extra`, so mounting the Docker socket into the worker passed as
+# "clean" (finding d3d68e4-F1).
+launches = []
 
 
 def record(name, expectation, observed, ok, note=""):
@@ -123,6 +129,7 @@ def try_build(profile_path, context, extra=()):
         args += ["--security-opt", "seccomp=" + profile_path]
     args += list(extra) + ["-v", "%s:/ctx:ro" % context, BUILDKIT_IMAGE,
                            "--oci-worker-snapshotter=native"]
+    launches.append(list(args))
     docker(args, timeout=300)
     # buildkitd needs a moment; a probe that races it measures the race.
     started = False
@@ -195,13 +202,17 @@ def main(argv):
                                             "it for weakening process separation and "
                                             "cleanup")
 
-        # 4. Nothing forbidden was used to get here.
-        used = " ".join(["--security-opt", "seccomp=" + path])
-        offenders = [f for f in FORBIDDEN if f in used]
+        # 4. Nothing forbidden was used to get here -- checked against the argv actually
+        #    issued, every launch of it, not against a string this function writes.
+        offenders = sorted({f for argv in launches for a in argv for f in FORBIDDEN
+                            if f in a})
         record("no forbidden argument used",
-               "none of decision 6's rejected flags appear",
-               "clean" if not offenders else "USED: %s" % ", ".join(offenders),
-               not offenders)
+               "none of decision 6's rejected flags appear in any launch",
+               "clean across %d launch(es)" % len(launches) if not offenders
+               else "USED: %s" % ", ".join(offenders),
+               not offenders and bool(launches),
+               "" if launches else "no launch was recorded, so this check examined "
+                                   "nothing")
 
         # 5. Minimality, which is a claim and therefore gets a control: drop one syscall
         #    and the build must stop working. Otherwise "minimum" is decoration.
@@ -226,10 +237,38 @@ def main(argv):
     return 0 if not bad else 1
 
 
+def forbidden_in_launches():
+    return sorted({f for argv in launches for a in argv for f in FORBIDDEN if f in a})
+
+
 def self_test(tmp, base, ctx):
-    """Each required syscall must be required; the sandbox check must see its opposite."""
+    """Each required syscall must be required; the forbidden check must see a violation."""
     print("== self-test: each claim must fail when its premise is removed ==")
     missed = []
+
+    # The forbidden-argument check first, because it is the one that certified this
+    # probe's headline claim while being unable to fail. Each flag must be SEEN when it
+    # is actually passed to docker.
+    for label, extra, expect in (
+            ("the Docker socket is mounted",
+             ("-v", "/var/run/docker.sock:/var/run/docker.sock"), "/var/run/docker.sock"),
+            ("--privileged is used", ("--privileged",), "--privileged"),
+            ("apparmor is unconfined",
+             ("--security-opt", "apparmor=unconfined"), "apparmor=unconfined"),
+            ("the process sandbox is disabled",
+             ("--entrypoint", "buildkitd"), None),
+    ):
+        if expect is None:
+            continue
+        launches.clear()
+        try_build(write_profile(tmp, base, REQUIRED_SYSCALLS), ctx, extra=extra)
+        seen = forbidden_in_launches()
+        if expect in seen:
+            print("  ok   forbidden flag detected: %s" % label)
+        else:
+            print("  FAIL NOT detected: %s (saw %s)" % (label, seen or "nothing"))
+            missed.append(label)
+    launches.clear()
     for syscall in REQUIRED_SYSCALLS:
         reduced = [s for s in REQUIRED_SYSCALLS if s != syscall]
         _, _, built, _ = try_build(write_profile(tmp, base, reduced), ctx)
