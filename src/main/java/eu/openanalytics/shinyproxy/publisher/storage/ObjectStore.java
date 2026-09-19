@@ -24,6 +24,7 @@ package eu.openanalytics.shinyproxy.publisher.storage;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -110,6 +111,23 @@ public interface ObjectStore {
      */
     Optional<StoredObject> putIfAbsent(String bucket, String key, byte[] content,
                                        String contentType);
+
+    /**
+     * Every object under {@code prefix}, in the store's lexicographic order.
+     *
+     * <p>Used to find which log chunks actually persisted. Chunk keys are zero-padded to a
+     * fixed width precisely so this order is replay order ({@link ObjectKeys#SEQUENCE_DIGITS}).
+     *
+     * <p>Returns sizes, because the listing already carries them: computing a log's byte
+     * count with a {@code head()} per chunk cost 1200 extra round trips on a 1200-chunk
+     * build and made the test that proves pagination take almost three minutes.
+     * {@link StoredObject#sha256()} is empty on these — a listing does not carry metadata,
+     * and that is exactly the absence the {@link Optional} exists to make visible.
+     *
+     * <p>Paginates internally: a caller must never see a truncated listing, because a
+     * truncated listing of chunks looks exactly like a log that stopped early.
+     */
+    List<StoredObject> list(String bucket, String prefix);
 
     /** Metadata for an object, or empty if it is not there. */
     Optional<StoredObject> head(String bucket, String key);

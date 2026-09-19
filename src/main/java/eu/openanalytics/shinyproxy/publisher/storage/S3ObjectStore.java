@@ -28,6 +28,8 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -41,7 +43,9 @@ import java.io.OutputStream;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -248,6 +252,36 @@ public class S3ObjectStore implements ObjectStore {
             }
             return n;
         }
+    }
+
+    @Override
+    public List<StoredObject> list(String bucket, String prefix) {
+        List<StoredObject> found = new ArrayList<>();
+        String token = null;
+        try {
+            do {
+                ListObjectsV2Response page = client.listObjectsV2(
+                        ListObjectsV2Request.builder()
+                                .bucket(bucket)
+                                .prefix(prefix)
+                                .continuationToken(token)
+                                .build());
+                // size comes from the listing; sha256 does not, and is left empty
+                // rather than invented.
+                page.contents().forEach(o -> found.add(new StoredObject(
+                        bucket, o.key(), o.size(), Optional.empty(), o.eTag())));
+                // Follow every page. Returning the first would make a long log look like a
+                // short one, which is indistinguishable from a build that stopped early.
+                token = Boolean.TRUE.equals(page.isTruncated())
+                        ? page.nextContinuationToken() : null;
+            } while (token != null);
+        } catch (S3Exception e) {
+            throw new ObjectStoreException(
+                    "could not list " + bucket + "/" + prefix + ": " + describe(e), e);
+        } catch (RuntimeException e) {
+            throw new ObjectStoreException("could not list " + bucket + "/" + prefix, e);
+        }
+        return found;
     }
 
     @Override
