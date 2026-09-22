@@ -270,16 +270,30 @@ public class TarHeaderTest {
         byte[] hidden = header("app/harmless.txt", "00000000000", '0');
         System.arraycopy("../escape".getBytes(StandardCharsets.UTF_8), 0, hidden, 20, 9);
         reChecksum(hidden);
-        assertEquals(BundleRule.PATH_NUL,
-                assertThrows(BundleRejection.class, () -> TarHeader.parse(hidden, LIMITS)).rule());
+        BundleRejection inName = assertThrows(BundleRejection.class,
+                () -> TarHeader.parse(hidden, LIMITS));
+        assertEquals(BundleRule.PATH_NUL, inName.rule());
+        assertTrue(inName.getMessage().contains("'name' field"),
+                "which field hid the bytes is the first thing a publisher needs: "
+                        + inName.getMessage());
 
         byte[] hiddenPrefix = header("app.R", "00000000000", '0');
         writeField(hiddenPrefix, 345, 155, "app");
         System.arraycopy("../escape".getBytes(StandardCharsets.UTF_8), 0, hiddenPrefix, 349, 9);
         reChecksum(hiddenPrefix);
-        assertEquals(BundleRule.PATH_NUL, assertThrows(BundleRejection.class,
-                () -> TarHeader.parse(hiddenPrefix, LIMITS)).rule(),
+        BundleRejection inPrefix = assertThrows(BundleRejection.class,
+                () -> TarHeader.parse(hiddenPrefix, LIMITS),
                 "the prefix field pads the same way and can hide the same bytes");
+        assertEquals(BundleRule.PATH_NUL, inPrefix.rule());
+        assertTrue(inPrefix.getMessage().contains("'prefix' field"), inPrefix.getMessage());
+        assertTrue(inPrefix.getMessage().contains("../escape"),
+                "the hidden bytes themselves are the evidence: " + inPrefix.getMessage());
+        assertFalse(inPrefix.getMessage().contains("\\x00\\x00\\x00"),
+                "the padding is being spelled out in front of the evidence, which is what"
+                        + " made this message unreadable: " + inPrefix.getMessage());
+        assertTrue(inPrefix.getMessage().length() < 200,
+                "a rejection this long is not read, it is skimmed past: "
+                        + inPrefix.getMessage().length() + " characters");
     }
 
     // ------------------------------------------------------------------ helpers

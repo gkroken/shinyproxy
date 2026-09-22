@@ -196,11 +196,11 @@ public record TarHeader(byte[] name, Kind kind, int mode, long size) {
      * the archive is POSIX ustar and the prefix is not empty.
      */
     private static byte[] effectiveName(byte[] block, boolean posix) {
-        byte[] name = MemberPath.nameFromField(Arrays.copyOfRange(block, NAME, NAME + 100));
+        byte[] name = MemberPath.nameFromField(Arrays.copyOfRange(block, NAME, NAME + 100), "name");
         if (!posix) {
             return name;
         }
-        byte[] prefix = MemberPath.nameFromField(Arrays.copyOfRange(block, PREFIX, PREFIX + 155));
+        byte[] prefix = MemberPath.nameFromField(Arrays.copyOfRange(block, PREFIX, PREFIX + 155), "prefix");
         if (prefix.length == 0) {
             return name;
         }

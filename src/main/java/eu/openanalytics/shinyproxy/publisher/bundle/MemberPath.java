@@ -29,6 +29,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -109,7 +110,7 @@ public final class MemberPath {
      */
     public static MemberPath parseNameField(byte[] field, boolean directoryHeader,
                                             ExtractionLimits limits) {
-        return parse(nameFromField(field), directoryHeader, limits);
+        return parse(nameFromField(field, "name"), directoryHeader, limits);
     }
 
     /**
@@ -119,8 +120,12 @@ public final class MemberPath {
      * name and, in POSIX ustar, the 155-byte prefix that is joined to it. Both can hide
      * bytes behind a NUL, and one implementation of that rule is better than two that agree
      * today (34182de-F1 was that lesson at a larger scale).
+     *
+     * <p>{@code fieldName} is in the message because those two are different bugs in
+     * different parts of whatever wrote the archive, and a publisher reading the rejection
+     * should not have to count rendered bytes to work out which one they have.
      */
-    public static byte[] nameFromField(byte[] field) {
+    public static byte[] nameFromField(byte[] field, String fieldName) {
         int end = field.length;
         for (int i = 0; i < field.length; i++) {
             if (field[i] == 0) {
@@ -128,17 +133,43 @@ public final class MemberPath {
                 break;
             }
         }
+        int firstHidden = -1;
+        int hiddenCount = 0;
         for (int i = end; i < field.length; i++) {
             if (field[i] != 0) {
-                throw new BundleRejection(BundleRule.PATH_NUL,
-                        "a name field carries " + (field.length - i) + " byte(s) after its"
-                                + " terminating NUL, which a C string would never see: '"
-                                + BundleRejection.render(field) + "'");
+                if (firstHidden < 0) {
+                    firstHidden = i;
+                }
+                hiddenCount++;
             }
+        }
+        if (firstHidden >= 0) {
+            throw new BundleRejection(BundleRule.PATH_NUL,
+                    "the '" + fieldName + "' field carries " + hiddenCount + " byte(s) after"
+                            + " its terminating NUL, which a C string would never see: '"
+                            + BundleRejection.render(Arrays.copyOfRange(field, 0, end))
+                            + "' is followed at offset " + firstHidden + " by '"
+                            + BundleRejection.render(hiddenWindow(field, firstHidden)) + "'");
         }
         byte[] name = new byte[end];
         System.arraycopy(field, 0, name, 0, end);
         return name;
+    }
+
+    /**
+     * The hidden bytes, enough of them to recognise and no more.
+     *
+     * <p>Rendering the whole padded field put the useful ten bytes behind a hundred and
+     * forty-five NULs spelled out as {@code \x00} — around six hundred characters of escape
+     * sequences in front of someone who is already stuck (finding dad5f21-F1). The window is
+     * capped, and the trailing padding inside it is dropped.
+     */
+    private static byte[] hiddenWindow(byte[] field, int from) {
+        int to = Math.min(field.length, from + 32);
+        while (to > from && field[to - 1] == 0) {
+            to--;
+        }
+        return Arrays.copyOfRange(field, from, to);
     }
 
     /**
