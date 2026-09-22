@@ -71,6 +71,22 @@ public enum BundleRule {
     /** More path segments than the configured maximum. */
     PATH_TOO_DEEP,
 
+    // ---- the gzip envelope -------------------------------------------------------------
+    /** Not a gzip member at all: wrong magic, an unknown compression method, or reserved flags. */
+    ARCHIVE_NOT_GZIP,
+    /** The gzip member ends before its data does. */
+    ARCHIVE_GZIP_TRUNCATED,
+    /** The gzip member decompresses to something other than what its own trailer claims. */
+    ARCHIVE_GZIP_CORRUPT,
+    /** A second gzip member after the first. Readers disagree about whether it exists. */
+    ARCHIVE_MULTIPLE_MEMBERS,
+    /** Bytes after the archive that are not padding. */
+    ARCHIVE_TRAILING_DATA,
+    /** The upload is larger than the configured compressed bound. */
+    ARCHIVE_TOO_LARGE_COMPRESSED,
+    /** The archive expands past the configured total bound. */
+    ARCHIVE_TOO_LARGE_EXPANDED,
+
     // ---- archive layout ----------------------------------------------------------------
     /** A member that is neither the manifest nor under the payload root. */
     LAYOUT_UNEXPECTED_MEMBER;
