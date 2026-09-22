@@ -25,8 +25,11 @@ package eu.openanalytics.shinyproxy.publisher.bundle;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
+import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -136,23 +139,54 @@ public class MemberIndexTest {
     }
 
     @Test
-    public void caseFoldingDoesNotUseTheDefaultLocale() {
-        // In a Turkish locale, "I".toLowerCase() is a dotless i, so INDEX.html and index.html
-        // stop folding together. Locale.ROOT is what keeps the answer the same everywhere,
-        // and a bundle that is refused in Oslo and accepted in Istanbul is the bug.
+    public void caseFoldingIsTheSameWhateverTheHostLocaleIs() {
+        // The plain case first: two spellings of one name collide under an ordinary locale.
         assertEquals(BundleRule.MEMBER_CASE_COLLISION, ruleFor("app/INDEX.html", "app/index.html"));
-        assertEquals(BundleRule.MEMBER_CASE_COLLISION, ruleFor("app/I.txt", "app/i.txt"));
+
+        // And under a Turkish one, where "I".toLowerCase() is a DOTLESS i and INDEX.html
+        // stops folding onto index.html. A bundle refused in Oslo and accepted in Istanbul
+        // is the bug; Locale.ROOT at the fold is what prevents it.
+        //
+        // 5704bfd-F1: the first version of this test named the problem in its title and its
+        // comment and never set a locale, so it held under toLowerCase() as well as
+        // toLowerCase(Locale.ROOT) and the mutation it claimed to kill survived. Setting the
+        // default is the whole test.
+        Locale previous = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.forLanguageTag("tr"));
+            assertNotEquals("I".toLowerCase(), "I".toLowerCase(Locale.ROOT),
+                    "the Turkish default did not take effect on this JVM, so everything"
+                            + " below would pass against a locale-dependent fold too");
+
+            assertEquals(BundleRule.MEMBER_CASE_COLLISION,
+                    ruleFor("app/INDEX.html", "app/index.html"));
+            assertEquals(BundleRule.MEMBER_CASE_COLLISION, ruleFor("app/I.txt", "app/i.txt"));
+        } finally {
+            Locale.setDefault(previous);
+        }
     }
 
     @Test
     public void aDecomposedAliasIsRefusedEarlierThanThis() {
+        // Written as escapes on purpose. As literal characters these two are visually
+        // identical and behave oppositely, so a reader of the file sees one string twice
+        // and two contradictory assertions (5704bfd-F2).
+        String decomposed = "app/cafe\u0301.txt";    // e + U+0301 COMBINING ACUTE
+        String composed = "app/caf\u00e9.txt";      // U+00E9 LATIN SMALL LETTER E WITH ACUTE
+
+        // That they are an ALIAS is the property this test is named for, so it is asserted
+        // rather than described: different bytes, one name after normalisation. Without
+        // this, an unrelated non-NFC string would satisfy everything below and the test
+        // would have stopped covering dup-nfc-alias without failing.
+        assertNotEquals(decomposed, composed);
+        assertEquals(composed, Normalizer.normalize(decomposed, Normalizer.Form.NFC));
+
         // dup-nfc-alias never reaches the index: MemberPath refuses NFD at parse, which is
         // the more specific answer. Asserted here as well as there so that relaxing the NFC
         // rule fails a test that says what it was covering.
-        assertEquals(BundleRule.PATH_NOT_NFC, assertThrows(BundleRejection.class,
-                () -> path("app/café.txt")).rule());
-        // The composed spelling alone is ordinary, so the pair really is an alias.
-        assertEquals(1, indexOf("app/café.txt").size(),
+        assertEquals(BundleRule.PATH_NOT_NFC,
+                assertThrows(BundleRejection.class, () -> path(decomposed)).rule());
+        assertEquals(1, indexOf(composed).size(),
                 "one member, with the payload root implied rather than counted");
     }
 
