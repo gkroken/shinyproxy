@@ -291,7 +291,9 @@ public class TarHeaderTest {
         assertFalse(inPrefix.getMessage().contains("\\x00\\x00\\x00"),
                 "the padding is being spelled out in front of the evidence, which is what"
                         + " made this message unreadable: " + inPrefix.getMessage());
-        assertTrue(inPrefix.getMessage().length() < 200,
+        // The bound itself is a property of every field shape, and is tested as one in
+        // MemberPathTest. This case is one ordinary input passing through it.
+        assertTrue(inPrefix.getMessage().length() <= MemberPath.MAX_HIDDEN_BYTES_MESSAGE,
                 "a rejection this long is not read, it is skimmed past: "
                         + inPrefix.getMessage().length() + " characters");
     }

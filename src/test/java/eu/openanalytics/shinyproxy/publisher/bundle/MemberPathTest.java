@@ -252,6 +252,72 @@ public class MemberPathTest {
         assertEquals("PATH_TRAVERSAL", BundleRule.PATH_TRAVERSAL.ruleName());
     }
 
+    @Test
+    public void aHiddenBytesRejectionStaysReadableWhateverTheFieldContains() {
+        // 525c504-F1: the bound is a property of the message, so it is driven from the
+        // fields that break it rather than from one three-byte name with fifty characters
+        // of headroom. Each case below produced an over-long message before this test.
+        byte[] longName = hidingField("a".repeat(140).getBytes(StandardCharsets.UTF_8), 141,
+                new byte[] {'z'});
+        byte[] controlName = hidingField(repeatByte((byte) 0x01, 140), 141, new byte[] {'z'});
+        // Short in bytes and long once rendered: thirty control characters are a hundred and
+        // twenty characters of escapes. A budget counted in bytes rather than in rendered
+        // characters passes every other case here and fails this one, which is why it is a
+        // separate shape rather than a smaller version of the one above.
+        byte[] shortButEscaped = hidingField(repeatByte((byte) 0x01, 30), 31, new byte[] {'z'});
+        byte[] oneLongRun = hidingField("app".getBytes(StandardCharsets.UTF_8), 4,
+                repeatByte((byte) 'Z', 50));
+        byte[] twoRuns = hidingField("app".getBytes(StandardCharsets.UTF_8), 4,
+                "../esc".getBytes(StandardCharsets.UTF_8));
+        System.arraycopy("../esc".getBytes(StandardCharsets.UTF_8), 0, twoRuns, 120, 6);
+        byte[] ordinary = hidingField("app".getBytes(StandardCharsets.UTF_8), 4,
+                "../esc".getBytes(StandardCharsets.UTF_8));
+
+        for (byte[] field : new byte[][] {longName, controlName, shortButEscaped, oneLongRun,
+                                          twoRuns, ordinary}) {
+            String message = assertThrows(BundleRejection.class,
+                    () -> MemberPath.nameFromField(field, "prefix")).getMessage();
+            assertTrue(message.length() <= MemberPath.MAX_HIDDEN_BYTES_MESSAGE,
+                    "a rejection of " + message.length() + " characters is skimmed past,"
+                            + " not read: " + message);
+        }
+
+        // 525c504-F2: when the bytes shown are fewer than the bytes counted, say so. A
+        // publisher who fixes the run they were shown and is refused again for one they
+        // were not has been told half the truth.
+        assertTrue(ellipsisIn(oneLongRun), "a run clipped at the window is not marked");
+        assertTrue(ellipsisIn(twoRuns), "a second run further along the field is not marked");
+        assertTrue(messageFor(twoRuns).contains("12 byte(s)"),
+                "the count is of every hidden byte, not of the shown run: "
+                        + messageFor(twoRuns));
+        assertFalse(ellipsisIn(ordinary),
+                "nothing was cut here, so the mark must not appear — otherwise it says"
+                        + " nothing when it does");
+    }
+
+    private static String messageFor(byte[] field) {
+        return assertThrows(BundleRejection.class,
+                () -> MemberPath.nameFromField(field, "prefix")).getMessage();
+    }
+
+    private static boolean ellipsisIn(byte[] field) {
+        return messageFor(field).contains("\u2026");
+    }
+
+    /** A 155-byte ustar-prefix-shaped field: a name, its NUL padding, and bytes hidden in it. */
+    private static byte[] hidingField(byte[] visible, int hiddenAt, byte[] hidden) {
+        byte[] field = new byte[155];
+        System.arraycopy(visible, 0, field, 0, visible.length);
+        System.arraycopy(hidden, 0, field, hiddenAt, hidden.length);
+        return field;
+    }
+
+    private static byte[] repeatByte(byte value, int count) {
+        byte[] out = new byte[count];
+        java.util.Arrays.fill(out, value);
+        return out;
+    }
+
     /** {@code d0/d1/.../x.txt} with exactly {@code segments} segments. */
     private static String deepPath(int segments) {
         StringBuilder out = new StringBuilder();

@@ -144,17 +144,45 @@ public final class MemberPath {
             }
         }
         if (firstHidden >= 0) {
+            byte[] window = hiddenWindow(field, firstHidden);
+            int shown = 0;
+            for (byte b : window) {
+                if (b != 0) {
+                    shown++;
+                }
+            }
+            String hidden = BundleRejection.renderBounded(window, EVIDENCE_BUDGET, false);
+            if (shown < hiddenCount && !hidden.endsWith("\u2026")) {
+                // The window stopped early, or there is another run further along. Either
+                // way the count and the bytes in front of the reader no longer match, and
+                // saying so costs one character (525c504-F2).
+                hidden = hidden + "\u2026";
+            }
             throw new BundleRejection(BundleRule.PATH_NUL,
-                    "the '" + fieldName + "' field carries " + hiddenCount + " byte(s) after"
-                            + " its terminating NUL, which a C string would never see: '"
-                            + BundleRejection.render(Arrays.copyOfRange(field, 0, end))
-                            + "' is followed at offset " + firstHidden + " by '"
-                            + BundleRejection.render(hiddenWindow(field, firstHidden)) + "'");
+                    "the '" + fieldName + "' field hides " + hiddenCount + " byte(s) behind"
+                            + " its terminating NUL, which a C string never sees: '"
+                            + BundleRejection.renderBounded(
+                                    Arrays.copyOfRange(field, 0, end), EVIDENCE_BUDGET, true)
+                            + "' then at offset " + firstHidden + " '" + hidden + "'");
         }
         byte[] name = new byte[end];
         System.arraycopy(field, 0, name, 0, end);
         return name;
     }
+
+    /**
+     * How many characters of evidence each half of a hidden-bytes rejection may spend.
+     *
+     * <p>Both halves are bounded, which the first attempt at this was not: it capped the
+     * hidden run at 32 bytes and rendered the visible name whole, so a 140-byte path — an
+     * ordinary deep R project — produced a 283-character rejection, and a name of control
+     * characters produced 703. The wall of escapes had moved from the padding to the name
+     * rather than gone (525c504-F1).
+     */
+    static final int EVIDENCE_BUDGET = 32;
+
+    /** The longest a hidden-bytes rejection can be, whatever the field contains. */
+    static final int MAX_HIDDEN_BYTES_MESSAGE = 220;
 
     /**
      * The hidden bytes, enough of them to recognise and no more.

@@ -56,6 +56,45 @@ public class BundleRejection extends RuntimeException {
      * valid UTF-8 at all, and a replacement character would render two different hostile
      * names identically.
      */
+    /**
+     * The same rendering, kept inside a budget of characters.
+     *
+     * <p>A budget in CHARACTERS rather than bytes because that is what makes a message long:
+     * {@link #render} turns one byte outside printable ASCII into four, so a bound on bytes
+     * bounds the output only for input that was never the problem. When the budget clips,
+     * an ellipsis marks it, so the reader is told the evidence was cut rather than left to
+     * reconcile it with a count (findings 525c504-F1 and -F2).
+     *
+     * @param keepTail true to render the END of the input, for cases where the bytes next
+     *                 to the truncation point are the informative ones
+     */
+    public static String renderBounded(byte[] name, int budget, boolean keepTail) {
+        String whole = render(name);
+        if (whole.length() <= budget) {
+            return whole;
+        }
+        // Cut on a rendered-character boundary by rebuilding, so an escape is never halved.
+        StringBuilder out = new StringBuilder();
+        if (keepTail) {
+            for (int i = name.length - 1; i >= 0; i--) {
+                String piece = render(new byte[] {name[i]});
+                if (out.length() + piece.length() > budget) {
+                    break;
+                }
+                out.insert(0, piece);
+            }
+            return "\u2026" + out;
+        }
+        for (byte b : name) {
+            String piece = render(new byte[] {b});
+            if (out.length() + piece.length() > budget) {
+                break;
+            }
+            out.append(piece);
+        }
+        return out + "\u2026";
+    }
+
     public static String render(byte[] name) {
         StringBuilder out = new StringBuilder(name.length + 8);
         for (byte b : name) {
