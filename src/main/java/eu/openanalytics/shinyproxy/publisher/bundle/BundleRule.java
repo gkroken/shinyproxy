@@ -87,6 +87,26 @@ public enum BundleRule {
     /** The archive expands past the configured total bound. */
     ARCHIVE_TOO_LARGE_EXPANDED,
 
+    // ---- one tar header ----------------------------------------------------------------
+    /** The header's own checksum does not match its bytes. */
+    HEADER_CHECKSUM_MISMATCH,
+    /** Not a ustar header: the magic says this is some other format, or none. */
+    HEADER_NOT_USTAR,
+    /** A numeric field that is not octal — which is how a negative size is written. */
+    HEADER_MALFORMED_NUMBER,
+    /** GNU's base-256 numeric encoding, which this extractor does not accept. */
+    HEADER_BASE256_NUMBER,
+    /** A member type the bundle format does not carry: link, device, FIFO, socket, sparse. */
+    ENTRY_TYPE_NOT_ALLOWED,
+    /** A typeflag no standard defines, refused rather than guessed at. */
+    ENTRY_TYPE_UNKNOWN,
+    /** A setuid, setgid or sticky bit. */
+    ENTRY_MODE_PRIVILEGED,
+    /** A directory header claiming content, which would move the read head. */
+    ENTRY_DIRECTORY_WITH_CONTENT,
+    /** A member larger than the configured per-file bound. */
+    ENTRY_TOO_LARGE,
+
     // ---- archive layout ----------------------------------------------------------------
     /** A member that is neither the manifest nor under the payload root. */
     LAYOUT_UNEXPECTED_MEMBER;
