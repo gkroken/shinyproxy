@@ -107,6 +107,14 @@ public enum BundleRule {
     /** A member larger than the configured per-file bound. */
     ENTRY_TOO_LARGE,
 
+    // ---- members against each other ----------------------------------------------------
+    /** The same member path twice. Last-entry-wins means what was validated is not what is on disk. */
+    DUPLICATE_MEMBER,
+    /** One path used as both a file and a directory, in either order. */
+    MEMBER_KIND_CONFLICT,
+    /** Two paths differing only by case, which are one file on a case-insensitive filesystem. */
+    MEMBER_CASE_COLLISION,
+
     // ---- archive layout ----------------------------------------------------------------
     /** A member that is neither the manifest nor under the payload root. */
     LAYOUT_UNEXPECTED_MEMBER;
