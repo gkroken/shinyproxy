@@ -188,6 +188,56 @@ public class GzipMemberTest {
                         + " most of the way through a bomb it was supposed to refuse early");
     }
 
+    @Test
+    public void aConsumerThatStopsEarlyStillGetsEveryCheck() throws Exception {
+        // b50b378-F1. Sixteen bytes is what a tar reader consumes before it meets the
+        // end-of-archive marker and stops, so this is not a hypothetical consumer: it is
+        // the one the next unit of this track will be.
+        byte[] smuggled = concat(gzip(PAYLOAD), gzip(PAYLOAD));
+        BundleRejection ex = assertThrows(BundleRejection.class,
+                () -> readSixteenBytesAndClose(smuggled, LIMITS));
+        assertEquals(BundleRule.ARCHIVE_MULTIPLE_MEMBERS, ex.rule());
+
+        byte[] appended = concat(gzip(PAYLOAD), "trailing\n".getBytes(StandardCharsets.UTF_8));
+        assertEquals(BundleRule.ARCHIVE_TRAILING_DATA, assertThrows(BundleRejection.class,
+                () -> readSixteenBytesAndClose(appended, LIMITS)).rule());
+
+        byte[] badCrc = gzip(PAYLOAD);
+        badCrc[badCrc.length - 8] ^= 0x01;
+        assertEquals(BundleRule.ARCHIVE_GZIP_CORRUPT, assertThrows(BundleRejection.class,
+                () -> readSixteenBytesAndClose(badCrc, LIMITS)).rule());
+
+        // The control: an ordinary member read partway and closed is not an error. Without
+        // this, a close() that threw on everything would satisfy all three above.
+        readSixteenBytesAndClose(gzip(PAYLOAD), LIMITS);
+    }
+
+    @Test
+    public void closingDuringAFailureDoesNotRelabelIt() throws Exception {
+        // A rejection while draining inside close() must not replace the reason the caller
+        // is already unwinding for. The first reason a bundle was refused is the one worth
+        // reporting, and the expanded bound below would otherwise be reported as whatever
+        // the rest of the member turned out to contain.
+        byte[] smuggled = concat(gzip(PAYLOAD), gzip(PAYLOAD));
+        ExtractionLimits tight = limits("max_expanded_bytes", 32);
+
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> {
+            try (GzipMember member = GzipMember.open(new ByteArrayInputStream(smuggled), tight)) {
+                drain(member);
+            }
+        });
+        assertEquals(BundleRule.ARCHIVE_TOO_LARGE_EXPANDED, ex.rule(),
+                "the bound that actually stopped the read was replaced by a later one");
+    }
+
+    /** Reads a little and closes, the way a tar reader meeting its end marker does. */
+    private static void readSixteenBytesAndClose(byte[] archive, ExtractionLimits limits)
+            throws IOException {
+        try (GzipMember member = GzipMember.open(new ByteArrayInputStream(archive), limits)) {
+            member.read(new byte[16], 0, 16);
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static ExtractionLimits limits(String bound, long value) {

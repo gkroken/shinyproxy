@@ -48,6 +48,11 @@ import java.util.zip.Inflater;
  * against bytes actually produced, which is what makes a small archive claiming to expand
  * into gigabytes die here rather than on the disk.
  *
+ * <p><b>The checks do not depend on the caller draining.</b> A consumer that stops early —
+ * a tar reader meeting the end-of-archive marker does exactly that — still gets them, because
+ * {@link #close()} finishes the member when {@code read} has not. A rule enforced only when
+ * the caller cooperates is not a rule, and nothing else in this class trusts the caller.
+ *
  * <p>The trailer is verified rather than skipped. A gzip member whose CRC or length does not
  * match what came out of it is corrupt, and a lenient parser that ignores the trailer will
  * happily hand on attacker-chosen bytes — the same class of defect as the corpus's
@@ -279,9 +284,36 @@ public final class GzipMember extends InputStream {
         return compressedRead;
     }
 
+    /**
+     * Ends the member, and finishes checking it if the caller did not read that far.
+     *
+     * <p>Finding b50b378-F1: every guarantee this class makes used to be conditional on the
+     * consumer reading to end of stream, because the trailer check ran from {@code read()}.
+     * A tar reader stops at the end-of-archive marker, which is sixteen bytes into a stream
+     * that may have a second gzip member behind it — so the smuggled member was neither
+     * joined nor refused, it was never looked at. A reader that stops early is a third
+     * reader with a third opinion about what the bundle contains, which is the same defect
+     * the class was built to prevent.
+     *
+     * <p>So closing drains whatever is left and then verifies. The drain is bounded by the
+     * expanded limit like any other read, so a bomb behind an early stop is refused rather
+     * than decompressed. A rejection raised here during unwinding is suppressed by
+     * try-with-resources and the original rejection still propagates, which is the right way
+     * round: the first reason a bundle was refused is the one worth reporting.
+     */
     @Override
-    public void close() {
-        if (!closed) {
+    public void close() throws IOException {
+        if (closed) {
+            return;
+        }
+        try {
+            if (!verified) {
+                byte[] discard = new byte[BUFFER];
+                while (read(discard, 0, discard.length) >= 0) {
+                    continue;
+                }
+            }
+        } finally {
             closed = true;
             inflater.end();
         }
