@@ -56,6 +56,21 @@ public class BundleRejection extends RuntimeException {
      * valid UTF-8 at all, and a replacement character would render two different hostile
      * names identically.
      */
+    public static String render(byte[] name) {
+        StringBuilder out = new StringBuilder(name.length + 8);
+        for (byte b : name) {
+            int c = b & 0xFF;
+            if (c == '\\') {
+                out.append("\\\\");
+            } else if (c >= 0x20 && c < 0x7F) {
+                out.append((char) c);
+            } else {
+                out.append(String.format("\\x%02x", c));
+            }
+        }
+        return out.toString();
+    }
+
     /**
      * The same rendering, kept inside a budget of characters.
      *
@@ -93,20 +108,5 @@ public class BundleRejection extends RuntimeException {
             out.append(piece);
         }
         return out + "\u2026";
-    }
-
-    public static String render(byte[] name) {
-        StringBuilder out = new StringBuilder(name.length + 8);
-        for (byte b : name) {
-            int c = b & 0xFF;
-            if (c == '\\') {
-                out.append("\\\\");
-            } else if (c >= 0x20 && c < 0x7F) {
-                out.append((char) c);
-            } else {
-                out.append(String.format("\\x%02x", c));
-            }
-        }
-        return out.toString();
     }
 }
