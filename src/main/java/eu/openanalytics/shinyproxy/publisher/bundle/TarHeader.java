@@ -42,6 +42,24 @@ import java.util.Arrays;
  * refused at parse. A walk that never receives a symlink header cannot forget to handle one,
  * which is worth more than the flexibility of passing the typeflag along.
  *
+ * <p><b>The name has two sources, and they are joined here.</b> POSIX ustar splits a long
+ * member name across a 155-byte prefix field and the 100-byte name field, and the member is
+ * {@code prefix + "/" + name}. A reader that takes the name field alone sees a different
+ * path from the one the archive describes — {@code prefix="app/.."} with
+ * {@code name="escape.txt"} looks entirely innocent in the field a walk would naturally
+ * reach for, and is a traversal once joined (finding 11fcd34-F1). So this class exposes one
+ * {@code name}, already joined, and never the two halves. There is no field left to reach
+ * for by mistake.
+ *
+ * <p>The join applies to POSIX ustar only. Under GNU's magic the same 155 bytes are not a
+ * prefix at all — GNU puts atime, ctime and its incremental-format fields there and spells
+ * long names with a separate header — so joining them would corrupt the name of a valid
+ * archive. Both spellings are tested, including a GNU header carrying a traversal in those
+ * bytes, which must NOT become part of the name.
+ *
+ * <p>Both fields are NUL-padded, and both can hide bytes behind the padding, so both go
+ * through {@link MemberPath#nameFromField} rather than being trimmed here.
+ *
  * <p><b>What is deliberately not accepted.</b> GNU's base-256 numeric encoding is refused.
  * It exists to express values that do not fit in the octal field: sizes above 8 GiB, and
  * uids or timestamps beyond the ordinary range. A bundle needs none of those — ownership is
@@ -51,7 +69,7 @@ import java.util.Arrays;
  * above 8 GiB will find such a member refused with this rule named, which is a better
  * outcome than a silently misread size.
  */
-public record TarHeader(byte[] nameField, byte[] prefixField, Kind kind, int mode, long size) {
+public record TarHeader(byte[] name, Kind kind, int mode, long size) {
 
     /** The block size every tar structure is a multiple of. */
     public static final int BLOCK = 512;
@@ -111,7 +129,7 @@ public record TarHeader(byte[] nameField, byte[] prefixField, Kind kind, int mod
         }
 
         verifyChecksum(block);
-        verifyMagic(block);
+        boolean posix = verifyMagic(block);
 
         int mode = (int) octal(block, MODE, 8, "mode");
         if ((mode & (SETUID | SETGID | STICKY)) != 0) {
@@ -141,8 +159,7 @@ public record TarHeader(byte[] nameField, byte[] prefixField, Kind kind, int mod
                             + limits.maxFileBytes());
         }
 
-        return new TarHeader(Arrays.copyOfRange(block, NAME, NAME + 100),
-                Arrays.copyOfRange(block, PREFIX, PREFIX + 155), kind, mode, size);
+        return new TarHeader(effectiveName(block, posix), kind, mode, size);
     }
 
     private static void verifyChecksum(byte[] block) {
@@ -174,7 +191,28 @@ public record TarHeader(byte[] nameField, byte[] prefixField, Kind kind, int mod
         }
     }
 
-    private static void verifyMagic(byte[] block) {
+    /**
+     * The member's name: the name field, with the ustar prefix joined in front of it when
+     * the archive is POSIX ustar and the prefix is not empty.
+     */
+    private static byte[] effectiveName(byte[] block, boolean posix) {
+        byte[] name = MemberPath.nameFromField(Arrays.copyOfRange(block, NAME, NAME + 100));
+        if (!posix) {
+            return name;
+        }
+        byte[] prefix = MemberPath.nameFromField(Arrays.copyOfRange(block, PREFIX, PREFIX + 155));
+        if (prefix.length == 0) {
+            return name;
+        }
+        byte[] joined = new byte[prefix.length + 1 + name.length];
+        System.arraycopy(prefix, 0, joined, 0, prefix.length);
+        joined[prefix.length] = '/';
+        System.arraycopy(name, 0, joined, prefix.length + 1, name.length);
+        return joined;
+    }
+
+    /** @return true for POSIX ustar, false for GNU's spelling; the prefix rule differs. */
+    private static boolean verifyMagic(byte[] block) {
         byte[] magic = Arrays.copyOfRange(block, MAGIC, MAGIC + 8);
         boolean posix = magic[0] == 'u' && magic[1] == 's' && magic[2] == 't' && magic[3] == 'a'
                 && magic[4] == 'r' && magic[5] == 0;
@@ -185,6 +223,7 @@ public record TarHeader(byte[] nameField, byte[] prefixField, Kind kind, int mod
                     "the header magic is '" + BundleRejection.render(magic) + "', which is"
                             + " neither POSIX ustar nor GNU tar");
         }
+        return posix;
     }
 
     private static Kind kindOf(byte typeFlag) {

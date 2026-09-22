@@ -229,15 +229,63 @@ public class TarHeaderTest {
                 "an all-zero block is the end marker and must not parse as a member");
     }
 
+    @Test
+    public void theUstarPrefixIsPartOfTheName() {
+        // 11fcd34-F1. POSIX ustar splits a long name across prefix and name, and the member
+        // is prefix + "/" + name. The corpus has no fixture for this surface, so a walk that
+        // ignored the prefix would pass the same evidence a correct one does.
+        byte[] ordinary = header("app.R", "00000000000", '0');
+        writeField(ordinary, 345, 155, "app/deeply/nested");
+        reChecksum(ordinary);
+        assertEquals("app/deeply/nested/app.R", nameOf(TarHeader.parse(ordinary, LIMITS)));
+
+        // The same mechanism carrying an escape. The name field alone reads as innocent;
+        // only the joined name shows what the archive actually says, and MemberPath then
+        // refuses it. Parsing it as a REGULAR member here is correct — the path rules are
+        // not this class's job — so the assertion is that the escape is VISIBLE.
+        byte[] escaping = header("escape.txt", "00000000000", '0');
+        writeField(escaping, 345, 155, "app/..");
+        reChecksum(escaping);
+        TarHeader header = TarHeader.parse(escaping, LIMITS);
+        assertEquals("app/../escape.txt", nameOf(header));
+        assertEquals(BundleRule.PATH_TRAVERSAL, assertThrows(BundleRejection.class,
+                () -> MemberPath.parse(header.name(), false, LIMITS)).rule());
+    }
+
+    @Test
+    public void gnuKeepsItsOwnMeaningForThoseBytes() {
+        // Under GNU's magic the same 155 bytes are atime, ctime and incremental-format
+        // fields, not a prefix — GNU spells long names with a separate header. Joining them
+        // would corrupt the name of a valid archive, so a traversal written there must NOT
+        // become part of the name.
+        byte[] block = header("app/app.R", "00000000000", '0');
+        writeField(block, 257, 8, "ustar  \0");
+        writeField(block, 345, 155, "app/..");
+        reChecksum(block);
+        assertEquals("app/app.R", nameOf(TarHeader.parse(block, LIMITS)));
+    }
+
+    @Test
+    public void neitherNameFieldMayHideBytesBehindItsPadding() {
+        byte[] hidden = header("app/harmless.txt", "00000000000", '0');
+        System.arraycopy("../escape".getBytes(StandardCharsets.UTF_8), 0, hidden, 20, 9);
+        reChecksum(hidden);
+        assertEquals(BundleRule.PATH_NUL,
+                assertThrows(BundleRejection.class, () -> TarHeader.parse(hidden, LIMITS)).rule());
+
+        byte[] hiddenPrefix = header("app.R", "00000000000", '0');
+        writeField(hiddenPrefix, 345, 155, "app");
+        System.arraycopy("../escape".getBytes(StandardCharsets.UTF_8), 0, hiddenPrefix, 349, 9);
+        reChecksum(hiddenPrefix);
+        assertEquals(BundleRule.PATH_NUL, assertThrows(BundleRejection.class,
+                () -> TarHeader.parse(hiddenPrefix, LIMITS)).rule(),
+                "the prefix field pads the same way and can hide the same bytes");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static String nameOf(TarHeader header) {
-        byte[] name = header.nameField();
-        int end = 0;
-        while (end < name.length && name[end] != 0) {
-            end++;
-        }
-        return new String(name, 0, end, StandardCharsets.UTF_8);
+        return new String(header.name(), StandardCharsets.UTF_8);
     }
 
     private static byte[] header(String name, String sizeField, char typeFlag) {

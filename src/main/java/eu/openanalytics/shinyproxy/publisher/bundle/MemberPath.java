@@ -109,6 +109,18 @@ public final class MemberPath {
      */
     public static MemberPath parseNameField(byte[] field, boolean directoryHeader,
                                             ExtractionLimits limits) {
+        return parse(nameFromField(field), directoryHeader, limits);
+    }
+
+    /**
+     * The name inside a fixed-width, NUL-padded tar field, with the padding rule enforced.
+     *
+     * <p>Separate and public because a header has more than one such field: the 100-byte
+     * name and, in POSIX ustar, the 155-byte prefix that is joined to it. Both can hide
+     * bytes behind a NUL, and one implementation of that rule is better than two that agree
+     * today (34182de-F1 was that lesson at a larger scale).
+     */
+    public static byte[] nameFromField(byte[] field) {
         int end = field.length;
         for (int i = 0; i < field.length; i++) {
             if (field[i] == 0) {
@@ -119,14 +131,14 @@ public final class MemberPath {
         for (int i = end; i < field.length; i++) {
             if (field[i] != 0) {
                 throw new BundleRejection(BundleRule.PATH_NUL,
-                        "the name field carries " + (field.length - i) + " byte(s) after its"
+                        "a name field carries " + (field.length - i) + " byte(s) after its"
                                 + " terminating NUL, which a C string would never see: '"
                                 + BundleRejection.render(field) + "'");
             }
         }
         byte[] name = new byte[end];
         System.arraycopy(field, 0, name, 0, end);
-        return parse(name, directoryHeader, limits);
+        return name;
     }
 
     /**
