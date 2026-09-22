@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 # Checks the adversarial bundle corpus against itself (WORKPLAN-BUNDLES.md T2).
 #
 # Three things, none of which is "does the extractor reject it" -- there is no extractor yet,

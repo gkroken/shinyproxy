@@ -1,3 +1,8 @@
+/*
+ * Skald - Copyright (C) 2026 Gard Kroken
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Cross-checks every pattern in the released schemas against a second regex engine.
 //
 // The server will validate with networknt on java.util.regex; JSON Schema specifies

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """The build worker's egress gateway: deny all, allow the configured repositories (T3).
 
 Q3 settled the rule and the reason: "**deny all except the configured repository hosts**,

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Builds the adversarial bundle corpus (WORKPLAN-BUNDLES.md T2).
 
 Written BEFORE the extractor and deliberately independent of it: standard library only, no

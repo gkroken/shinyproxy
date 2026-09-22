@@ -254,6 +254,18 @@
                     <exclude>**/.gitignore</exclude>
                 </excludes>
             </resource>
+            <!-- Skald: the extraction bounds are declared once, in spec/, and READ at
+                 startup rather than restated as constants (ExtractionLimits). That only
+                 works if the file ships, so it is packaged here. Narrow on purpose: the
+                 other spec/ documents are plan artifacts that nothing loads, and an
+                 include list says which of them is code. -->
+            <resource>
+                <directory>spec</directory>
+                <targetPath>skald/spec</targetPath>
+                <includes>
+                    <include>extraction-limits-v1.json</include>
+                </includes>
+            </resource>
         </resources>
         <plugins>
             <plugin>
@@ -349,6 +361,11 @@
                                 <exclude>LICENSE_HEADER</exclude>
                                 <exclude>Makefile</exclude>
                                 <exclude>dev/LICENSE_HEADER_SKALD</exclude>
+                                <exclude>dev/LICENSE_HEADER_SKALD_SCRIPT</exclude>
+                                <!-- Skald: our own dev tooling, covered by the third
+                                     licenseSet below with a short header. -->
+                                <exclude>dev/**/*.py</exclude>
+                                <exclude>dev/**/*.js</exclude>
                                 <exclude>README.md</exclude>
                                 <exclude>docs/**</exclude>
                                 <exclude>src/main/resources/configs/**</exclude>
@@ -368,6 +385,18 @@
                             <includes>
                                 <include>src/main/java/eu/openanalytics/shinyproxy/publisher/**</include>
                                 <include>src/test/java/eu/openanalytics/shinyproxy/publisher/**</include>
+                            </includes>
+                        </licenseSet>
+                        <!-- Skald: the dev suites and fixture generators. Ours, so the same
+                             argument as above applies — but a twenty-one line block above a
+                             file whose first line is its own explanation costs more than it
+                             states, so these carry the two-line SPDX form instead. Nothing
+                             here ships in the jar. -->
+                        <licenseSet>
+                            <header>dev/LICENSE_HEADER_SKALD_SCRIPT</header>
+                            <includes>
+                                <include>dev/**/*.py</include>
+                                <include>dev/**/*.js</include>
                             </includes>
                         </licenseSet>
                     </licenseSets>

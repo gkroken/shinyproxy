@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """The oracle: judges a real extraction against the corpus and the sentinels (T2b).
 
 The corpus says which archives must be rejected. The sentinels say what must not have

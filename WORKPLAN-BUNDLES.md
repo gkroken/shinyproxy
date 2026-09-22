@@ -558,23 +558,28 @@ The independent reviewer adds withheld cases at T5. A fixture generated through 
 normalizer being tested does not establish containment.
 
 **Limits are operator configuration, not constants (Q3, decided 2026-09-17).** A laptop and
-a build host do not want the same ceilings, so every bound below is a configured property
-with the documented default beside it, and the extractor reads them rather than embedding
-them. Two consequences the implementation owes: a configured value is itself untrusted
+a build host do not want the same ceilings, so every bound is a configured property
+with its documented default recorded beside it in `spec/extraction-limits-v1.json`, and the
+extractor reads them rather than embedding them. Two consequences the implementation owes: a configured value is itself untrusted
 input and is validated at startup — positive, within a sane absolute maximum, and refused
 rather than silently clamped — and the defaults must appear in one place that the
 documentation and the code agree on, or they will drift.
 
-Defaults: 256 MiB compressed, 2 GiB expanded across all members, 512 MiB per regular file,
-20,000 physical headers/entries including metadata, 4 MiB manifest, 64 KiB per extended
-header, 1,024 UTF-8 bytes per path, 255 per segment and 32 levels, bounded parser memory
-and a 60-second extraction deadline. Check totals against **actual streamed bytes** as well
-as declared sizes; arithmetic must be overflow-safe. Limits apply to ignored metadata too.
+**The values are in `spec/extraction-limits-v1.json` and are deliberately not restated
+here.** Ten bounds, each with its default, the absolute maximum past which the bound stops
+meaning anything, and why that maximum is where it is. `ExtractionLimits` reads that file
+from the classpath at startup instead of carrying constants, so the one place the code and
+the documentation must agree on is a place neither of them copies;
+`dev/schema-fixture-check.py` holds the corpus profile to the same file and fails if this
+section starts restating a number again. Bounded parser memory is an invariant of the
+implementation rather than a number an operator sets, and is recorded there as one. Check
+totals against **actual streamed bytes** as well as declared sizes; arithmetic must be
+overflow-safe. Limits apply to ignored metadata too.
 
 Making them configurable does not make them optional. A deployment may raise a ceiling; it
 may not remove one. The corpus in T2 therefore parameterises the boundary cases off the
-configured values rather than hard-coding 20,000, so that the N/N+1 pairs still straddle
-the real limit after an operator changes it.
+configured values rather than hard-coding the entry cap, so that the N/N+1 pairs still
+straddle the real limit after an operator changes it.
 
 Accept only regular files and directories. Reject all symlinks and hardlinks, even ones
 apparently pointing inside the tree; there is no build functionality requiring them in

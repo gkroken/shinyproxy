@@ -1,0 +1,90 @@
+{
+  "note": "The extraction bounds, their defaults and their absolute maxima, in ONE place. Q3 decided that limits are operator configuration rather than constants, and the same decision owes that 'the defaults must appear in one place that the documentation and the code agree on, or they will drift'. This file is that place: it is packaged onto the classpath (see pom.xml) and read at startup by ExtractionLimits, so the code does not restate a number written here. WORKPLAN-BUNDLES.md describes why these bounds exist and does not restate their values; dev/fixtures/bundles/expectations.json records the profile the corpus was generated against, and dev/schema-fixture-check.py fails when it and this file disagree. NOT a JSON Schema, and deliberately not under schemas/ -- a document at a schema path is loadable as a schema whether or not it is one, and one that is not turns into a validator accepting everything (review finding dd46cac-F1).",
+  "layout_version": 1,
+
+  "contract": {
+    "configured": "Every bound below is settable per deployment as skald.bundle.limits.<name>. A deployment may RAISE a ceiling; it may not remove one, and there is no value meaning 'unbounded'.",
+    "untrusted": "A configured value is input like any other. At startup each one is parsed, required to be a positive integer, and required to be at most its absolute_max. A value that fails is REFUSED -- the application does not start -- and never silently clamped, because a clamped limit is a limit the operator believes is in force and is not.",
+    "absolute_max": "Not a second opinion about what is sensible. Each one is the point past which the bound stops meaning anything: a filesystem cannot create the name, the arithmetic or the bookkeeping stops fitting, or the value would take a rejection path out of reach.",
+    "unmeasured": "Bounded parser memory and the private-directory rules are invariants of the implementation, not numbers an operator sets. They are listed under invariants so that nothing here pretends they are configured."
+  },
+
+  "bounds": {
+    "max_compressed_bytes": {
+      "default": 268435456,
+      "absolute_max": 68719476736,
+      "unit": "bytes",
+      "what": "The uploaded archive as it arrived. Checked against the byte count before a single header is parsed, so it is the first bound anything hits.",
+      "absolute_max_why": "64 GiB. An upload larger than this is a change to what the platform is for, not a tuning knob, and it exceeds what the receipt path streams comfortably."
+    },
+    "max_expanded_bytes": {
+      "default": 2147483648,
+      "absolute_max": 274877906944,
+      "unit": "bytes",
+      "what": "Total bytes written across all members. Counted from bytes actually streamed, not from declared sizes, so a lying header cannot buy room.",
+      "absolute_max_why": "256 GiB. Past this the extraction directory stops being a temporary artifact on any host the plan contemplates."
+    },
+    "max_file_bytes": {
+      "default": 536870912,
+      "absolute_max": 68719476736,
+      "unit": "bytes",
+      "what": "Any single regular member.",
+      "absolute_max_why": "64 GiB, matching max_compressed_bytes: one member cannot usefully be allowed to exceed the whole upload's ceiling."
+    },
+    "max_entries": {
+      "default": 20000,
+      "absolute_max": 5000000,
+      "unit": "count",
+      "what": "Physical headers, including directories, extended headers and anything else parsed and ignored. Metadata counts: an archive of nothing but ignored headers is still an archive the parser walked.",
+      "absolute_max_why": "5,000,000. Duplicate detection holds one normalised path per entry in memory; at a conservative hundred bytes each that is already half a gigabyte of bookkeeping for the archive alone."
+    },
+    "max_manifest_bytes": {
+      "default": 4194304,
+      "absolute_max": 67108864,
+      "unit": "bytes",
+      "what": "The manifest member. Distinct from max_file_bytes and always the smaller of the two in practice, because the manifest is parsed into memory as a document rather than streamed to disk.",
+      "absolute_max_why": "64 MiB, the point past which a DOM parse of it is itself the denial of service."
+    },
+    "max_extended_header_bytes": {
+      "default": 65536,
+      "absolute_max": 16777216,
+      "unit": "bytes",
+      "what": "One PAX extended header's own payload. tarfile never reports this, which is why the corpus fixture bomb-huge-pax-field is accepted by a library-only extractor.",
+      "absolute_max_why": "16 MiB. Extended headers are key/value metadata; anything approaching this is an attack surface rather than metadata."
+    },
+    "max_path_bytes": {
+      "default": 1024,
+      "absolute_max": 4096,
+      "unit": "bytes",
+      "what": "The member path in UTF-8, after any approved PAX override, excluding the extraction root.",
+      "absolute_max_why": "4096, PATH_MAX on Linux. A longer path cannot be created at all, so a bound above it is a bound that never rejects. Note that the extraction root's own prefix consumes part of PATH_MAX at runtime: a path within this bound may still be unrepresentable, which the extractor must report as a typed rejection rather than a failed syscall."
+    },
+    "max_segment_bytes": {
+      "default": 255,
+      "absolute_max": 255,
+      "unit": "bytes",
+      "what": "One path segment in UTF-8.",
+      "absolute_max_why": "255, NAME_MAX on Linux and every filesystem the plan targets. The default equals the absolute max because the kernel already enforces it; configuring more would be configuring a bound the filesystem overrides."
+    },
+    "max_depth": {
+      "default": 32,
+      "absolute_max": 256,
+      "unit": "count",
+      "what": "Path segments in a member, counted after validation.",
+      "absolute_max_why": "256. Each level costs a directory open on the descriptor-relative walk, and a/a/a/... at this depth is already near what PATH_MAX allows."
+    },
+    "extraction_deadline_seconds": {
+      "default": 60,
+      "absolute_max": 3600,
+      "unit": "seconds",
+      "what": "Wall clock for one extraction, enforced by the extractor itself. The corpus oracle applies its own outer deadline on top, because a bound a subject enforces on itself is a bound that has to be checked from outside.",
+      "absolute_max_why": "3600. An hour of an untrusted archive holding a worker is already a resource-exhaustion outcome, whatever the archive turns out to contain."
+    }
+  },
+
+  "invariants": [
+    "Parser memory is bounded independently of the archive: no member, extended header or manifest is held whole except the manifest, which has its own bound.",
+    "Arithmetic on sizes is overflow-safe. A declared size that is negative, or that overflows when added to the running total, is a rejection and never a wrap.",
+    "A bound applies to metadata the extractor goes on to ignore, not only to content it keeps."
+  ]
+}

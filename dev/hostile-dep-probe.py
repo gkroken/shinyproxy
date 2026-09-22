@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Hostile code in a REAL dependency-install hook, against the profile of record (T3).
 
 T3's Pass line asks to "exercise malicious code in a real dependency-install hook, not

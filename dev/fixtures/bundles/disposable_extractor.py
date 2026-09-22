@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """A disposable extractor for the bundle corpus (WORKPLAN-BUNDLES.md T2b).
 
 **This is test scaffolding, not the product.** Nothing in `eu.openanalytics.shinyproxy`

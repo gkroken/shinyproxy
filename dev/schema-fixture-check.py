@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 # Validates every schema fixture corpus in this repository.
 #
 # Run through dev/validate-manifests.sh, which supplies a container holding a JSON Schema
@@ -899,6 +904,107 @@ def check_isolation_profile():
         print(m)
 
 
+def _limits_findings(spec, expectations, plan):
+    """The extraction bounds exist in exactly one place; this is what notices a second one.
+
+    ExtractionLimits reads spec/extraction-limits-v1.json at startup, so the code cannot
+    drift from it -- there is no constant to drift. Two things still can: the corpus, whose
+    committed expectations record the profile its boundary fixtures were generated against,
+    and the plan, which used to carry the defaults in prose. Both are checked here.
+
+    Returns (findings, ok_lines) rather than printing, so the self-test can mutate each
+    input and assert WHICH finding comes back. A checker that reports "something is wrong"
+    is one that passes for the wrong reason the day it matters.
+    """
+    findings, good = [], []
+    bounds = spec.get("bounds")
+    if not isinstance(bounds, dict) or not bounds:
+        return ["the limits spec declares no bounds"], good
+
+    declared = {}
+    for name, entry in bounds.items():
+        default, top = entry.get("default"), entry.get("absolute_max")
+        if not isinstance(default, int) or not isinstance(top, int):
+            findings.append("bound %r: default and absolute_max must both be integers" % name)
+            continue
+        if default <= 0 or default > top:
+            findings.append("bound %r: default %d is not a positive value at or below its "
+                            "absolute_max %d" % (name, default, top))
+            continue
+        declared[name] = default
+
+    recorded = expectations.get("limits")
+    if not isinstance(recorded, dict):
+        findings.append("the corpus expectations record no limits profile")
+        return findings, good
+
+    for name in sorted(set(declared) - set(recorded)):
+        findings.append("bound %r is declared in the spec and absent from the corpus "
+                        "expectations, so no fixture straddles it" % name)
+    for name in sorted(set(recorded) - set(declared)):
+        findings.append("the corpus expectations carry %r, which the spec does not declare"
+                        % name)
+    for name in sorted(set(declared) & set(recorded)):
+        if declared[name] != recorded[name]:
+            findings.append("bound %r: spec says %d, the corpus was generated against %d"
+                            % (name, declared[name], recorded[name]))
+
+    if not findings:
+        good.append("  ok   %d bound(s) agree between spec/extraction-limits-v1.json and "
+                    "the corpus" % len(declared))
+
+    # The plan must point at the file rather than repeat what is in it. d4f5baf-F1 was a
+    # policy stated in two places; this is the same shape, and the numbers here are the
+    # ones an operator would act on.
+    if "spec/extraction-limits-v1.json" not in plan:
+        findings.append("the extraction section does not cite "
+                        "spec/extraction-limits-v1.json, so a reader has no way to the "
+                        "values from the prose that describes them")
+    else:
+        good.append("  ok   the extraction section cites the spec instead of copying it")
+
+    restated = []
+    for name, value in sorted(declared.items()):
+        for form in _numeral_forms(value):
+            if re.search(r"(?<![\d,.])%s(?![\d,.])" % re.escape(form), plan):
+                restated.append("%s as %r" % (name, form))
+    if restated:
+        findings.append("the extraction section restates a default the spec already owns: "
+                        + "; ".join(restated))
+    else:
+        good.append("  ok   the extraction section states no bound's value in prose")
+    return findings, good
+
+
+def _numeral_forms(value):
+    """The spellings a default would plausibly be written in, in prose."""
+    forms = {str(value), "{:,}".format(value)}
+    for unit, size in (("KiB", 1024), ("MiB", 1024 ** 2), ("GiB", 1024 ** 3)):
+        if value >= size and value % size == 0:
+            forms.add("%d %s" % (value // size, unit))
+    return forms
+
+
+def _plan_extraction_section():
+    plan = pathlib.Path("WORKPLAN-BUNDLES.md").read_text()
+    start = plan.index("### Extraction contract and independent fixture corpus")
+    end = plan.index("### Build sandbox and dependency network", start)
+    return plan[start:end]
+
+
+def check_extraction_limits():
+    """One set of bounds, three readers, no second copy of a number."""
+    print("== extraction limits ==")
+    bad, good = _limits_findings(load("spec/extraction-limits-v1.json"),
+                                 load("dev/fixtures/bundles/expectations.json"),
+                                 _plan_extraction_section())
+    for m in bad:
+        fail(m)
+    for m in good:
+        print(m)
+    print()
+
+
 def check_descriptor_round_trip():
     """Names that need URL encoding must survive being written and read again.
 
@@ -962,6 +1068,43 @@ def _b(d):
 
 def _rt(d):
     return d["seam"]["runtimes"]
+
+
+LIMIT_CASES = [
+    # (label, mutate spec, mutate expectations, mutate plan, expected finding text)
+    ("a bound dropped from the spec",
+     lambda d: d["bounds"].pop("max_depth"), None, None,
+     "carry 'max_depth', which the spec does not declare"),
+    ("a bound the corpus never heard of",
+     None, lambda d: d["limits"].pop("max_entries"), None,
+     "'max_entries' is declared in the spec and absent from the corpus"),
+    ("the corpus generated against a different entry cap",
+     None, lambda d: d["limits"].__setitem__("max_entries", 19999), None,
+     "spec says 20000, the corpus was generated against 19999"),
+    ("a spec default above its own absolute maximum",
+     lambda d: d["bounds"]["max_depth"].__setitem__("default", 9999), None, None,
+     "is not a positive value at or below its absolute_max"),
+    ("a spec default that is not a number",
+     lambda d: d["bounds"]["max_depth"].__setitem__("default", "32"), None, None,
+     "must both be integers"),
+    ("a spec with no bounds at all",
+     lambda d: d.__setitem__("bounds", {}), None, None,
+     "declares no bounds"),
+    ("expectations with no limits profile",
+     None, lambda d: d.pop("limits"), None,
+     "record no limits profile"),
+    ("the plan losing its pointer to the spec",
+     None, None, lambda t: t.replace("spec/extraction-limits-v1.json", "the spec file"),
+     "does not cite spec/extraction-limits-v1.json"),
+    ("the plan restating a default in prose",
+     None, None, lambda t: t + "\n\nDefaults: 256 MiB compressed, 20,000 entries.\n",
+     "restates a default the spec already owns"),
+    # The forms matter: a checker that only knew the decimal spelling would pass the line
+    # above, which is how the numbers were written in the plan in the first place.
+    ("the plan restating a default in its byte spelling only",
+     None, None, lambda t: t + "\n\nThe manifest bound is 4194304 bytes.\n",
+     "max_manifest_bytes as '4194304'"),
+]
 
 
 ISOLATION_CASES = [
@@ -1039,6 +1182,42 @@ ISOLATION_CASES = [
 ]
 
 
+def _limits_self_test():
+    """Each limits case must be caught, and caught for the reason claimed."""
+    print()
+    print("== self-test: every extraction-limits check must fail FOR ITS STATED REASON ==")
+    spec = load("spec/extraction-limits-v1.json")
+    expectations = load("dev/fixtures/bundles/expectations.json")
+    plan = _plan_extraction_section()
+
+    bad, good = _limits_findings(spec, expectations, plan)
+    if bad:
+        print("  FAIL the unmutated tree is not green; nothing below means anything")
+        for m in bad:
+            print("       %s" % m)
+        return ["limits control"]
+    print("  ok   control: unmutated tree green, %d line(s)" % len(good))
+
+    missed = []
+    for label, mutate_spec, mutate_exp, mutate_plan, expect in LIMIT_CASES:
+        found, _ = _limits_findings(
+            _mutate(spec, mutate_spec) if mutate_spec else spec,
+            _mutate(expectations, mutate_exp) if mutate_exp else expectations,
+            mutate_plan(plan) if mutate_plan else plan)
+        if not found:
+            print("  FAIL not caught at all: %s" % label)
+            missed.append(label)
+        elif not any(expect in m for m in found):
+            print("  FAIL caught for the WRONG REASON: %s" % label)
+            print("       expected to contain: %r" % expect)
+            for m in found:
+                print("       got: %s" % m)
+            missed.append(label)
+        else:
+            print("  ok   %s" % label)
+    return missed
+
+
 def self_test():
     print("== self-test: every isolation check must fail FOR ITS STATED REASON ==")
     spec = load("spec/isolation-profile-v1.json")
@@ -1081,7 +1260,9 @@ def self_test():
         else:
             print("  ok   %s" % label)
 
-    total = len(ISOLATION_CASES) + 2
+    missed += _limits_self_test()
+
+    total = len(ISOLATION_CASES) + 2 + len(LIMIT_CASES)
     if missed:
         print("\nRESULT: self-test FAILED, %d of %d case(s) not caught for their stated "
               "reason" % (len(missed), total))
@@ -1103,6 +1284,7 @@ check_lifecycle_is_consistent()
 check_admin_transport()
 check_image_references()
 check_isolation_profile()
+check_extraction_limits()
 check_descriptor_round_trip()
 
 print("RESULT:", "all fixtures behaved as specified" if ok else "MISMATCH")

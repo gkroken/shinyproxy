@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Outside-root sentinels for the bundle corpus (WORKPLAN-BUNDLES.md T2b).
 
 The corpus says which archives must be rejected. This says what "rejected" has to mean

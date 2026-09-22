@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Extractors that are wrong in one specific way, so the oracle can be shown to fail.
 
 **Test scaffolding, like disposable_extractor.py.** Nothing in the product may call it.

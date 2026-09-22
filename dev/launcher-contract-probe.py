@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """The launcher/worker contract, and trusted registry transport (T3).
 
 Decision 6: "one disposable rootless BuildKit worker per attempt, no worker reused across

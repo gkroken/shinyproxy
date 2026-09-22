@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """What this Docker host can actually enforce on a worker (WORKPLAN-BUNDLES.md T3).
 
 T3's Pass line is "measured containment and cleanup plus the exact deployment profile",

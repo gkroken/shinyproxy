@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Rootless BuildKit under a real seccomp profile, and what it actually costs (T3).
 
 T3: "Pin a rootless BuildKit candidate and prototype only the launcher/worker contract...

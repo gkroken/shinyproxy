@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Proof that the oracle can fail (WORKPLAN-BUNDLES.md T2b, the Pass line).
 
 The corpus establishes that an extractor is wrong. Nothing in it establishes that the

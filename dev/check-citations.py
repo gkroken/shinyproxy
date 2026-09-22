@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Check that every review-finding ID cited in a tracked document exists.
 
 WORKPLAN-BUNDLES.md argues for itself by citing finding IDs: "the IDs are here
