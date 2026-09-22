@@ -52,6 +52,14 @@ import java.util.List;
  * in a tar name. A validator that percent-decodes here manufactures the traversal it is
  * looking for, so the corpus carries that exact case; the rules below never decode anything.
  *
+ * <p>This is not the only containment rule in the repository, and it is not shared with the
+ * other one. {@code ObjectKeys.validatedRenditionPath} guards a rendition output path on its
+ * way into an object key: a decoded string, bounded by what a key leaves room for, with no
+ * tar conventions and no configured depth. The two agree on the containment core — no
+ * {@code ..}, no {@code .}, no empty segment, no absolute path, no backslash, no control
+ * character, NFC required — and {@code ContainmentRulesAgreeTest} runs both over the same
+ * inputs so that a day when one stops refusing something is a day a test fails.
+ *
  * <p>The archive layout is fixed by the manifest contract — {@code manifest.json} at the
  * root, payload under {@code app/} — so classification is part of parsing. The configured
  * depth and total-length bounds are measured on the payload-relative path, which is what

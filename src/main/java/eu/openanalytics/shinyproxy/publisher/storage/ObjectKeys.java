@@ -194,9 +194,23 @@ public final class ObjectKeys {
     /**
      * Applies the rules the descriptor schema leaves to the writer.
      *
-     * <p>Public because the extractor and the descriptor writer need the same answer as the
-     * key builder, and a second implementation of a containment rule is how two of them come
-     * to disagree.
+     * <p>Public because the descriptor writer and the key builder need the same answer
+     * about one path: a rendition output file, on its way into a key. It is NOT the rule
+     * the extractor applies. An earlier version of this comment said the extractor shares
+     * it, which stopped being true when {@code MemberPath} landed (finding 34182de-F1).
+     *
+     * <p>The two are separate on purpose. A tar member name arrives as bytes with tar's own
+     * conventions — NUL padding, PAX overrides, a trailing slash that means "directory" —
+     * and is bounded by operator configuration, while this is a {@code String} already
+     * decoded, bounded by what a key leaves room for. Merging them would force one of those
+     * two callers to carry the other's problem.
+     *
+     * <p>What they do share is containment: no {@code ..}, no {@code .}, no empty segment,
+     * no absolute path, no backslash, no control character, and NFC required rather than
+     * applied. That core is pinned by {@code ContainmentRulesAgreeTest}, which runs both
+     * implementations over the same hostile inputs and fails if either stops refusing one.
+     * Before that test existed the two agreed and nothing would have said so if they
+     * stopped.
      */
     public static String validatedRenditionPath(String relativePath) {
         if (relativePath == null || relativePath.isEmpty()) {
