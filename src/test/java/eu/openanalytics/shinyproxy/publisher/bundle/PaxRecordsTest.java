@@ -65,24 +65,35 @@ public class PaxRecordsTest {
     }
 
     @Test
-    public void theCorpusTravPaxOverrideRecordIsItselfMalformed() {
-        // dev/fixtures/bundles/generate.py writes this record literally:
+    public void aLengthFieldThatDoesNotCountItselfIsRefused() {
+        // This was dev/fixtures/bundles/generate.py's trav-pax-override record until the
+        // commit that corrected it:
         //     b"30 path=app/../../pax-escape.txt\n"
-        // It is 33 bytes and its length field claims 30, so a parser that trusts the length
-        // finds 't' where the record's newline should be. This extractor therefore refuses
-        // the fixture as PAX_RECORD_MALFORMED and never reaches the traversal it was built
-        // to demonstrate.
+        // 33 bytes, length field claiming 30, because a PAX length counts its own digits and
+        // the hand-written value did not. A parser that trusts the field looks for the
+        // record's newline at offset 29, finds 't', and refuses the record before applying
+        // the override. A parser that TRUSTS the field instead reads a 30-byte record and
+        // applies a truncated override — measured against the reference extractor, which
+        // reported "'..' in app/../../pax-escape.t", three characters short.
         //
-        // The DECISION is still reject, which is why the oracle has never noticed: both
-        // outcomes look identical from outside. The fixture does not prove what it claims,
-        // and a corpus fix is owed — recorded in the commit message rather than made here,
-        // because changing a fixture regenerates its hash in expectations.json.
+        // So the two readers disagreed about which path the archive described, which is the
+        // exact class of defect this corpus exists to catch, sitting inside the corpus. The
+        // oracle never noticed because both readers say "reject".
+        //
+        // The fixture is fixed; the case is kept because it is a real malformed shape and
+        // because it is the one this project actually met.
         byte[] asWritten = "30 path=app/../../pax-escape.txt\n".getBytes(StandardCharsets.UTF_8);
         assertEquals(33, asWritten.length, "the record is 33 bytes and claims 30");
         BundleRejection ex = assertThrows(BundleRejection.class,
                 () -> PaxRecords.parse(asWritten, LIMITS));
         assertEquals(BundleRule.PAX_RECORD_MALFORMED, ex.rule());
         assertTrue(ex.getMessage().contains("newline"), ex.getMessage());
+
+        // And the corrected spelling of the same record reaches the override, which is what
+        // the fixture is for.
+        assertArrayEquals("app/../../pax-escape.txt".getBytes(StandardCharsets.UTF_8),
+                PaxRecords.parse("33 path=app/../../pax-escape.txt\n"
+                        .getBytes(StandardCharsets.UTF_8), LIMITS).pathOverride().get());
     }
 
     @Test

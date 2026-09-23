@@ -533,7 +533,14 @@ _traversal("trav-url-encoded", "app/%2e%2e/%2e%2e/escape.txt",
          "a benign ustar name with a PAX extended header overriding `path` to a traversal, "
          "so a validator that reads the wrong one of the two names is fooled")
 def _(b):
-    pax = b"30 path=app/../../pax-escape.txt\n"
+    # Built by _pax_record rather than written out. The hand-written version read
+    #     b"30 path=app/../../pax-escape.txt\n"
+    # which is 33 bytes with a length field claiming 30 -- a PAX length counts its own
+    # digits. A parser that trusts the field looks for the record's newline at offset 29,
+    # finds 't', and refuses the fixture as a malformed record BEFORE applying the override.
+    # The verdict was still "reject", so the oracle never noticed: both outcomes look
+    # identical from outside. The fixture demonstrated nothing it claimed to.
+    pax = _pax_record("path", "app/../../pax-escape.txt")
     b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
     b.add_raw(raw_header("app/innocent.txt", b"%011o\0" % len(pax), typeflag=b"x"), pax)

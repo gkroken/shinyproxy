@@ -250,7 +250,7 @@
       "rule": "S1",
       "why": "a benign ustar name with a PAX extended header overriding `path` to a traversal, so a validator that reads the wrong one of the two names is fooled",
       "pins": false,
-      "sha256": "8981d18efed000b5c074af31178ad5a14076c0cd365c28f9531652eab1e11be0",
+      "sha256": "f4aa6f41e7a97b59ff8ac623b5d19041a1661014b51b732ceb56d1888fde89d2",
       "bytes": 580
     },
     {
