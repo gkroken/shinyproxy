@@ -32,7 +32,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
@@ -250,16 +249,29 @@ public class BundleExtractorTest {
         //
         // The review could not arrange for deleteTree to fail from outside, and neither
         // could I from the workspace alone: the root is ours and writable. But the hostile
-        // source can do it. It makes the workspace read-only on its way out, so removing the
-        // root directory from it fails, and the original failure has to survive that.
+        // source can do it. On its way out it moves the root aside and puts an occupied
+        // directory under its name. The descriptor-relative walk empties the real root
+        // wherever it now is; the last step removes the root by path, finds the occupant,
+        // and fails. The original failure has to survive that.
+        //
+        // An earlier version made the workspace read-only instead. Root ignores that, so
+        // under --user 0:0 the delete succeeded and the case failed pointing at
+        // BundleExtractor rather than at the uid (c97863d-F2). A rename does not depend on
+        // who is running, so this case runs, and means the same thing, everywhere.
         byte[] upload = gzip(TarArchives.archive()
                 .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
                 .file("app/one.txt", "one".getBytes(StandardCharsets.UTF_8))
+                // Incompressible, so the halfway point falls well inside it and app/one.txt
+                // is already on disk when the sabotage runs. Without it nothing had been
+                // written yet, and the walk's assertion below passed with the walk deleted.
+                .file("app/tail.bin", incompressible(32 * 1024))
                 .end());
+        java.util.List<Path> heldAtSabotage = new java.util.ArrayList<>();
 
         InputStream sabotage = new InputStream() {
             private final ByteArrayInputStream delegate = new ByteArrayInputStream(upload);
             private int served;
+            private boolean sabotaged;
 
             @Override
             public int read() {
@@ -268,9 +280,22 @@ public class BundleExtractorTest {
 
             @Override
             public int read(byte[] buffer, int offset, int length) throws IOException {
+                if (sabotaged) {
+                    // Closing the gzip member reads again. Once is the whole sabotage.
+                    throw new IllegalStateException("the storage layer gave up");
+                }
                 if (served >= upload.length / 2) {
-                    Files.setPosixFilePermissions(workspace,
-                            PosixFilePermissions.fromString("r-x------"));
+                    sabotaged = true;
+                    Path root;
+                    try (var entries = Files.list(workspace)) {
+                        root = entries.collect(java.util.stream.Collectors.toList()).get(0);
+                    }
+                    try (var held = Files.walk(root)) {
+                        held.filter(Files::isRegularFile).forEach(heldAtSabotage::add);
+                    }
+                    Files.move(root, workspace.resolve("moved-aside"));
+                    Files.createDirectory(root);
+                    Files.writeString(root.resolve("occupant"), "not the extractor's");
                     throw new IllegalStateException("the storage layer gave up");
                 }
                 int n = delegate.read(buffer, offset, Math.min(length, 64));
@@ -279,25 +304,34 @@ public class BundleExtractorTest {
             }
         };
 
-        try {
-            IllegalStateException ex = assertThrows(IllegalStateException.class,
-                    () -> BundleExtractor.extract(sabotage, upload.length, workspace, LIMITS));
-            assertEquals("the storage layer gave up", ex.getMessage(),
-                    "the cleanup's own failure replaced the failure it was cleaning up after");
-            // Two, not one: closing the gzip member fails on the same hostile source, and
-            // that failure is attached as well. Asserting exactly one would have been an
-            // assertion about the fixture rather than about the rule.
-            assertTrue(java.util.Arrays.stream(ex.getSuppressed())
-                            .anyMatch(IOException.class::isInstance),
-                    "the cleanup failed and said nothing about it; suppressed: "
-                            + java.util.Arrays.toString(ex.getSuppressed()));
-        } finally {
-            Files.setPosixFilePermissions(workspace,
-                    PosixFilePermissions.fromString("rwx------"));
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> BundleExtractor.extract(sabotage, upload.length, workspace, LIMITS));
+        assertEquals("the storage layer gave up", ex.getMessage(),
+                "the cleanup's own failure replaced the failure it was cleaning up after");
+        // Two, not one: closing the gzip member fails on the same hostile source, and that
+        // failure is attached as well. So the assertion names the cleanup's own exception
+        // rather than any IOException, which the close could one day satisfy on its own.
+        assertTrue(java.util.Arrays.stream(ex.getSuppressed())
+                        .anyMatch(java.nio.file.DirectoryNotEmptyException.class::isInstance),
+                "the cleanup failed and said nothing about it; suppressed: "
+                        + java.util.Arrays.toString(ex.getSuppressed()));
+        // And the walk did its part: the real root, moved or not, was emptied through its
+        // descriptor. Only the final by-path step met the occupant. The first line is the
+        // premise — a root that held nothing when it moved would pass the second vacuously.
+        assertFalse(heldAtSabotage.isEmpty(), "nothing had been written when the root moved");
+        try (var left = Files.list(workspace.resolve("moved-aside"))) {
+            assertEquals(java.util.List.of(), left.toList(),
+                    "the descriptor-relative walk did not empty the root it had open");
         }
     }
 
     // ------------------------------------------------------------------ helpers
+
+    private static byte[] incompressible(int length) {
+        byte[] bytes = new byte[length];
+        new java.util.Random(0).nextBytes(bytes);
+        return bytes;
+    }
 
     private static BundleRule refusalFor(byte[] upload, Path workspace) {
         return assertThrows(BundleRejection.class,
