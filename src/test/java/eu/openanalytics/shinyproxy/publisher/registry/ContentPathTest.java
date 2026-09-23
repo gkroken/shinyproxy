@@ -24,6 +24,8 @@ package eu.openanalytics.shinyproxy.publisher.registry;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -71,7 +73,13 @@ public class ContentPathTest {
      * distinct on one server and colliding on another. Refusing non-ASCII removes the question
      * instead of answering it per deployment.
      */
+    // Declares what this test mutates. Locale.setDefault is JVM-global, and the
+    // save/restore below is sufficient only while the suite runs sequentially — which
+    // it does today, and which is exactly the thing someone changes to speed up 245
+    // tests. The failure would then be intermittent and would land on whichever test
+    // happened to read the locale, pointing nowhere near here (fa1ccdf-F1).
     @Test
+    @ResourceLock(Resources.LOCALE)
     public void normalisationDoesNotDependOnTheDefaultLocale() {
         Locale original = Locale.getDefault();
         try {

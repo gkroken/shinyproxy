@@ -23,6 +23,8 @@
 package eu.openanalytics.shinyproxy.publisher.bundle;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
@@ -138,7 +140,13 @@ public class MemberIndexTest {
                         + " two files collided: " + ex.getMessage());
     }
 
+    // Declares what this test mutates. Locale.setDefault is JVM-global, and the
+    // save/restore below is sufficient only while the suite runs sequentially — which
+    // it does today, and which is exactly the thing someone changes to speed up 245
+    // tests. The failure would then be intermittent and would land on whichever test
+    // happened to read the locale, pointing nowhere near here (fa1ccdf-F1).
     @Test
+    @ResourceLock(Resources.LOCALE)
     public void caseFoldingIsTheSameWhateverTheHostLocaleIs() {
         // The plain case first: two spellings of one name collide under an ordinary locale.
         assertEquals(BundleRule.MEMBER_CASE_COLLISION, ruleFor("app/INDEX.html", "app/index.html"));
