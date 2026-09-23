@@ -152,8 +152,14 @@ public class ManifestValidatorTest {
                 doc -> ((ObjectNode) doc.path("dependencies")).put("path", "../renv.lock")));
         assertRule(BundleRule.MANIFEST_PATH_NOT_CANONICAL, "S2", edit("python-root",
                 doc -> ((ObjectNode) doc).put("entrypoint", "src/./app.py")));
-        // Controls: the same fixture with an ordinary extra file, and a composed é, pass.
+        // A name that is both a file and a directory, exactly and under case folding.
+        assertRule(BundleRule.MANIFEST_PATH_DUPLICATE, "S3", withFile("app.R/inner.txt"));
+        assertRule(BundleRule.MANIFEST_PATH_DUPLICATE, "S3", withFile("APP.R/inner.txt"));
+        // Controls: the same fixture with an ordinary extra file, a composed é, and a file
+        // whose name merely starts with another's, all pass.
         ManifestValidator.validate(withFile("caf\u00e9.txt"), LIMITS);
+        ManifestValidator.validate(withFile("app.Rmd"), LIMITS);
+        ManifestValidator.validate(withFile("app.R.d/inner.txt"), LIMITS);
     }
 
     @Test

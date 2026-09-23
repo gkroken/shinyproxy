@@ -170,7 +170,34 @@ public final class ManifestValidator {
             files.put(path, new Declared(path, size, entry.path("sha256").textValue(),
                     entry.path("executable").asBoolean(false)));
         }
+        requireNoFileIsAlsoADirectory(byFolded);
         return Collections.unmodifiableMap(files);
+    }
+
+    /**
+     * S3's other alias: one name that is both a file and the directory of another file.
+     *
+     * <p>{@code "a"} and {@code "a/b"} cannot both exist, so no archive can deliver that
+     * inventory; the archive side refuses it later, but under an archive rule, which tells the
+     * publisher to look at their tar rather than at the manifest that is actually wrong
+     * (noted in ee23620's review). Compared on the same folded key as S3's duplicate check, so
+     * {@code "SRC/x"} beside {@code "src/app.py"} is the same conflict on a case-insensitive
+     * filesystem.
+     */
+    private static void requireNoFileIsAlsoADirectory(Map<String, String> byFolded) {
+        for (Map.Entry<String, String> file : byFolded.entrySet()) {
+            String folded = file.getKey();
+            for (int slash = folded.indexOf('/'); slash >= 0;
+                 slash = folded.indexOf('/', slash + 1)) {
+                String ancestor = byFolded.get(folded.substring(0, slash));
+                if (ancestor != null) {
+                    throw new BundleRejection(BundleRule.MANIFEST_PATH_DUPLICATE,
+                            "S3: '" + ancestor + "' is listed as a file and is also the"
+                                    + " directory of '" + file.getValue() + "'; one name cannot"
+                                    + " be both");
+                }
+            }
+        }
     }
 
     /**
