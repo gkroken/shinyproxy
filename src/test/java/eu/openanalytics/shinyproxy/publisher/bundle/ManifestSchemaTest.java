@@ -134,6 +134,30 @@ public class ManifestSchemaTest {
     }
 
     @Test
+    public void aNumberNoDoubleCanHoldIsRefusedNotCrashedOn() {
+        // Found by BundleFuzzTest.manifest on its first run: 888e888881 overflows to Infinity
+        // and the validator's const check threw NumberFormatException on it. The reproducer is
+        // also kept as a fuzz regression input; this pins it where it lives.
+        String valid = new String(read("valid", "r-root-single-file"), StandardCharsets.UTF_8);
+        for (String literal : List.of("888e888881", "-1e999", "1e309")) {
+            for (String where : List.of("\"schema_version\": 1", "\"size\": 1")) {
+                String hostile = valid.replaceFirst(java.util.regex.Pattern.quote(
+                        where.substring(0, where.indexOf(':') + 1)) + " [0-9]+",
+                        where.substring(0, where.indexOf(':') + 1) + " " + literal);
+                BundleRejection ex = assertThrows(BundleRejection.class,
+                        () -> ManifestSchema.validate(hostile.getBytes(StandardCharsets.UTF_8)),
+                        literal + " at " + where);
+                assertEquals(BundleRule.MANIFEST_NOT_JSON, ex.rule(), ex.getMessage());
+                assertTrue(ex.getMessage().contains("too large to represent"), ex.getMessage());
+            }
+        }
+        // The control: a large but finite double is an ordinary schema refusal, not this one.
+        assertEquals(BundleRule.MANIFEST_SCHEMA_INVALID, assertThrows(BundleRejection.class,
+                () -> ManifestSchema.validate(valid.replaceFirst("\"schema_version\": 1",
+                        "\"schema_version\": 1e308").getBytes(StandardCharsets.UTF_8))).rule());
+    }
+
+    @Test
     public void onlyStrictUtf8IsAManifest() {
         // 04e3d93-F1. Each sequence is placed inside the entrypoint string of a valid
         // manifest, where a lenient decoder turns it into path text: C0 AE C0 AE C0 AF is

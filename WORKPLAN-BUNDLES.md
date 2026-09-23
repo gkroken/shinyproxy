@@ -1626,6 +1626,20 @@ below are marked passed by this planning document.
         reviewer states what it attacked and failed to break, rather than reporting
         silence.
 
+      **Coverage-guided fuzzing, added 2026-09-23** (Jazzer, test scope, approved by the
+      user after an outside review noted that a hand-written parser is an attack surface
+      Skald owns). `BundleFuzzTest` has seven targets: the gzip layer, tar headers, PAX
+      records, member paths, the tar stream, the manifest, and the whole extractor with
+      the filesystem checked afterwards. The shared invariant is that nothing but a
+      `BundleRejection` comes out. `make test` replays every seed and every saved finding
+      as a regression; `make fuzz` fuzzes each target for `FUZZ_SECONDS`. Seeds are derived
+      from the corpus by `dev/fuzz/seeds.py`, which never deletes a saved finding. **The
+      first run found a crash in 37 seconds**: a 44-byte manifest whose number overflows a
+      double to Infinity made the schema validator throw instead of refusing. It was fixed,
+      and it is kept as a permanent regression input. The gate's Phase 2 should include a
+      long `make fuzz` run from the committed tree and report its duration and outcome, as
+      it does for the corpus.
+
 - [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
       uniqueness constraints. Add idempotency, leases/fencing, cancellation and admission

@@ -134,6 +134,18 @@ public final class ManifestSchema {
      * encodes to exactly one byte sequence and every comparison after it can be exact.
      */
     private static void requirePairedSurrogates(JsonNode node, String where) {
+        if (node.isFloatingPointNumber() && !Double.isFinite(node.doubleValue())) {
+            // Found by fuzzing (BundleFuzzTest.manifest, 44 bytes: "schema_version":
+            // 888e888881). The literal is legal JSON; as a double it overflows to Infinity,
+            // and the schema validator's const check then calls decimalValue(), which cannot
+            // represent Infinity and threw NumberFormatException -- a crash, not a refusal, in
+            // a layer whose whole contract is that hostile input is refused. Checked in the
+            // same walk as the surrogates, for the same reason: past this point every value
+            // must be one the rest of the pipeline can represent.
+            throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
+                    (where.isEmpty() ? "(the manifest)" : where) + " is a number too large to"
+                            + " represent");
+        }
         if (node.isTextual()) {
             requirePaired(node.textValue(), where);
         } else if (node.isObject()) {

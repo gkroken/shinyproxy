@@ -14,3 +14,5 @@
 /dev/data/
 # Python bytecode from the fixture generator and the dev suites.
 __pycache__/
+# Jazzer's working corpus from `make fuzz`: grows across runs, kept locally, never committed.
+/.cifuzz-corpus/

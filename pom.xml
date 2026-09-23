@@ -248,6 +248,15 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Skald: coverage-guided fuzzing of the bundle parser, which Skald writes by hand and
+             so owns the attack surface of (approved by the user 2026-09-23). Apache-2.0, test
+             scope only: nothing reaches the shipped jar. See BundleFuzzTest. -->
+        <dependency>
+            <groupId>com.code-intelligence</groupId>
+            <artifactId>jazzer-junit</artifactId>
+            <version>0.30.0</version>
+            <scope>test</scope>
+        </dependency>
 
         <!-- Transitive dependencies updated for security -->
         <dependency>

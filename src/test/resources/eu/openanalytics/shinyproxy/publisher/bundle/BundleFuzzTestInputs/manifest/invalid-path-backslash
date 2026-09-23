@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "type": "shiny",
+  "runtime": {
+    "language": "r",
+    "version": "4.4.1"
+  },
+  "entrypoint": ".",
+  "dependencies": {
+    "format": "renv",
+    "path": "renv.lock"
+  },
+  "files": [
+    {
+      "path": "a\\b.R",
+      "size": 10,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

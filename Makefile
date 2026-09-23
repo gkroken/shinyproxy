@@ -16,7 +16,7 @@ MVN := docker run --rm -u $(shell id -u):$(shell id -g) -e HOME=/m2home \
 	-v "$(CURDIR)":/ws -v "$(M2)":/m2 -v "$(M2_HOME)":/m2home \
 	-w /ws $(MAVEN_IMAGE) mvn -B -Dmaven.repo.local=/m2
 
-.PHONY: build test dev down logs clean shell
+.PHONY: build test fuzz dev down logs clean shell
 
 build:                        ## Build the executable jar
 	@mkdir -p "$(M2)" "$(M2_HOME)"
@@ -39,6 +39,26 @@ test:                         ## Run the test suite (starts real containers)
 	@mkdir -p "$(M2)" "$(M2_HOME)"
 	@docker pull -q openanalytics/shinyproxy-integration-test-app >/dev/null
 	$(MVN_DOCKER) test
+
+# Coverage-guided fuzzing of the bundle parser (BundleFuzzTest). `make test` already runs
+# every target once per seed as a regression; this runs each under libFuzzer for
+# FUZZ_SECONDS. Jazzer fuzzes one target per JVM, so they run one after another, and the
+# run stops at the first target that finds something. A finding is saved as a reproducer
+# under src/test/resources/.../BundleFuzzTestInputs/<target>/, where `make test` replays it
+# from then on. The growing working corpus is kept in .cifuzz-corpus/ (git-ignored), so
+# repeated runs build on each other. No Docker access: the targets touch only temp files.
+FUZZ_SECONDS ?= 60
+FUZZ_TARGETS := gzipMember tarHeader paxRecords memberPath tarStream manifest extractor
+fuzz:                         ## Fuzz the bundle parser, FUZZ_SECONDS per target (default 60)
+	@mkdir -p "$(M2)" "$(M2_HOME)"
+	@set -e; for target in $(FUZZ_TARGETS); do \
+		echo "== fuzzing $$target for $(FUZZ_SECONDS)s"; \
+		docker run --rm -u $(shell id -u):$(shell id -g) -e HOME=/m2home -e JAZZER_FUZZ=1 \
+			-v "$(CURDIR)":/ws -v "$(M2)":/m2 -v "$(M2_HOME)":/m2home -w /ws $(MAVEN_IMAGE) \
+			mvn -B -q -Dmaven.repo.local=/m2 -Dlicense.skip=true test \
+			-Dtest="BundleFuzzTest#$$target" -Djazzer.max_duration=$(FUZZ_SECONDS)s \
+			-Dsurefire.failIfNoSpecifiedTests=false; \
+	done
 
 dev: build                    ## Build, then bring the dev stack up
 	$(COMPOSE) up --build -d

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "type": "shiny",
+  "runtime": {
+    "language": "r",
+    "version": "4.4.1"
+  },
+  "entrypoint": ".",
+  "dependencies": {
+    "format": "renv",
+    "path": "renv.lock"
+  },
+  "files": [
+    {
+      "path": "ui.R",
+      "size": 31,
+      "sha256": "5991719e2df0d10a99b00bca2b3b52d15554c125a0f794d02425e67694226c23"
+    },
+    {
+      "path": "server.R",
+      "size": 42,
+      "sha256": "9c6935dc750a2d52f082220df11888ec7b73305ed009896af5e3e6ee8b93b871"
+    },
+    {
+      "path": "renv.lock",
+      "size": 50,
+      "sha256": "756ef51a4ec9bb2dee039e595a4f252603da186f5ddebedc17a0d7be632058c4"
+    }
+  ]
+}
