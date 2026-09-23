@@ -28,8 +28,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.Container;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -77,14 +75,7 @@ class ScopedCredentialsTest {
 
     @BeforeAll
     static void startMinio() throws Exception {
-        minio = new GenericContainer<>(DockerImageName.parse(
-                "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e"
-                        + "708c1e2960462bd8936e"))
-                .withCommand("server", "/data")
-                .withEnv("MINIO_ROOT_USER", ROOT_USER)
-                .withEnv("MINIO_ROOT_PASSWORD", ROOT_PASSWORD)
-                .withExposedPorts(9000)
-                .waitingFor(Wait.forHttp("/minio/health/live").forPort(9000));
+        minio = MinioTestContainer.create(ROOT_USER, ROOT_PASSWORD);
         minio.start();
 
         rootClient = client(ROOT_USER, ROOT_PASSWORD);

@@ -27,8 +27,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -69,16 +67,7 @@ class BundleWriterTest {
 
     @BeforeAll
     static void startMinio() {
-        // Pinned by digest for the reason S3ObjectStoreTest records: the conditional-create
-        // behaviour this protocol depends on belongs to a particular MinIO release.
-        minio = new GenericContainer<>(DockerImageName.parse(
-                "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e"
-                        + "708c1e2960462bd8936e"))
-                .withCommand("server", "/data")
-                .withEnv("MINIO_ROOT_USER", USER)
-                .withEnv("MINIO_ROOT_PASSWORD", PASSWORD)
-                .withExposedPorts(9000)
-                .waitingFor(Wait.forHttp("/minio/health/live").forPort(9000));
+        minio = MinioTestContainer.create(USER, PASSWORD);
         minio.start();
 
         client = S3Client.builder()

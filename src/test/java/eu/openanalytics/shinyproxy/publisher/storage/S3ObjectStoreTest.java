@@ -27,8 +27,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -78,23 +76,9 @@ class S3ObjectStoreTest {
 
     @BeforeAll
     static void startMinio() {
-        // quay.io, as WORKPLAN-DEVSTACK.md records for the dev stack: Docker Hub's minio
-        // image was not usable there.
-        //
-        // PINNED, like postgres:16 in every other container test here, and for a sharper
-        // reason: the load-bearing claim of this class is that the STORE enforces
-        // If-None-Match on PutObject, which is a comparatively recent MinIO feature. An
-        // unpinned :latest could change that and either break this suite or, worse, quietly
-        // change what conditionalCreateRefusesTheSecondWriter proves while still passing.
-        // Measured against RELEASE.2025-09-07T16-13-09Z; the digest is what fixes it.
-        minio = new GenericContainer<>(DockerImageName.parse(
-                "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e"
-                        + "708c1e2960462bd8936e"))
-                .withCommand("server", "/data")
-                .withEnv("MINIO_ROOT_USER", USER)
-                .withEnv("MINIO_ROOT_PASSWORD", PASSWORD)
-                .withExposedPorts(9000)
-                .waitingFor(Wait.forHttp("/minio/health/live").forPort(9000));
+        // Where it comes from, why it is pinned and why its data is a tmpfs: all recorded
+        // on MinioTestContainer, the one definition the four storage suites share.
+        minio = MinioTestContainer.create(USER, PASSWORD);
         minio.start();
 
         client = S3Client.builder()
