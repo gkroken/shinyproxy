@@ -34,6 +34,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -251,12 +252,23 @@ public class ExtractionRootTest {
         // generates the name.
         try (ExtractionRoot first = ExtractionRoot.createUnder(tmp);
              ExtractionRoot second = ExtractionRoot.createUnder(tmp)) {
-            assertNotEquals(first.path().getFileName(), second.path().getFileName(),
-                    "two roots under one parent took the same name, so it is predictable");
-            assertTrue(first.path().getFileName().toString().length() > 16,
-                    "the generated name is short enough to guess: "
-                            + first.path().getFileName());
             assertEquals(tmp, first.path().getParent());
+            assertNotEquals(first.path().getFileName(), second.path().getFileName());
+
+            // The MECHANISM, not its symptoms. Distinctness and length were the first
+            // version of this test, and a name built from System.nanoTime() satisfies both
+            // while being entirely predictable to an actor with a clock on the same machine
+            // — which is precisely the actor the generation exists to defeat (175d4bc-F1).
+            // A random UUID is the property; a time-based one would parse and would not be.
+            for (ExtractionRoot root : List.of(first, second)) {
+                String name = root.path().getFileName().toString();
+                assertTrue(name.startsWith("extract-"), name);
+                java.util.UUID id = java.util.UUID.fromString(name.substring("extract-".length()));
+                assertEquals(4, id.version(),
+                        "the root's name is a UUID of version " + id.version() + " rather"
+                                + " than a random one, so it is derived from something an"
+                                + " observer also has");
+            }
         }
     }
 
