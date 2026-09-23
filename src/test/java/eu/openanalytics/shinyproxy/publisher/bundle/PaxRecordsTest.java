@@ -238,13 +238,64 @@ public class PaxRecordsTest {
                         "x".getBytes(StandardCharsets.UTF_8)), LIMITS)).rule());
     }
 
-    /** A record whose keyword is the given raw bytes, valid UTF-8 or not. */
-    private static byte[] rawKeyword(byte[] keyword) {
-        byte[] value = "x".getBytes(StandardCharsets.UTF_8);
-        int overhead = 1 + keyword.length + 1 + value.length + 1;
-        int total = overhead + Integer.toString(overhead + 1).length();
-        byte[] prefix = Integer.toString(total).getBytes(StandardCharsets.UTF_8);
-        byte[] out = new byte[total];
+    @Test
+    public void theRecordBuilderIsRightAtEveryLengthItWillBeUsedAt() {
+        // The helper's own test. Every keyword length from 1 to 200 crosses the powers of
+        // ten where a guessed digit count goes wrong — 94 is where the previous version
+        // produced a record with a silently empty value (3b37820-F1) — and each record is
+        // parsed back to prove it says what it was asked to say.
+        for (int length = 1; length <= 200; length++) {
+            byte[] keyword = new byte[length];
+            java.util.Arrays.fill(keyword, (byte) 'k');
+            keyword[0] = 'p';
+            byte[] value = "the-value".getBytes(StandardCharsets.UTF_8);
+            byte[] record = paxRecord(keyword, value);
+
+            int space = 0;
+            while (record[space] != ' ') {
+                space++;
+            }
+            int declared = Integer.parseInt(new String(record, 0, space, StandardCharsets.UTF_8));
+            assertEquals(record.length, declared,
+                    "at keyword length " + length + " the length field and the record"
+                            + " disagree, so the record the test built is not the record the"
+                            + " test named");
+            assertEquals('\n', record[record.length - 1]);
+        }
+
+        // And one end to end through the parser, at the length that used to break.
+        byte[] keyword = new byte[94];
+        java.util.Arrays.fill(keyword, (byte) 'k');
+        System.arraycopy("path".getBytes(StandardCharsets.UTF_8), 0, keyword, 0, 4);
+        byte[] ninetyFour = paxRecord(keyword, "x".getBytes(StandardCharsets.UTF_8));
+        assertEquals(BundleRule.PAX_KEYWORD_NOT_ALLOWED, assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(ninetyFour, LIMITS)).rule(),
+                "a record with a miscounted length is refused as malformed instead, which is"
+                        + " how the broken helper would have hidden itself");
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    /**
+     * A PAX record whose length field counts itself, assembled once.
+     *
+     * <p>3b37820-F1: there were two implementations of this arithmetic in this file and one
+     * of them guessed the digit count from {@code overhead + 1} instead of solving it. At a
+     * keyword length of 94 the field said 100 where 101 bytes were needed, the array came
+     * out a byte short, and the newline overwrote the value — producing a well-formed record
+     * with an EMPTY value and no failure of any kind. In the test that demonstrates the fix
+     * for a corpus fixture whose self-counting length was miscomputed.
+     */
+    private static byte[] paxRecord(byte[] keyword, byte[] value) {
+        int body = 1 + keyword.length + 1 + value.length + 1;   // ' ' keyword '=' value '\n'
+        int digits = 1;
+        while (Integer.toString(body + digits).length() != digits) {
+            digits++;
+        }
+        byte[] prefix = Integer.toString(body + digits).getBytes(StandardCharsets.UTF_8);
+        assertEquals(digits, prefix.length, "the length field did not reach a fixed point");
+
+        byte[] out = new byte[prefix.length + body];
         int at = 0;
         System.arraycopy(prefix, 0, out, at, prefix.length);
         at += prefix.length;
@@ -253,28 +304,19 @@ public class PaxRecordsTest {
         at += keyword.length;
         out[at++] = '=';
         System.arraycopy(value, 0, out, at, value.length);
-        out[total - 1] = '\n';
+        at += value.length;
+        out[at++] = '\n';
+        assertEquals(out.length, at, "the record was not filled exactly");
         return out;
     }
 
-    // ------------------------------------------------------------------ helpers
-
-    /** A record whose length field counts itself, as _pax_record does in the generator. */
     private static byte[] record(String keyword, byte[] value) {
-        byte[] body = (" " + keyword + "=").getBytes(StandardCharsets.UTF_8);
-        int n = body.length + value.length + 1;
-        while (Integer.toString(n + Integer.toString(n).length()).length()
-                != Integer.toString(n).length()) {
-            n++;
-        }
-        int total = n + Integer.toString(n).length();
-        byte[] prefix = Integer.toString(total).getBytes(StandardCharsets.UTF_8);
-        byte[] out = new byte[prefix.length + body.length + value.length + 1];
-        System.arraycopy(prefix, 0, out, 0, prefix.length);
-        System.arraycopy(body, 0, out, prefix.length, body.length);
-        System.arraycopy(value, 0, out, prefix.length + body.length, value.length);
-        out[out.length - 1] = '\n';
-        return out;
+        return paxRecord(keyword.getBytes(StandardCharsets.UTF_8), value);
+    }
+
+    /** A record whose keyword is the given raw bytes, valid UTF-8 or not. */
+    private static byte[] rawKeyword(byte[] keyword) {
+        return paxRecord(keyword, "x".getBytes(StandardCharsets.UTF_8));
     }
 
     /** A record whose complete encoded length is exactly {@code total} bytes. */

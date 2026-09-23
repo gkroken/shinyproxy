@@ -68,6 +68,15 @@ import java.util.Set;
  * check; by the time it fires the memory has been spent. The walk that will read these
  * headers does not exist yet (finding aa461cf-F1), so this is a requirement on its author
  * rather than a description of what happens today.
+ *
+ * <p><b>And it cannot be tested by a verdict.</b> Against {@code bomb-huge-pax-field} a walk
+ * that pre-checks and a walk that reads first both end in PAX_HEADER_TOO_LARGE, so the
+ * corpus — which compares decisions — cannot tell them apart, and a guard whose absence no
+ * test can detect is a guard nothing holds (finding 3b37820-F2). The test that closes this
+ * has to measure the ORDER: a reader that counts what it was asked for, asserted to have
+ * been asked for no more than the declared bound before the rejection, or a stream that
+ * refuses to yield past the cap. Recorded here so the requirement and the only way to
+ * discharge it arrive together.
  */
 public final class PaxRecords {
 
