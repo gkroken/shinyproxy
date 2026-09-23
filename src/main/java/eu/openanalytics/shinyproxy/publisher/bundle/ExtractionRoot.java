@@ -375,8 +375,12 @@ public final class ExtractionRoot implements AutoCloseable {
      * target. If {@code name} turned into something else in the meantime, the rename fails —
      * a directory cannot replace a link or a file — or replaces an empty directory inside
      * this root, and either way nothing leaves it.
+     *
+     * <p>Package-private so the window can be set up exactly — open a parent, swap it, then
+     * create — rather than only raced; a race test catches a regression on some runs, this
+     * on every one.
      */
-    private void createThrough(SecureDirectoryStream<Path> parent, Path name, String segment)
+    void createThrough(SecureDirectoryStream<Path> parent, Path name, String segment)
             throws IOException {
         Path staging = Path.of(".skald-mkdir-" + java.util.UUID.randomUUID());
         try {

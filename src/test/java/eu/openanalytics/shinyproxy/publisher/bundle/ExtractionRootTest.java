@@ -194,6 +194,80 @@ public class ExtractionRootTest {
     private static final int RACE_ATTEMPTS = 20_000;
 
     @Test
+    public void aCreateUnderAParentSwappedAfterItWasOpenedLandsInTheRealParent(@TempDir Path tmp)
+            throws Exception {
+        // The race above, with its window set up exactly instead of hoped for (5cb3d04's
+        // review): www is opened, THEN swapped for a link out, THEN the child is created.
+        // A create that resolves <root>/www/d by path lands outside; one that goes through
+        // the descriptor lands in the directory that was opened, wherever it now is.
+        Path outside = Files.createDirectory(tmp.resolve("outside"));
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work")) {
+            root.createDirectory(member("app/www/"));
+            Path www = root.path().resolve("www");
+            try (SecureDirectoryStream<Path> opened =
+                         (SecureDirectoryStream<Path>) Files.newDirectoryStream(www)) {
+                Files.move(www, root.path().resolve("www-real"));
+                Files.createSymbolicLink(www, outside);
+
+                root.createThrough(opened, Path.of("d"), "d");
+            }
+            Path landed = root.path().resolve("www-real").resolve("d");
+            assertTrue(Files.isDirectory(landed, LinkOption.NOFOLLOW_LINKS),
+                    "the directory is not in the parent that was opened");
+            assertEquals("rwx------", PosixFilePermissions.toString(
+                    Files.getPosixFilePermissions(landed, LinkOption.NOFOLLOW_LINKS)));
+            assertNoStagingLeft(root);
+        }
+        try (var escaped = Files.list(outside)) {
+            assertEquals(List.of(), escaped.toList(), "the create went through the link");
+        }
+    }
+
+    @Test
+    public void aCreateOverSomethingThatAppearedIsRefusedOrStaysInside(@TempDir Path tmp)
+            throws Exception {
+        // What rename does to each thing that can appear at the name between the check and
+        // the create. A directory cannot replace a link, a file or a non-empty directory, so
+        // those are refused and left as they were; an empty directory is replaced in place,
+        // which leaves nothing outside the root.
+        Path outside = Files.createDirectory(tmp.resolve("outside"));
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work");
+             SecureDirectoryStream<Path> top =
+                     (SecureDirectoryStream<Path>) Files.newDirectoryStream(root.path())) {
+            Path base = root.path();
+            Files.createSymbolicLink(base.resolve("link"), outside);
+            Files.writeString(base.resolve("file"), "kept");
+            Files.createDirectory(base.resolve("full"));
+            Files.writeString(base.resolve("full").resolve("inside"), "kept");
+            Files.createDirectory(base.resolve("empty"));
+
+            for (String name : List.of("link", "file", "full")) {
+                BundleRejection ex = assertThrows(BundleRejection.class,
+                        () -> root.createThrough(top, Path.of(name), name), name);
+                assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), name);
+            }
+            assertTrue(Files.isSymbolicLink(base.resolve("link")));
+            assertEquals("kept", Files.readString(base.resolve("file")));
+            assertEquals("kept", Files.readString(base.resolve("full").resolve("inside")));
+
+            root.createThrough(top, Path.of("empty"), "empty");
+            assertTrue(Files.isDirectory(base.resolve("empty"), LinkOption.NOFOLLOW_LINKS));
+            assertNoStagingLeft(root);
+        }
+        try (var escaped = Files.list(outside)) {
+            assertEquals(List.of(), escaped.toList());
+        }
+    }
+
+    private static void assertNoStagingLeft(ExtractionRoot root) throws IOException {
+        try (var entries = Files.list(root.path())) {
+            assertEquals(List.of(), entries.filter(
+                            p -> p.getFileName().toString().startsWith(".skald-mkdir-")).toList(),
+                    "a staging directory was left in the root");
+        }
+    }
+
+    @Test
     public void aSymlinkAtTheFinalNameIsRefusedAndTheTargetIsUntouched(@TempDir Path tmp)
             throws Exception {
         Path outside = Files.createDirectory(tmp.resolve("outside"));
