@@ -39,6 +39,10 @@ import com.networknt.schema.SpecificationVersion;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -114,8 +118,9 @@ public final class ManifestSchema {
     }
 
     static JsonNode parse(byte[] manifest) {
+        String text = strictUtf8(manifest);
         try {
-            JsonNode document = STRICT.readTree(manifest);
+            JsonNode document = STRICT.readTree(text);
             if (document == null || document.isMissingNode()) {
                 throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
                         "the manifest is empty");
@@ -140,6 +145,47 @@ public final class ManifestSchema {
             throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
                     ex.getClass().getSimpleName() + ": " + firstLine(ex.getMessage()));
         }
+    }
+
+    /**
+     * The bytes as UTF-8, or a refusal. Decoded here, strictly, and never by the JSON parser.
+     *
+     * <p>Jackson's byte-level parser detects the encoding itself and accepts what a strict
+     * decoder refuses: {@code C0 AF} decodes to '/', so {@code C0 AE C0 AE C0 AF} reads as
+     * "../"; {@code F4 90 80 80} (past U+10FFFF) becomes lone surrogates; a manifest in
+     * UTF-16 or UTF-32 is read as one (finding 04e3d93-F1). Python's json, jq and any strict
+     * consumer refuse all of those, so the manifest would mean one thing here and nothing, or
+     * something else, there. The JDK's decoder with REPORT refuses overlongs, surrogates and
+     * anything past U+10FFFF; UTF-16 and UTF-32 either fail it or decode to NULs, which the
+     * parser then refuses as control characters.
+     *
+     * <p><b>A byte order mark is refused, not stripped.</b> RFC 8259 forbids sending one and
+     * lets a reader ignore it, and Python's json does ignore it. It is refused because the
+     * uploaded bundle is stored as it arrived, and a strict reader of that stored
+     * manifest.json (jq refuses a BOM) would then fail on a manifest this platform accepted.
+     * None of this project's tools emit one, and the refusal says exactly what to remove.
+     */
+    private static String strictUtf8(byte[] manifest) {
+        String text;
+        try {
+            text = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(manifest))
+                    .toString();
+        } catch (CharacterCodingException ex) {
+            throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
+                    "the manifest is not valid UTF-8 (" + ex.getClass().getSimpleName()
+                            + "): an overlong form, a surrogate, a value past U+10FFFF or a"
+                            + " truncated sequence. It must be UTF-8, with no other"
+                            + " encoding detected on its behalf");
+        }
+        if (text.startsWith("\uFEFF")) {
+            throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
+                    "the manifest begins with a byte order mark (EF BB BF). Save it as UTF-8"
+                            + " without one");
+        }
+        return text;
     }
 
     private static void reject(JsonNode document, Schema schema) {

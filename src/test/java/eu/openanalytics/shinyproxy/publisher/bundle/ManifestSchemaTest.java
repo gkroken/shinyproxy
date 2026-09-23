@@ -129,17 +129,77 @@ public class ManifestSchemaTest {
         assertEquals(BundleRule.MANIFEST_NOT_JSON,
                 ruleOf(valid.replaceFirst("\\{", "{\"deep\": " + deep + ",")));
 
-        byte[] utf8 = valid.replace("renv.lock\"\n", "renv.lock\"\n").getBytes(StandardCharsets.UTF_8);
-        byte[] broken = new String(utf8, StandardCharsets.UTF_8)
-                .replaceFirst("\"4\\.4\\.1\"", "\"4.4.1X\"").getBytes(StandardCharsets.UTF_8);
-        int x = indexOf(broken, (byte) 'X');
-        broken[x] = (byte) 0xC3;          // a lead byte with no continuation
-        assertEquals(BundleRule.MANIFEST_NOT_JSON, assertThrows(BundleRejection.class,
-                () -> ManifestSchema.validate(broken)).rule());
-
         // The control: the untouched document passes, so each refusal above is the edit's.
         ManifestSchema.validate(valid.getBytes(StandardCharsets.UTF_8));
     }
+
+    @Test
+    public void onlyStrictUtf8IsAManifest() {
+        // 04e3d93-F1. Each sequence is placed inside the entrypoint string of a valid
+        // manifest, where a lenient decoder turns it into path text: C0 AE C0 AE C0 AF is
+        // "../" to Jackson's own byte parser, and "src/<C0 AF>app.py" is "src//app.py".
+        String valid = new String(read("valid", "python-root"), StandardCharsets.UTF_8);
+        Map<String, int[]> malformed = new java.util.LinkedHashMap<>();
+        malformed.put("overlong '/'", new int[] {0xC0, 0xAF});
+        malformed.put("overlong '.'", new int[] {0xC0, 0xAE});
+        malformed.put("overlong traversal", new int[] {0xC0, 0xAE, 0xC0, 0xAE, 0xC0, 0xAF});
+        malformed.put("three-byte overlong '/'", new int[] {0xE0, 0x80, 0xAF});
+        malformed.put("past U+10FFFF", new int[] {0xF4, 0x90, 0x80, 0x80});
+        malformed.put("invalid lead F5", new int[] {0xF5, 0x80, 0x80, 0x80});
+        malformed.put("encoded surrogate", new int[] {0xED, 0xA0, 0x80});
+        malformed.put("bare continuation", new int[] {0x80});
+        malformed.put("truncated sequence", new int[] {0xE2, 0x82});
+        List<String> accepted = new ArrayList<>();
+        for (Map.Entry<String, int[]> row : malformed.entrySet()) {
+            byte[] bytes = withEntrypointBytes(valid, row.getValue());
+            try {
+                ManifestSchema.validate(bytes);
+                accepted.add(row.getKey() + " ACCEPTED");
+            } catch (BundleRejection ex) {
+                // The UTF-8 refusal specifically: a schema or path refusal of the decoded
+                // text would mean a lenient decode had already happened.
+                if (ex.rule() != BundleRule.MANIFEST_NOT_JSON
+                        || !ex.getMessage().contains("not valid UTF-8")) {
+                    accepted.add(row.getKey() + " refused for the wrong reason: "
+                            + ex.getMessage());
+                }
+            }
+        }
+        assertEquals(List.of(), accepted);
+
+        // Other encodings are not detected on the manifest's behalf.
+        for (java.nio.charset.Charset other : List.of(StandardCharsets.UTF_16LE,
+                StandardCharsets.UTF_16BE, StandardCharsets.UTF_16,
+                java.nio.charset.Charset.forName("UTF-32BE"))) {
+            assertEquals(BundleRule.MANIFEST_NOT_JSON, assertThrows(BundleRejection.class,
+                    () -> ManifestSchema.validate(valid.getBytes(other))).rule(),
+                    other.name());
+        }
+        // A BOM is refused by decision, not by accident; the message says which.
+        byte[] bom = ("\uFEFF" + valid).getBytes(StandardCharsets.UTF_8);
+        BundleRejection ex = assertThrows(BundleRejection.class,
+                () -> ManifestSchema.validate(bom));
+        assertTrue(ex.getMessage().contains("byte order mark"), ex.getMessage());
+
+        // The control: the same document, and a legitimate multi-byte name, both pass.
+        ManifestSchema.validate(valid.getBytes(StandardCharsets.UTF_8));
+        ManifestSchema.validate(withEntrypointBytes(valid, new int[] {0xC3, 0xA9}));  // é
+    }
+
+    /** The manifest with {@code raw} inserted into its entrypoint, as bytes. */
+    private static byte[] withEntrypointBytes(String manifest, int[] raw) {
+        String marked = manifest.replaceFirst("\"entrypoint\": \"", "\"entrypoint\": \"\u0001");
+        byte[] bytes = marked.getBytes(StandardCharsets.UTF_8);
+        int at = indexOf(bytes, (byte) 0x01);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        out.write(bytes, 0, at);
+        for (int b : raw) {
+            out.write(b);
+        }
+        out.write(bytes, at + 1, bytes.length - at - 1);
+        return out.toByteArray();
+    }
+
 
     @Test
     public void aReferenceToAUrlIsRefusedWithoutAnyRequestBeingMade() throws Exception {
