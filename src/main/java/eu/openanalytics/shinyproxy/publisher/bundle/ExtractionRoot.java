@@ -107,11 +107,35 @@ public final class ExtractionRoot implements AutoCloseable {
      *
      * <p>Now the directory is created, its identity recorded, and then opened THROUGH the
      * parent's descriptor with links refused — and the open directory is required to be the
-     * same inode that was created. A swap is refused whether or not it is restored, because
-     * the check is on what the descriptor points at rather than on what the name resolves to
-     * a third time.
+     * same inode that was created, with the permissions it was created with, read from that
+     * descriptor. A swap AFTER the identity is recorded is refused whether or not it is
+     * restored, because the question asked is what the descriptor points at.
+     *
+     * <p><b>The residual, stated rather than implied</b> (finding 191db7f-F1). The identity
+     * itself is captured by resolving the name a second time, in the two calls between the
+     * create and the {@code readAttributes}. An actor who can write in {@code parent} and who
+     * replaces the new directory within that window has their inode recorded as the expected
+     * one, and the adoption then succeeds on it. Java offers no atomic create-and-open for a
+     * directory — {@link SecureDirectoryStream} has no relative mkdir, which {@code descend}
+     * notes for the same reason — so this is narrowed rather than closed.
+     *
+     * <p>What closes it in practice is that {@code parent} is a private directory and the
+     * name is unpredictable. The second is no longer the caller's to get right: the name is
+     * generated here. The first is the caller's, and is the one obligation this class states
+     * and cannot check.
      */
-    public static ExtractionRoot createUnder(Path parent, String name) throws IOException {
+    public static ExtractionRoot createUnder(Path parent) throws IOException {
+        return createUnder(parent, "extract-" + java.util.UUID.randomUUID());
+    }
+
+    /**
+     * The same, with the name supplied.
+     *
+     * <p>Package-private: a caller that chooses the name owns the unpredictability the
+     * paragraph above rests on, and there is no reason for anything outside this package to
+     * take that on. Tests use it to get a name they can assert against.
+     */
+    static ExtractionRoot createUnder(Path parent, String name) throws IOException {
         FileAttribute<Set<PosixFilePermission>> mode =
                 PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY);
         Path created = Files.createDirectory(parent.resolve(name), mode);
@@ -260,6 +284,15 @@ public final class ExtractionRoot implements AutoCloseable {
 
     /** Creates the directory a member declares, and the directories above it. */
     public void createDirectory(MemberPath member) throws IOException {
+        if (member.role() != MemberPath.Role.PAYLOAD) {
+            // Refused before the empty check, so that "this is the payload root" and "this
+            // member is not mine" stop being the same silent return. writeFile refuses the
+            // manifest and this used to accept it, which is the asymmetry that produced
+            // d13212e-F1 with the sign reversed (finding 191db7f-F2).
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + member.memberPath() + "' is not a payload member, so this"
+                            + " directory has no place to make for it");
+        }
         List<String> segments = member.payloadSegments();
         if (segments.isEmpty()) {
             return;                 // the payload root itself, which is this directory

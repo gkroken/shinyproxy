@@ -37,6 +37,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -226,11 +227,36 @@ public class ExtractionRootTest {
                             new ByteArrayInputStream("{}".getBytes(StandardCharsets.UTF_8))));
             assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule());
 
+            // And the sibling method agrees. It used to return in silence, which is the same
+            // asymmetry with the sign reversed: "this is the payload root" and "this member
+            // is not mine" were one return (191db7f-F2).
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, assertThrows(
+                    BundleRejection.class, () -> root.createDirectory(manifest)).rule());
+            // The payload root's own header is still a legitimate no-op.
+            root.createDirectory(member("app/"));
+
             // The reason it is refused rather than written at the root: a bundle may carry
             // its own app/manifest.json, which lands exactly there.
             root.writeFile(member("app/manifest.json"),
                     new ByteArrayInputStream("payload".getBytes(StandardCharsets.UTF_8)));
             assertEquals("payload", Files.readString(root.path().resolve("manifest.json")));
+        }
+    }
+
+    @Test
+    public void theRootsNameIsNotTheCallersToChoose(@TempDir Path tmp) throws Exception {
+        // The residual window between the create and the identity read is closed in practice
+        // by the parent being private and the name being unpredictable (191db7f-F1). The
+        // second is no longer an obligation a caller can fail: the public entry point
+        // generates the name.
+        try (ExtractionRoot first = ExtractionRoot.createUnder(tmp);
+             ExtractionRoot second = ExtractionRoot.createUnder(tmp)) {
+            assertNotEquals(first.path().getFileName(), second.path().getFileName(),
+                    "two roots under one parent took the same name, so it is predictable");
+            assertTrue(first.path().getFileName().toString().length() > 16,
+                    "the generated name is short enough to guess: "
+                            + first.path().getFileName());
+            assertEquals(tmp, first.path().getParent());
         }
     }
 
