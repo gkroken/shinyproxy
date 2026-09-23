@@ -130,7 +130,13 @@ class S3ObjectStoreTest {
         /** Never sent: answered 503 SlowDown, as a throttling store does before acting. */
         THROTTLED_BEFORE_SENDING(true),
         /** Never sent: the connection is refused. */
-        CONNECTION_REFUSED(true);
+        CONNECTION_REFUSED(true),
+        /** The whole body is read, as if sent, and then answered 503 SlowDown (6e73bc0-F1). */
+        THROTTLED_AFTER_BODY(true),
+        /** Reaches the store and is applied; a proxy then answers 503 with no S3 error code. */
+        APPLIED_THEN_PROXY_503(false),
+        /** Never sent: answered with MinIO's own throttling code, which the SDK does not know. */
+        THROTTLED_BY_MINIO_CODE(true);
 
         final boolean provesNotApplied;
 
@@ -150,12 +156,19 @@ class S3ObjectStoreTest {
         // below is scripted in the HTTP client, deterministically, for each of the three
         // conditional calls, and asserted both ways: ambiguous ones are not retried and say
         // the outcome is unknown; ones that prove nothing was applied are retried and succeed.
-        byte[] content = "{\"schema_version\":1}".getBytes(StandardCharsets.UTF_8);
+        byte[] content = new byte[20_000];
+        new java.util.Random(7).nextBytes(content);
+        String truth = sha256Of(content);
         List<String> wrong = new ArrayList<>();
 
+        // The streaming call runs twice: with a source the SDK can rewind (it then retries
+        // through the digest, which is 6e73bc0-F1's path) and with one it cannot (a retry is
+        // then impossible, and the conservative answer is a failure, never a wrong one).
         for (FirstAttempt first : FirstAttempt.values()) {
-            for (String call : List.of("putIfAbsent", "putStreamingIfAbsent", "putIfMatch")) {
-                String k = key(call.equals("putStreamingIfAbsent")
+            for (String call : List.of("putIfAbsent", "putStreamingIfAbsent",
+                    "putStreamingIfAbsent/unmarkable", "putIfMatch")) {
+                boolean markable = !call.endsWith("/unmarkable");
+                String k = key(call.startsWith("putStreaming")
                         ? ObjectKeys.BUNDLE_ARCHIVE : ObjectKeys.BUNDLE_MANIFEST);
                 String etag = call.equals("putIfMatch")
                         ? store.put(BUCKET, k, "older".getBytes(StandardCharsets.UTF_8),
@@ -167,28 +180,50 @@ class S3ObjectStoreTest {
                 String failure = null;
                 try (S3Client scripted = scriptedClient(first, sent)) {
                     ObjectStore s3 = new S3ObjectStore(scripted);
+                    InputStream body = markable ? new ByteArrayInputStream(content)
+                            : new java.io.FilterInputStream(new ByteArrayInputStream(content)) {
+                                @Override
+                                public boolean markSupported() {
+                                    return false;
+                                }
+                            };
                     answer = switch (call) {
                         case "putIfAbsent" -> s3.putIfAbsent(BUCKET, k, content,
-                                "application/json");
-                        case "putStreamingIfAbsent" -> s3.putStreamingIfAbsent(BUCKET, k,
-                                new ByteArrayInputStream(content), content.length,
+                                "application/octet-stream");
+                        case "putIfMatch" -> s3.putIfMatch(BUCKET, k, content,
+                                "application/octet-stream", etag);
+                        default -> s3.putStreamingIfAbsent(BUCKET, k, body, content.length,
                                 "application/gzip");
-                        default -> s3.putIfMatch(BUCKET, k, content, "application/json", etag);
                     };
                 } catch (ObjectStoreException ex) {
                     failure = ex.getMessage();
                 }
 
-                if (first.provesNotApplied) {
+                // Never, in any case: the call's own write read as a conflict, or a returned
+                // size and digest that do not describe the bytes.
+                if (answer != null && answer.isEmpty()) {
+                    wrong.add(where + ": its own write reported as a conflict (attempts "
+                            + sent.get() + ")");
+                }
+                if (answer != null && answer.isPresent()
+                        && (answer.get().size() != content.length
+                        || !answer.get().sha256().orElse("").equals(truth))) {
+                    wrong.add(where + ": returned size " + answer.get().size() + " and digest "
+                            + answer.get().sha256().orElse("-") + " for " + content.length
+                            + " bytes digesting to " + truth);
+                }
+
+                if (first.provesNotApplied && markable) {
                     if (answer == null || answer.isEmpty() || sent.get() != 2) {
                         wrong.add(where + ": expected a retry that writes; attempts "
-                                + sent.get() + ", answer " + answer + ", failure " + failure);
+                                + sent.get() + ", failure " + failure);
                     }
+                } else if (first.provesNotApplied) {
+                    // Unmarkable: a retry cannot rewind the body. Succeeding (the body was never
+                    // read on attempt 1) or failing are both acceptable; what the store and the
+                    // answer say is already held above.
+                    continue;
                 } else {
-                    if (answer != null && answer.isEmpty()) {
-                        wrong.add(where + ": its own write reported as a conflict (attempts "
-                                + sent.get() + ")");
-                    }
                     if (sent.get() != 1) {
                         wrong.add(where + ": an ambiguous failure was retried (attempts "
                                 + sent.get() + ")");
@@ -197,11 +232,10 @@ class S3ObjectStoreTest {
                         wrong.add(where + ": did not say the outcome is unknown: " + failure);
                     }
                 }
-                // In every case the bytes ended up stored, by this call. Recorded rather than
-                // thrown, so a scenario that wrote nothing is named like every other failure.
+                // Every case that is expected to have written holds exactly this call's bytes.
+                // Recorded rather than thrown, so a case that wrote nothing is named too.
                 try {
-                    if (!java.util.Arrays.equals(content, store.readVerified(BUCKET, k,
-                            sha256Of(content)))) {
+                    if (!java.util.Arrays.equals(content, store.readVerified(BUCKET, k, truth))) {
                         wrong.add(where + ": the store holds other bytes");
                     }
                 } catch (ObjectStoreException absent) {
@@ -246,6 +280,31 @@ class S3ObjectStoreTest {
                         switch (first) {
                             case THROTTLED_BEFORE_SENDING:
                                 return canned(503, "SlowDown", "Please reduce your request rate.");
+                            case THROTTLED_AFTER_BODY: {
+                                // Read the whole body, as sending it would, and then refuse:
+                                // what a throttling store does after reading the request.
+                                if (request.contentStreamProvider().isPresent()) {
+                                    try (InputStream body =
+                                                 request.contentStreamProvider().get().newStream()) {
+                                        body.transferTo(OutputStream.nullOutputStream());
+                                    }
+                                }
+                                return canned(503, "SlowDown", "Please reduce your request rate.");
+                            }
+                            case APPLIED_THEN_PROXY_503: {
+                                HttpExecuteResponse applied = through.call();
+                                applied.responseBody().ifPresent(body -> {
+                                    try {
+                                        body.close();
+                                    } catch (IOException ignored) {
+                                        // the real response is being discarded on purpose
+                                    }
+                                });
+                                return proxyPage(503);
+                            }
+                            case THROTTLED_BY_MINIO_CODE:
+                                return canned(503, "SlowDownWrite", "Resource requested is"
+                                        + " unwritable, please reduce your request rate");
                             case CONNECTION_REFUSED:
                                 throw new java.net.ConnectException("Connection refused");
                             case APPLIED_THEN_SERVER_ERROR: {
@@ -294,6 +353,18 @@ class S3ObjectStoreTest {
                         .pathStyleAccessEnabled(true).build())
                 .overrideConfiguration(c -> c.apiCallAttemptTimeout(
                         java.time.Duration.ofSeconds(1)))
+                .build();
+    }
+
+    /** A reverse proxy's error page: HTML, and no S3 error code to classify. */
+    private static HttpExecuteResponse proxyPage(int status) {
+        byte[] body = "<html><body><h1>503 Service Unavailable</h1></body></html>"
+                .getBytes(StandardCharsets.UTF_8);
+        return HttpExecuteResponse.builder()
+                .response(SdkHttpResponse.builder().statusCode(status)
+                        .putHeader("Content-Type", "text/html")
+                        .putHeader("Content-Length", Integer.toString(body.length)).build())
+                .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
                 .build();
     }
 

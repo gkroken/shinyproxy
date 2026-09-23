@@ -23,6 +23,7 @@
 package eu.openanalytics.shinyproxy.publisher.storage;
 
 import software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.exception.SdkServiceException;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -43,7 +44,6 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -120,11 +120,32 @@ public class S3ObjectStore implements ObjectStore {
         return false;
     }
 
+    /**
+     * The store says it is throttling: 429, or an error code the SDK or MinIO use for it.
+     *
+     * <p>Not "any 503". S3's 503 SlowDown is a refusal before acting, and the SDK classifies
+     * it (with 429 and the other AWS throttling codes) in isThrottlingException. But a 503
+     * from a reverse proxy in front of the store, after forwarding the request, carries no
+     * S3 error code and proves nothing; it is ambiguous and is not retried (noted in
+     * 6e73bc0's review). MinIO's own throttling codes are added by name.
+     */
     static boolean isThrottling(Throwable failure) {
-        return failure instanceof SdkServiceException service
-                && (service.isThrottlingException() || service.statusCode() == 503
-                        || service.statusCode() == 429);
+        if (!(failure instanceof SdkServiceException service)) {
+            return false;
+        }
+        if (service.isThrottlingException()) {
+            return true;
+        }
+        // Null-guarded: Set.of(...).contains(null) throws, and a 412 can carry no error code.
+        // The retry strategy evaluates this on EVERY failure, so an NPE here turned each
+        // ordinary conditional refusal into "outcome unknown" (seen in the first run).
+        String code = failure instanceof AwsServiceException aws && aws.awsErrorDetails() != null
+                ? aws.awsErrorDetails().errorCode() : null;
+        return code != null && MINIO_THROTTLING_CODES.contains(code);
     }
+
+    private static final java.util.Set<String> MINIO_THROTTLING_CODES =
+            java.util.Set.of("SlowDownRead", "SlowDownWrite");
 
     /**
      * What a status failure means for the caller. Throttling that outlasted the retries is a
@@ -236,8 +257,7 @@ public class S3ObjectStore implements ObjectStore {
     private Optional<StoredObject> writeStreaming(String bucket, String key,
                                                   InputStream content, long declaredLength,
                                                   String contentType, boolean onlyIfAbsent) {
-        MessageDigest digest = newDigest();
-        CountingStream counted = new CountingStream(new DigestInputStream(content, digest));
+        OnePassDigest counted = new OnePassDigest(content);
         PutObjectRequest.Builder request = PutObjectRequest.builder()
                 .bucket(bucket)
                 .key(key)
@@ -295,7 +315,7 @@ public class S3ObjectStore implements ObjectStore {
                             + "is truncated. An upload whose receipt is never committed is "
                             + "inert and is collected by the incomplete-upload rule.");
         }
-        return Optional.of(StoredObject.digested(bucket, key, counted.count(), hex(digest),
+        return Optional.of(StoredObject.digested(bucket, key, counted.count(), counted.sha256(),
                 response.eTag()));
     }
 
@@ -327,10 +347,27 @@ public class S3ObjectStore implements ObjectStore {
     }
 
     /** Counts what was actually read, which is the size recorded for the stored object. */
-    private static final class CountingStream extends FilterInputStream {
+    /**
+     * Counts and digests exactly the bytes it hands out, each once, across mark and reset.
+     *
+     * <p>The SDK retries a streaming put by resetting the body stream and reading it again.
+     * The counter and digest used to sit OUTSIDE that reset (a FilterInputStream passing
+     * mark/reset straight through to the caller's stream, around a DigestInputStream), so
+     * after one throttled attempt that had read the body they covered it twice: the store
+     * held the right bytes and the call returned double the size and a digest of the bytes
+     * repeated -- which BundleWriter would have committed to the receipt as the archive's
+     * integrity record (finding 6e73bc0-F1). Now mark snapshots the count and a clone of the
+     * digest, and reset restores both, so the result always describes one pass.
+     *
+     * <p>skip is routed through read, so a skipped byte cannot leave the accounting either.
+     */
+    private static final class OnePassDigest extends FilterInputStream {
+        private MessageDigest digest = newDigest();
         private long count;
+        private MessageDigest markedDigest;
+        private long markedCount;
 
-        CountingStream(InputStream in) {
+        OnePassDigest(InputStream in) {
             super(in);
         }
 
@@ -338,22 +375,73 @@ public class S3ObjectStore implements ObjectStore {
             return count;
         }
 
+        /** The digest of the bytes handed out since the last reset; call once, at the end. */
+        String sha256() {
+            return hex(digest);
+        }
+
         @Override
         public int read() throws IOException {
-            int b = super.read();
+            int b = in.read();
             if (b != -1) {
                 count++;
+                digest.update((byte) b);
             }
             return b;
         }
 
         @Override
         public int read(byte[] b, int off, int len) throws IOException {
-            int n = super.read(b, off, len);
+            int n = in.read(b, off, len);
             if (n > 0) {
                 count += n;
+                digest.update(b, off, n);
             }
             return n;
+        }
+
+        @Override
+        public long skip(long n) throws IOException {
+            byte[] discard = new byte[(int) Math.min(8192, Math.max(n, 0))];
+            long skipped = 0;
+            while (skipped < n) {
+                int read = read(discard, 0, (int) Math.min(discard.length, n - skipped));
+                if (read < 0) {
+                    break;
+                }
+                skipped += read;
+            }
+            return skipped;
+        }
+
+        @Override
+        public boolean markSupported() {
+            return in.markSupported();
+        }
+
+        @Override
+        public synchronized void mark(int readLimit) {
+            in.mark(readLimit);
+            markedCount = count;
+            markedDigest = copy(digest);
+        }
+
+        @Override
+        public synchronized void reset() throws IOException {
+            if (markedDigest == null) {
+                throw new IOException("reset without a mark: the accounting cannot rewind");
+            }
+            in.reset();
+            count = markedCount;
+            digest = copy(markedDigest);
+        }
+
+        private static MessageDigest copy(MessageDigest digest) {
+            try {
+                return (MessageDigest) digest.clone();
+            } catch (CloneNotSupportedException e) {
+                throw new IllegalStateException("SHA-256 digests are cloneable in every JDK", e);
+            }
         }
     }
 
