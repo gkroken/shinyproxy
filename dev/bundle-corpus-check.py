@@ -625,9 +625,13 @@ def _size_mismatch(ctx):
 # A positive control that violates a documented limit forces a correct extractor to fail
 # the suite, which is the worst outcome this corpus can produce.
 HOSTILE = {
+    # Both names: the effective one (after a PAX override) and the header's own. An
+    # accepted fixture with a benign override over a traversing raw name would pass a sweep
+    # of the effective name alone, while an extractor ignoring PAX would traverse (noted in
+    # f08ff88's review, once _apply_pax_paths made the sweep see only effective names).
     "a traversing or absolute name": lambda ctx: any(
-        b".." in m["name"] or m["name"].startswith(b"/") or b"\\" in m["name"]
-        or b"//" in m["name"] or b"/./" in m["name"] for m in ctx["members"]),
+        b".." in n or n.startswith(b"/") or b"\\" in n or b"//" in n or b"/./" in n
+        for m in ctx["members"] for n in (m["name"], m["raw_name"])),
     "a link member": lambda ctx: any(m["type"] in (b"1", b"2") for m in ctx["members"]),
     "a device, fifo or socket": lambda ctx: any(
         m["type"] in (b"3", b"4", b"6") for m in ctx["members"]),

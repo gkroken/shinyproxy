@@ -421,6 +421,11 @@ public class ExtractionRootTest {
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         Path loose = Files.createDirectory(tmp.resolve("loose"),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+        Path strict = Files.createDirectory(tmp.resolve("strict"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        Object strictKey = Files.readAttributes(strict,
+                java.nio.file.attribute.BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS)
+                .fileKey();
         Files.createSymbolicLink(tmp.resolve("link"), real);
         Object realKey = Files.readAttributes(real, java.nio.file.attribute.BasicFileAttributes.class,
                 LinkOption.NOFOLLOW_LINKS).fileKey();
@@ -444,6 +449,15 @@ public class ExtractionRootTest {
                 () -> ExtractionRoot.adopt(parentOf(tmp), loose, "loose", looseKey));
         assertEquals(BundleRule.EXTRACTION_ROOT_UNSAFE, open.rule());
         assertTrue(open.getMessage().contains("rather than private"), open.getMessage());
+
+        // Stricter than private is a different problem with a different cause: nobody else
+        // can write, but the extractor cannot descend, and the usual reason is a umask. The
+        // message used to say "not its only writer" here too, which was false.
+        BundleRejection tight = assertThrows(BundleRejection.class,
+                () -> ExtractionRoot.adopt(parentOf(tmp), strict, "strict", strictKey));
+        assertEquals(BundleRule.EXTRACTION_ROOT_UNSAFE, tight.rule());
+        assertTrue(tight.getMessage().contains("umask"), tight.getMessage());
+        assertFalse(tight.getMessage().contains("only writer"), tight.getMessage());
 
         // The control: the directory that was created, private, opens and is adopted.
         try (ExtractionRoot adopted = ExtractionRoot.adopt(parentOf(tmp), real, "real", realKey)) {

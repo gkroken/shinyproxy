@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.bundle;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
@@ -86,7 +87,18 @@ public final class PaxRecords {
 
     /** Named in the rejection so a publisher is told what their tar writer did. */
     private static final Set<String> KNOWN_AND_REFUSED = Set.of(
-            "linkpath", "size", "charset", "hdrcharset", "realtime", "security");
+            "linkpath", "size", "charset", "hdrcharset");
+
+    /**
+     * Keyword namespaces rather than keywords. POSIX reserves {@code realtime.} and
+     * {@code security.} as prefixes, and GNU tar, star and libarchive write their extensions
+     * under {@code GNU.}, {@code SCHILY.} and {@code LIBARCHIVE.}. These used to be the exact
+     * strings "realtime" and "security", which no real archive writes (raised in review since
+     * 3b37820). Either way the keyword is refused, because anything not allowlisted is; this
+     * only decides whether the refusal can say what wrote it.
+     */
+    private static final List<String> KNOWN_NAMESPACES = List.of(
+            "realtime.", "security.", "GNU.", "SCHILY.", "LIBARCHIVE.");
 
     private final byte[] pathOverride;
 
@@ -170,7 +182,10 @@ public final class PaxRecords {
                 throw new BundleRejection(BundleRule.PAX_KEYWORD_NOT_ALLOWED,
                         "the extended header keyword '" + keyword + "' is "
                                 + (KNOWN_AND_REFUSED.contains(keyword) ? "not accepted here"
-                                        : "not one this extractor knows")
+                                        : KNOWN_NAMESPACES.stream().anyMatch(keyword::startsWith)
+                                                ? "a vendor or POSIX-reserved extension, not"
+                                                        + " accepted here"
+                                                : "not one this extractor knows")
                                 + "; honouring it would change what the member after it is,"
                                 + " and ignoring it would mean two readers disagree about"
                                 + " the same archive");

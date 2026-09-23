@@ -135,13 +135,15 @@ public class MemberPathTest {
         System.arraycopy(visible, 0, field, 0, visible.length);
         // Padding only: the ordinary case, and the control for the hostile one below.
         assertEquals("harmless.txt",
-                MemberPath.parseNameField(field, false, LIMITS).payloadPath());
+                MemberPath.parse(MemberPath.nameFromField(field, "name"), false, LIMITS)
+                        .payloadPath());
 
         byte[] hostile = field.clone();
         byte[] hidden = "../escape".getBytes(StandardCharsets.UTF_8);
         System.arraycopy(hidden, 0, hostile, visible.length + 1, hidden.length);
         BundleRejection ex = assertThrows(BundleRejection.class,
-                () -> MemberPath.parseNameField(hostile, false, LIMITS));
+                () -> MemberPath.parse(MemberPath.nameFromField(hostile, "name"), false,
+                        LIMITS));
         assertEquals(BundleRule.PATH_NUL, ex.rule());
 
         // The same bytes with an explicit length are a name containing a NUL, not padding.

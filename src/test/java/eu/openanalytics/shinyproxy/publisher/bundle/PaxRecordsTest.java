@@ -126,6 +126,29 @@ public class PaxRecordsTest {
     }
 
     @Test
+    public void aRefusedKeywordSaysWhatKindOfExtensionItIs() {
+        // POSIX reserves realtime. and security. as NAMESPACES, and GNU tar, star and
+        // libarchive write under GNU., SCHILY. and LIBARCHIVE.; the refusal says so. A keyword
+        // that merely contains one of those words is not in the namespace.
+        Map<String, String> expected = new java.util.LinkedHashMap<>();
+        expected.put("realtime.clock", "vendor or POSIX-reserved");
+        expected.put("security.selinux", "vendor or POSIX-reserved");
+        expected.put("GNU.sparse.size", "vendor or POSIX-reserved");
+        expected.put("SCHILY.xattr.user.demo", "vendor or POSIX-reserved");
+        expected.put("LIBARCHIVE.creationtime", "vendor or POSIX-reserved");
+        expected.put("linkpath", "not accepted here");
+        expected.put("RHT.security.selinux", "not one this extractor knows");
+        expected.put("realtime", "not one this extractor knows");
+        expected.forEach((keyword, says) -> {
+            BundleRejection ex = assertThrows(BundleRejection.class,
+                    () -> PaxRecords.parse(record(keyword, "x".getBytes(StandardCharsets.UTF_8)),
+                            LIMITS), keyword);
+            assertEquals(BundleRule.PAX_KEYWORD_NOT_ALLOWED, ex.rule(), keyword);
+            assertTrue(ex.getMessage().contains(says), keyword + ": " + ex.getMessage());
+        });
+    }
+
+    @Test
     public void everyOtherKeywordIsRefusedByName() {
         for (String keyword : new String[] {"linkpath", "size", "charset", "hdrcharset",
                                             "GNU.sparse.size", "GNU.sparse.name",

@@ -100,20 +100,6 @@ public final class MemberPath {
     }
 
     /**
-     * Parses a name out of a fixed-width tar header field, which is NUL-padded.
-     *
-     * <p>The padding is why this is separate from {@link #parse}. Reading "up to the first
-     * NUL" is correct for a well-formed header and is also exactly how a hostile one hides:
-     * a name, a NUL, and more name after it reads as short and harmless to a C string and
-     * carries something else for anything that reads the whole field. Content after the
-     * first NUL is a rejection, not padding.
-     */
-    public static MemberPath parseNameField(byte[] field, boolean directoryHeader,
-                                            ExtractionLimits limits) {
-        return parse(nameFromField(field, "name"), directoryHeader, limits);
-    }
-
-    /**
      * The name inside a fixed-width, NUL-padded tar field, with the padding rule enforced.
      *
      * <p>Separate and public because a header has more than one such field: the 100-byte
@@ -201,8 +187,16 @@ public final class MemberPath {
     }
 
     /**
-     * Parses a name given with an explicit length, which is how a PAX {@code path} override
-     * arrives. Such a value is not NUL-padded, so a NUL in it is a NUL in the name.
+     * Parses a name given with an explicit length. Every name arrives this way: a header's
+     * name and prefix fields after {@link #nameFromField} has removed their padding (and
+     * refused anything hidden behind it), a GNU long name and a PAX {@code path} override
+     * as they are, and a manifest path from the semantic validator. None of those is
+     * NUL-padded any more, so a NUL here is a NUL in the name.
+     *
+     * <p>There used to be a {@code parseNameField} as well, parsing straight from a header
+     * field. TarHeader joins the prefix and name fields itself, so nothing in production
+     * called it, and a second entry point that nothing uses is one a later caller could pick
+     * up without the joining rule (raised in review since 1bb68a4). Removed.
      */
     public static MemberPath parse(byte[] name, boolean directoryHeader,
                                    ExtractionLimits limits) {

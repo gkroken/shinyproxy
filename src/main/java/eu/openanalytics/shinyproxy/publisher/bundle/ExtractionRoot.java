@@ -191,10 +191,19 @@ public final class ExtractionRoot implements AutoCloseable {
                                 + " something replaced it between the two");
             }
             if (!attributes.permissions().equals(PRIVATE_DIRECTORY)) {
-                throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE,
-                        "the extraction root is " + PosixFilePermissions.toString(
-                                attributes.permissions()) + " rather than private, so this"
-                                + " extractor is not its only writer");
+                String mode = PosixFilePermissions.toString(attributes.permissions());
+                boolean othersHaveAccess = attributes.permissions().stream()
+                        .anyMatch(bit -> !PRIVATE_DIRECTORY.contains(bit));
+                // Two different problems, and they used to share one message that was false
+                // for the second: a mode STRICTER than rwx------ does not let anyone else
+                // write. It does stop the extractor itself, and the usual cause is a process
+                // umask that clears an owner bit (noted in 191db7f's review).
+                throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE, othersHaveAccess
+                        ? "the extraction root is " + mode + " rather than private, so this"
+                                + " extractor is not its only writer"
+                        : "the extraction root is " + mode + ", lacking owner permissions this"
+                                + " extractor needs; the process umask is the usual cause, and"
+                                + " one that keeps the owner's rwx (077, for example) fixes it");
             }
         } catch (RuntimeException | IOException ex) {
             rootStream.close();

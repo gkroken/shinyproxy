@@ -346,7 +346,6 @@ public class S3ObjectStore implements ObjectStore {
         return StoredObject.digested(bucket, key, size, actual, null);
     }
 
-    /** Counts what was actually read, which is the size recorded for the stored object. */
     /**
      * Counts and digests exactly the bytes it hands out, each once, across mark and reset.
      *
