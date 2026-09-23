@@ -190,6 +190,17 @@
             <version>${aws-sdk.version}</version>
         </dependency>
 
+        <!-- Skald: the bundle manifest is validated against the published JSON Schema
+             (schemas/manifest/v1.schema.json, dialect 2020-12) rather than a Java copy of
+             its rules, so the schema stays the one authority (WORKPLAN-BUNDLES.md Q4;
+             approved by the user 2026-09-23). Apache-2.0. The 2.x line, not 3.x: 3.x is
+             built on Jackson 3 (tools.jackson), which would put a second Jackson major on
+             the classpath beside the 2.x everything else here uses. -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>2.0.7</version>
+        </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
@@ -264,6 +275,19 @@
                 <targetPath>skald/spec</targetPath>
                 <includes>
                     <include>extraction-limits-v1.json</include>
+                </includes>
+            </resource>
+            <!-- Skald: the manifest schema and the version index that selects it, shipped
+                 so ManifestSchema validates against the published documents themselves
+                 rather than a copy. schemas/manifest.schema.json is the same bytes as
+                 v1.schema.json (dev/validate-manifests.sh asserts it) and is not needed
+                 twice. -->
+            <resource>
+                <directory>schemas/manifest</directory>
+                <targetPath>skald/schemas/manifest</targetPath>
+                <includes>
+                    <include>index.json</include>
+                    <include>v1.schema.json</include>
                 </includes>
             </resource>
         </resources>

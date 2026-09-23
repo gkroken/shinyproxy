@@ -146,6 +146,16 @@ public enum BundleRule {
     /** Payload arrived before the manifest that is supposed to describe it. */
     MANIFEST_NOT_FIRST,
 
+    // ---- the manifest as a document ----------------------------------------------------
+    /** Not a single well-formed JSON value in UTF-8, or nested past the parser's bound. */
+    MANIFEST_NOT_JSON,
+    /** An object repeats a key, so which value counts depends on the reader. */
+    MANIFEST_DUPLICATE_KEY,
+    /** A schema_version this platform has no schema for. */
+    MANIFEST_SCHEMA_VERSION_UNSUPPORTED,
+    /** The document does not satisfy the published schema for its version. */
+    MANIFEST_SCHEMA_INVALID,
+
     // ---- writing it down -----------------------------------------------------------------
     /** This platform cannot supply descriptor-relative, no-follow filesystem operations. */
     PLATFORM_UNSAFE_FILESYSTEM,
