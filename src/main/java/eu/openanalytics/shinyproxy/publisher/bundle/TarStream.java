@@ -59,7 +59,17 @@ import java.util.function.LongSupplier;
  */
 public final class TarStream {
 
-    /** What the walk hands out. Content is empty for a directory. */
+    /**
+     * What the walk hands out.
+     *
+     * <p><b>The content stream is valid only during the call.</b> The walk moves to the next
+     * header as soon as this returns, and finishing that move consumes whatever is left of
+     * this member. A sink that keeps the stream and reads it afterwards used to get an empty
+     * result and no error — which, for an extractor, is an empty file on disk inside a bundle
+     * that validated cleanly (finding 1bb68a4-F1). Reading late now throws.
+     *
+     * <p>Content is empty for a directory. A sink need not read it at all.
+     */
     public interface MemberSink {
         void member(MemberPath path, TarHeader header, InputStream content) throws IOException;
     }

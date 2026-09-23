@@ -239,6 +239,7 @@ public final class TarBlocks {
 
         private final long size;
         private long produced;
+        private boolean finished;
 
         private BoundedContent(long size) {
             this.size = size;
@@ -253,6 +254,16 @@ public final class TarBlocks {
 
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (finished) {
+                // Reading a member's content after the walk has moved on used to return -1,
+                // so a sink that kept the stream and read it later got an empty file and no
+                // indication that anything was wrong — which for the extractor this feeds is
+                // a bundle that validates cleanly and writes nothing (finding 1bb68a4-F1).
+                throw new IllegalStateException(
+                        "this member's content was read after the walk moved past it; a"
+                                + " content stream is only valid during the call it was"
+                                + " handed to");
+            }
             if (produced >= size) {
                 return -1;
             }
@@ -276,6 +287,9 @@ public final class TarBlocks {
 
         /** Consumes whatever the caller did not, then the padding to the block boundary. */
         private void finish() {
+            if (finished) {
+                return;
+            }
             byte[] discard = new byte[8192];
             while (produced < size) {
                 int want = (int) Math.min(discard.length, size - produced);
@@ -306,6 +320,7 @@ public final class TarBlocks {
                 }
                 left -= read;
             }
+            finished = true;
         }
     }
 }

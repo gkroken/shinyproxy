@@ -243,6 +243,31 @@ public class TarStreamTest {
         assertEquals(BundleRule.ARCHIVE_NO_END_MARKER, ruleFor(unterminated));
     }
 
+    @Test
+    public void aSinkThatKeepsTheStreamIsToldRatherThanGivenNothing() throws Exception {
+        // 1bb68a4-F1. Before this, a lazy sink got an empty read and no error: for the
+        // extractor this walk feeds, an empty file on disk inside a bundle that validated.
+        byte[] archive = TarArchives.archive()
+                .file("app/one.txt", "AAAA".getBytes(StandardCharsets.UTF_8))
+                .file("app/two.txt", "BBBB".getBytes(StandardCharsets.UTF_8))
+                .end();
+
+        List<InputStream> kept = new ArrayList<>();
+        TarStream.walk(new ByteArrayInputStream(archive), LIMITS,
+                (path, header, content) -> kept.add(content));
+
+        for (InputStream late : kept) {
+            IllegalStateException ex = assertThrows(IllegalStateException.class,
+                    () -> late.read(new byte[4], 0, 4),
+                    "a stream read after the walk moved on returned quietly");
+            assertTrue(ex.getMessage().contains("only valid during the call"), ex.getMessage());
+        }
+
+        // The control: read inside the call, the content is there. Without this the rule
+        // above would be satisfied by a stream that always threw.
+        assertEquals("AAAA", walk(archive).get("app/one.txt"));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static Map<String, String> walk(byte[] archive) throws IOException {
