@@ -55,11 +55,19 @@ import java.util.Set;
  *       exactly the ones this list has not heard of.</li>
  * </ul>
  *
- * <p><b>The size bound is checked before the bytes are held.</b> {@code bomb-huge-pax-field}
- * is an extended header four times the per-header cap, and the corpus's note says what it is
- * for: "a parser that buffers the whole record reads into memory before deciding anything".
- * The walk checks the DECLARED size before reading; this class checks the content it is
- * given. Two statements of one rule, on purpose, because the declared size is a claim.
+ * <p><b>This class holds one extended header whole, and that is deliberate</b> — it is a
+ * document of key/value records, not payload, and {@code max_extended_header_bytes} bounds
+ * it, the same carve-out {@code spec/extraction-limits-v1.json} gives the manifest. Parsing
+ * records by length is what the bound buys.
+ *
+ * <p><b>REQUIRED OF THE CALLER, and not yet implemented anywhere:</b> the DECLARED size in
+ * the extended header's tar header must be checked against the same bound BEFORE its content
+ * is read. {@code bomb-huge-pax-field} is a header four times the cap, and the corpus says
+ * what it is for — "a parser that buffers the whole record reads into memory before deciding
+ * anything". The bound below applies to bytes already in hand, so it cannot be the only
+ * check; by the time it fires the memory has been spent. The walk that will read these
+ * headers does not exist yet (finding aa461cf-F1), so this is a requirement on its author
+ * rather than a description of what happens today.
  */
 public final class PaxRecords {
 
@@ -138,8 +146,7 @@ public final class PaxRecords {
             if (equals < 0 || equals == space + 1) {
                 throw malformed(at, equals < 0 ? "no '=' in the record" : "an empty keyword");
             }
-            String keyword = new String(content, space + 1, equals - space - 1,
-                    StandardCharsets.UTF_8);
+            String keyword = keywordOf(content, space + 1, equals, at);
             byte[] value = Arrays.copyOfRange(content, equals + 1, recordEnd - 1);
 
             if (!seen.add(keyword)) {
@@ -162,6 +169,29 @@ public final class PaxRecords {
             at = recordEnd;
         }
         return new PaxRecords(path);
+    }
+
+    /**
+     * The keyword, required to be printable ASCII before it becomes a String.
+     *
+     * <p>POSIX puts keywords in the portable character set, so this rejects nothing real —
+     * and it closes two holes that a plain UTF-8 decode opens (finding aa461cf-F2). A
+     * keyword whose bytes are not valid UTF-8 decodes to U+FFFD, so two different hostile
+     * keywords appear identical in the rejection that is supposed to tell a publisher what
+     * their tar writer emitted; and {@code seen} is keyed on that string, so two such
+     * keywords in one header would collide and be reported as a duplicate rather than as two
+     * unknown keywords. Refusing the bytes is simpler than rendering around the problem.
+     */
+    private static String keywordOf(byte[] content, int from, int to, int recordStart) {
+        for (int i = from; i < to; i++) {
+            int c = content[i] & 0xFF;
+            if (c <= 0x20 || c >= 0x7F) {
+                throw malformed(recordStart, "the keyword is not printable ASCII: '"
+                        + BundleRejection.renderBounded(
+                                Arrays.copyOfRange(content, from, to), 32, false) + "'");
+            }
+        }
+        return new String(content, from, to - from, StandardCharsets.US_ASCII);
     }
 
     private static long decimal(byte[] content, int from, int to) {

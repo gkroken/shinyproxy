@@ -29,6 +29,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -199,6 +200,61 @@ public class PaxRecordsTest {
     @Test
     public void anEmptyHeaderCarriesNoOverride() {
         assertFalse(PaxRecords.parse(new byte[0], LIMITS).pathOverride().isPresent());
+    }
+
+    @Test
+    public void aKeywordThatIsNotPrintableAsciiIsRefusedAsBytes() {
+        // aa461cf-F2. Decoded with replacement characters, 0xff and 0xfe both become U+FFFD,
+        // so two different hostile keywords produce the same rejection — in a message whose
+        // only job is to tell a publisher what their tar writer emitted. They also collide
+        // in the duplicate-keyword set, turning two unknown keywords into a false duplicate.
+        BundleRejection first = assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(rawKeyword(new byte[] {(byte) 0xff}), LIMITS));
+        BundleRejection second = assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(rawKeyword(new byte[] {(byte) 0xfe}), LIMITS));
+
+        assertEquals(BundleRule.PAX_RECORD_MALFORMED, first.rule());
+        assertEquals(BundleRule.PAX_RECORD_MALFORMED, second.rule());
+        assertTrue(first.getMessage().contains("\\xff"), first.getMessage());
+        assertTrue(second.getMessage().contains("\\xfe"), second.getMessage());
+        assertNotEquals(first.getMessage(), second.getMessage(),
+                "two different keywords produced the same rejection, which is the whole"
+                        + " defect: " + first.getMessage());
+
+        // Two invalid keywords in ONE header are two unknown keywords, not a duplicate.
+        byte[] both = concat(rawKeyword(new byte[] {(byte) 0xff}),
+                             rawKeyword(new byte[] {(byte) 0xfe}));
+        assertEquals(BundleRule.PAX_RECORD_MALFORMED, assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(both, LIMITS)).rule());
+
+        // The control: a vendor keyword with dots is printable ASCII and is refused for
+        // being unknown, not for being malformed. Without this the rule above could be
+        // "refuse every keyword with a character I did not expect".
+        assertEquals(BundleRule.PAX_KEYWORD_NOT_ALLOWED, assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(record("SCHILY.xattr.user.demo",
+                        "x".getBytes(StandardCharsets.UTF_8)), LIMITS)).rule());
+        assertEquals(BundleRule.PAX_KEYWORD_NOT_ALLOWED, assertThrows(BundleRejection.class,
+                () -> PaxRecords.parse(record("GNU.sparse.name",
+                        "x".getBytes(StandardCharsets.UTF_8)), LIMITS)).rule());
+    }
+
+    /** A record whose keyword is the given raw bytes, valid UTF-8 or not. */
+    private static byte[] rawKeyword(byte[] keyword) {
+        byte[] value = "x".getBytes(StandardCharsets.UTF_8);
+        int overhead = 1 + keyword.length + 1 + value.length + 1;
+        int total = overhead + Integer.toString(overhead + 1).length();
+        byte[] prefix = Integer.toString(total).getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[total];
+        int at = 0;
+        System.arraycopy(prefix, 0, out, at, prefix.length);
+        at += prefix.length;
+        out[at++] = ' ';
+        System.arraycopy(keyword, 0, out, at, keyword.length);
+        at += keyword.length;
+        out[at++] = '=';
+        System.arraycopy(value, 0, out, at, value.length);
+        out[total - 1] = '\n';
+        return out;
     }
 
     // ------------------------------------------------------------------ helpers

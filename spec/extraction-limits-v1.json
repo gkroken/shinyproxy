@@ -83,7 +83,7 @@
   },
 
   "invariants": [
-    "Parser memory is bounded independently of the archive: no member, extended header or manifest is held whole except the manifest, which has its own bound.",
+    "Parser memory is bounded independently of the archive. No member is held whole. Two things are, because they are documents rather than payload and are parsed rather than streamed: the manifest and one PAX extended header, each bounded by its own limit (max_manifest_bytes, max_extended_header_bytes). Both bounds must be applied to the DECLARED size before the bytes are read, not only to the bytes once held -- a header four times the cap does its damage in the read.",
     "Arithmetic on sizes is overflow-safe. A declared size that is negative, or that overflows when added to the running total, is a rejection and never a wrap.",
     "A bound applies to metadata the extractor goes on to ignore, not only to content it keeps."
   ]
