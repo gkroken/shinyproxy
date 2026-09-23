@@ -116,8 +116,10 @@ public final class ExtractionRoot implements AutoCloseable {
      * create and the {@code readAttributes}. An actor who can write in {@code parent} and who
      * replaces the new directory within that window has their inode recorded as the expected
      * one, and the adoption then succeeds on it. Java offers no atomic create-and-open for a
-     * directory — {@link SecureDirectoryStream} has no relative mkdir, which {@code descend}
-     * notes for the same reason — so this is narrowed rather than closed.
+     * directory — {@link SecureDirectoryStream} has no relative mkdir. Directories INSIDE the
+     * root avoid that by being staged in the root and renamed into place through descriptors
+     * ({@code createThrough}); the root itself has nothing above it to stage in but
+     * {@code parent}, so this is narrowed rather than closed.
      *
      * <p>What closes it in practice is that {@code parent} is a private directory and the
      * name is unpredictable. The second is no longer the caller's to get right: the name is
@@ -309,22 +311,21 @@ public final class ExtractionRoot implements AutoCloseable {
      * Opens each segment in turn, relative to the one above it, refusing links at every step.
      *
      * <p>{@code create} makes a missing directory rather than failing, which is what an
-     * archive's implicit parents need. The creation is path-based — {@link SecureDirectoryStream}
-     * has no relative mkdir — but it is immediately followed by a descriptor-relative
-     * NOFOLLOW open, so a name that became a link in between is refused before anything is
-     * written through it.
+     * archive's implicit parents need. {@link SecureDirectoryStream} has no relative mkdir, and
+     * this used to create by path — {@code <root>/www/dN} — which resolves every component
+     * again by name. A {@code www} swapped for a link after it was opened and before the create
+     * took the create through the link: an empty directory outside the root, and the NOFOLLOW
+     * open that followed refused only afterwards. The javadoc claimed nothing was written
+     * through such a link; the mkdir itself was. See {@link #createThrough}.
      */
     private SecureDirectoryStream<Path> descend(List<String> segments, boolean create,
                                                 Deque<SecureDirectoryStream<Path>> opened)
             throws IOException {
         SecureDirectoryStream<Path> current = rootStream;
-        Path materialised = root;
         for (String segment : segments) {
             Path name = Path.of(segment);
-            materialised = materialised.resolve(segment);
-            if (create && !Files.exists(materialised, LinkOption.NOFOLLOW_LINKS)) {
-                Files.createDirectory(materialised,
-                        PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY));
+            if (create && !presentIn(current, name, segment)) {
+                createThrough(current, name, segment);
             }
             SecureDirectoryStream<Path> next;
             try {
@@ -343,6 +344,63 @@ public final class ExtractionRoot implements AutoCloseable {
             current = next;
         }
         return current;
+    }
+
+    private static boolean presentIn(SecureDirectoryStream<Path> directory, Path name,
+                                     String segment) {
+        try {
+            directory.getFileAttributeView(name,
+                    java.nio.file.attribute.BasicFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes();
+            return true;
+        } catch (java.nio.file.NoSuchFileException absent) {
+            return false;
+        } catch (IOException ex) {
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + segment + "' could not be examined through its parent's descriptor: "
+                            + ex.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Makes directory {@code name} inside {@code parent} without resolving any name the
+     * archive chose.
+     *
+     * <p>Staged, then renamed. The new directory is created by path directly in the root,
+     * under a random name — a path made only of the workspace, which the platform owns, and
+     * the root's own name, which {@link #createUnder} generated. That is the same trust
+     * {@link #createUnder} already rests on, and no more. It is then moved into place with
+     * {@link SecureDirectoryStream#move}, which is {@code renameat} between two directory
+     * descriptors. Neither side is resolved by path, and a rename never follows a link at its
+     * target. If {@code name} turned into something else in the meantime, the rename fails —
+     * a directory cannot replace a link or a file — or replaces an empty directory inside
+     * this root, and either way nothing leaves it.
+     */
+    private void createThrough(SecureDirectoryStream<Path> parent, Path name, String segment)
+            throws IOException {
+        Path staging = Path.of(".skald-mkdir-" + java.util.UUID.randomUUID());
+        try {
+            Files.createDirectory(root.resolve(staging),
+                    PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY));
+        } catch (IOException ex) {
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "a directory for '" + segment + "' could not be staged in the extraction"
+                            + " root: " + ex.getClass().getSimpleName());
+        }
+        try {
+            rootStream.move(staging, parent, name);
+        } catch (IOException ex) {
+            BundleRejection refused = new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + segment + "' could not be put in place (" + ex.getClass()
+                            .getSimpleName() + "); something other than this extractor is"
+                            + " changing the tree");
+            try {
+                rootStream.deleteDirectory(staging);
+            } catch (IOException cleanup) {
+                refused.addSuppressed(cleanup);
+            }
+            throw refused;
+        }
     }
 
     private static long copy(InputStream from, SeekableByteChannel to) throws IOException {

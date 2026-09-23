@@ -34,7 +34,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -128,6 +130,68 @@ public class ExtractionRootTest {
                 "the write went through the link; a refusal after the fact is not a refusal");
         assertEquals(1, Files.list(outside).count());
     }
+
+    @Test
+    public void aParentSwappedForALinkMidWalkTakesNothingOutside(@TempDir Path tmp)
+            throws Exception {
+        // The rename race, one level deeper than the corpus's racer reaches (af58f2e's
+        // review): <root>/www flips between the real directory and a link pointing out,
+        // while directories are created UNDER it. The window is between opening www through
+        // its descriptor and creating www/dN. A create that resolves "<root>/www/dN" by
+        // path follows whatever www is at that instant, and lands outside. A race cannot be
+        // made to lose on demand, so this runs many attempts; how often the old code lost
+        // is recorded in the commit that added this.
+        Path outside = Files.createDirectory(tmp.resolve("outside"));
+        List<Throwable> unexpected = java.util.Collections.synchronizedList(new ArrayList<>());
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work")) {
+            root.createDirectory(member("app/www/"));
+            Path www = root.path().resolve("www");
+            Path stash = root.path().resolve("www-real");
+            AtomicBoolean running = new AtomicBoolean(true);
+            Thread racer = new Thread(() -> {
+                while (running.get()) {
+                    try {
+                        if (Files.isSymbolicLink(www)) {
+                            Files.delete(www);
+                            Files.move(stash, www);
+                        } else {
+                            Files.move(www, stash);
+                            Files.createSymbolicLink(www, outside);
+                        }
+                    } catch (IOException ex) {
+                        // The extractor may have created a directory in the gap; the next
+                        // pass sorts it out. The racer's job is pressure, not tidiness.
+                    }
+                }
+            });
+            racer.start();
+            try {
+                for (int i = 0; i < RACE_ATTEMPTS; i++) {
+                    try {
+                        root.createDirectory(member("app/www/d" + i + "/"));
+                    } catch (BundleRejection refused) {
+                        // Refusing under a race is correct. Escaping never is.
+                    } catch (Throwable other) {
+                        unexpected.add(other);
+                    }
+                }
+            } finally {
+                running.set(false);
+                racer.join();
+            }
+        }
+
+        try (var escaped = Files.list(outside)) {
+            assertEquals(List.of(), escaped.toList(),
+                    "a directory was created through the link, outside the root");
+        }
+        // A crash is not a refusal either: an IOException escaping here is what the
+        // corpus's racer found as "crash: FileAlreadyExistsException" (af58f2e).
+        assertEquals(List.of(), unexpected.stream().map(Throwable::toString).distinct().toList(),
+                "something other than a BundleRejection came out of the walk");
+    }
+
+    private static final int RACE_ATTEMPTS = 20_000;
 
     @Test
     public void aSymlinkAtTheFinalNameIsRefusedAndTheTargetIsUntouched(@TempDir Path tmp)
