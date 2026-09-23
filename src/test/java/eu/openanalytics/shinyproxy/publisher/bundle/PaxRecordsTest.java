@@ -70,11 +70,19 @@ public class PaxRecordsTest {
         // commit that corrected it:
         //     b"30 path=app/../../pax-escape.txt\n"
         // 33 bytes, length field claiming 30, because a PAX length counts its own digits and
-        // the hand-written value did not. A parser that trusts the field looks for the
-        // record's newline at offset 29, finds 't', and refuses the record before applying
-        // the override. A parser that TRUSTS the field instead reads a 30-byte record and
-        // applies a truncated override — measured against the reference extractor, which
-        // reported "'..' in app/../../pax-escape.t", three characters short.
+        // the hand-written value did not. The two kinds of parser then disagree:
+        //
+        //   validates the length (this one)  the record is bytes [0, 30), so its last byte
+        //                                    should be the newline; byte 29 is 't', and the
+        //                                    record is refused before the override is applied
+        //   trusts the length (the           the value is bytes [8, 30), which is
+        //   reference extractor)             "app/../../pax-escape.t" — the real value is 24
+        //                                    characters and this is 22, two short — and that
+        //                                    truncated path is what it applies
+        //
+        // Measured rather than reasoned: the reference extractor reported
+        // "'..' in app/../../pax-escape.t" on the old fixture and
+        // "'..' in app/../../pax-escape.txt" on the corrected one.
         //
         // So the two readers disagreed about which path the archive described, which is the
         // exact class of defect this corpus exists to catch, sitting inside the corpus. The

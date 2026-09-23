@@ -12,3 +12,5 @@
 /.m2/
 /.m2home/
 /dev/data/
+# Python bytecode from the fixture generator and the dev suites.
+__pycache__/
