@@ -1516,8 +1516,9 @@ below are marked passed by this planning document.
 
       **T4 done 2026-09-19.** `publisher/storage/`: `ObjectKeys`, `ObjectStore` +
       `S3ObjectStore`, `BundleWriter` + `BundleReceipt`, `BuildLogWriter` + `LogIndex` +
-      `LogFinal`. **46 tests** in that package, 32 of them against a real MinIO container
-      pinned by digest and 14 needing none — `ObjectKeysTest` and `AwsSdkClasspathTest`
+      `LogFinal`. **47 tests** in that package, 33 of them against a real MinIO container
+      pinned by digest and 14 needing none (46 and 32 when T4 closed; the 47th is T5's
+      lost-response test, see "Object-store stalls" under Risks) — `ObjectKeysTest` and `AwsSdkClasspathTest`
       earn their keep precisely by being true without a container. `make test` 184/184,
       up from 138 before this track.
 
@@ -1692,6 +1693,7 @@ below are marked passed by this planning document.
 | Dependency reproducibility | A lockfile cache is not an artifact mirror or deterministic-build guarantee. Record resolved provenance and make cold builds fail clearly when dependencies disappear. Never rebuild to roll back. |
 | DB/storage/registry disagreement | Durable intents, unique completion, fenced callbacks and collector grace periods; crash tests are mandatory. Do not report success while image/log evidence is missing. |
 | Destructive cleanup and live-proxy races | Protect all retained versions and inspect actual proxy state; no automatic version pruning in #2. Exercise races, retain dry-run evidence, and fail cleanup closed if reference discovery fails. |
+| Object-store stalls, and conditional writes under retry (found at T5, 2026-09-23) | **Two things, one of them fixed.** (1) A stalled object store makes the SDK time out and retry. A retried *conditional* put (If-None-Match / If-Match) cannot tell its own first attempt from someone else's write: when the store had written and the response was lost, the retry's 412 was reported as "already there" — the platform's own write read as a competitor's. Reproduced deterministically and **fixed**: conditional puts are never retried by the SDK, and a lost response now surfaces as "outcome unknown", which the protocol's restart-safe replay settles (`S3ObjectStoreTest.aLostResponseIsNotReportedAsAConflict`). Unconditional puts keep their retries. (2) **Open:** a stalled store also produced `400 IncompleteBody` in the test suite, and how a stall becomes that 400 is not reproduced (three mechanisms tested and ruled out; see commit 9991ff1). The tests no longer hit it because their MinIO runs on tmpfs; a slow production store still could. Our client reports it as an `ObjectStoreException`, loudly. **T8 owes:** the upload path's error UX and replay must treat both "outcome unknown" and this 400 as retryable-by-replay, never as a verdict on the bundle; owner T8, stop condition: an upload test that injects each and ends in a correct, replayed outcome. |
 
 External implementation references checked during planning (not proof that Skald meets them):
 

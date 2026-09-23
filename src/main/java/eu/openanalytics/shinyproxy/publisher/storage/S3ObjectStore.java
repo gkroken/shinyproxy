@@ -22,8 +22,10 @@
  */
 package eu.openanalytics.shinyproxy.publisher.storage;
 
+import software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.retries.DefaultRetryStrategy;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
@@ -47,6 +49,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * {@link ObjectStore} over any S3-compatible store: AWS S3, MinIO, Ceph.
@@ -63,6 +66,38 @@ public class S3ObjectStore implements ObjectStore {
 
     public S3ObjectStore(S3Client client) {
         this.client = client;
+    }
+
+    /**
+     * A conditional put is never retried by the SDK.
+     *
+     * <p>A retry of a conditional PutObject cannot tell its own first attempt from someone
+     * else's write. If the store wrote and the response was lost -- a socket or attempt
+     * timeout under a stalled store is exactly this, and the SDK retries it -- the retry's
+     * If-None-Match: * or If-Match gets 412, and this class used to return empty: "something
+     * was already at that key", the call's own write reported as a competitor's, to callers
+     * that decide from that answer whether they won. Reproduced deterministically by
+     * S3ObjectStoreTest.aLostResponseIsNotReportedAsAConflict (2 attempts, own write read as a
+     * conflict).
+     *
+     * <p>Rejected: treating a 412 whose stored digest matches ours as our write. The store's
+     * contract deliberately refuses a replay of identical bytes, so a caller can tell a
+     * resumed step from a fresh one (retryingTheSameWriteIsSafe); a digest match cannot tell
+     * this call's first attempt from an earlier call's write, and would break that.
+     * Without the retry, a lost response surfaces as an ObjectStoreException that says the
+     * outcome is unknown, and the protocol's restart-safe replay settles it: a replay then
+     * reads "already there", which is the truth. Unconditional puts keep the SDK's retries;
+     * rewriting the same bytes to the same key is idempotent.
+     */
+    private static final Consumer<AwsRequestOverrideConfiguration.Builder> NOT_RETRIED =
+            override -> override.addPlugin(config -> config.overrideConfiguration(
+                    options -> options.retryStrategy(DefaultRetryStrategy.doNotRetry())));
+
+    private static String failed(String bucket, String key, boolean conditional) {
+        return "could not write " + bucket + "/" + key + (conditional
+                ? "; this was a conditional write whose outcome is unknown -- the store may"
+                        + " hold it -- and replaying it will say which"
+                : "");
     }
 
     @Override
@@ -109,6 +144,10 @@ public class S3ObjectStore implements ObjectStore {
         if (expectedEtag != null) {
             request.ifMatch(expectedEtag);
         }
+        boolean conditional = onlyIfAbsent || expectedEtag != null;
+        if (conditional) {
+            request.overrideConfiguration(NOT_RETRIED);
+        }
         try {
             PutObjectResponse response =
                     client.putObject(request.build(), RequestBody.fromBytes(content));
@@ -123,8 +162,7 @@ public class S3ObjectStore implements ObjectStore {
             throw new ObjectStoreException(
                     "could not write " + bucket + "/" + key + ": " + describe(e), e);
         } catch (RuntimeException e) {
-            throw new ObjectStoreException(
-                    "could not write " + bucket + "/" + key, e);
+            throw new ObjectStoreException(failed(bucket, key, conditional), e);
         }
     }
 
@@ -157,6 +195,7 @@ public class S3ObjectStore implements ObjectStore {
                 .contentLength(declaredLength);
         if (onlyIfAbsent) {
             request.ifNoneMatch("*");
+            request.overrideConfiguration(NOT_RETRIED);
         }
         PutObjectResponse response;
         try {
@@ -172,7 +211,7 @@ public class S3ObjectStore implements ObjectStore {
             throw new ObjectStoreException(
                     "could not write " + bucket + "/" + key + ": " + describe(e), e);
         } catch (RuntimeException e) {
-            throw new ObjectStoreException("could not write " + bucket + "/" + key, e);
+            throw new ObjectStoreException(failed(bucket, key, onlyIfAbsent), e);
         }
         // "Content-Length is a claim, checked against the bytes actually read"
         // -- spec/admin-transport-v1.json, bundle.upload.

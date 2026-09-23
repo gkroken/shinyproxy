@@ -29,6 +29,10 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.interceptor.Context;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.http.SdkHttpResponse;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -42,8 +46,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -110,6 +117,116 @@ class S3ObjectStoreTest {
 
     private static String key(String name) {
         return ObjectKeys.bundleObject(UUID.randomUUID(), UUID.randomUUID(), name);
+    }
+
+    @Test
+    @DisplayName("a conditional put whose response was lost is not reported as someone else's write")
+    void aLostResponseIsNotReportedAsAConflict() {
+        // Raised on 9991ff1 and recommended before T8 by its review. The store writes; the
+        // response never reaches us; the SDK retries the same PutObject with its
+        // precondition; the retry gets 412 because the FIRST attempt wrote. The store then
+        // answered "something was already at that key" (or "it changed under us") -- this
+        // call's own write, reported as someone else's, to callers that use exactly that
+        // answer to decide whether they won.
+        //
+        // Simulated deterministically: the first attempt reaches MinIO and is processed,
+        // and its response is then held past a 1 s attempt timeout, which is the failure the
+        // SDK retries (measured with an attempt counter in 9991ff1's investigation). A first
+        // version raised an I/O error from the interceptor instead; the SDK does not retry
+        // that, and the test passed against the defect.
+        byte[] content = "{\"schema_version\":1}".getBytes(StandardCharsets.UTF_8);
+        byte[] replacement = "{\"schema_version\":1} ".getBytes(StandardCharsets.UTF_8);
+
+        java.util.Map<String, java.util.function.Function<ObjectStore, Optional<StoredObject>>>
+                conditional = new java.util.LinkedHashMap<>();
+        String absentKey = key(ObjectKeys.BUNDLE_MANIFEST);
+        conditional.put("putIfAbsent", flaky -> flaky.putIfAbsent(BUCKET, absentKey, content,
+                "application/json"));
+        String streamedKey = key(ObjectKeys.BUNDLE_ARCHIVE);
+        conditional.put("putStreamingIfAbsent", flaky -> flaky.putStreamingIfAbsent(BUCKET,
+                streamedKey, new ByteArrayInputStream(content), content.length,
+                "application/gzip"));
+        String matchedKey = key(ObjectKeys.BUNDLE_RECEIPT);
+        String etag = store.put(BUCKET, matchedKey, content, "application/json").etag();
+        conditional.put("putIfMatch", flaky -> flaky.putIfMatch(BUCKET, matchedKey,
+                replacement, "application/json", etag));
+
+        List<String> wrong = new ArrayList<>();
+        for (var call : conditional.entrySet()) {
+            AtomicInteger attempts = new AtomicInteger();
+            try (S3Client lossy = lossyClient(attempts)) {
+                Optional<StoredObject> answer = null;
+                try {
+                    answer = call.getValue().apply(new S3ObjectStore(lossy));
+                } catch (ObjectStoreException unknown) {
+                    // The honest answer when the response was lost: the outcome is unknown,
+                    // and the caller's restart-safe replay settles it.
+                    if (!unknown.getMessage().contains("outcome is unknown")) {
+                        wrong.add(call.getKey() + ": failed without saying the outcome is"
+                                + " unknown: " + unknown.getMessage());
+                    }
+                }
+                if (answer != null && answer.isEmpty()) {
+                    wrong.add(call.getKey() + ": its own write reported as a conflict"
+                            + " (attempts: " + attempts.get() + ")");
+                }
+                if (attempts.get() != 1) {
+                    wrong.add(call.getKey() + ": retried by the SDK (attempts: "
+                            + attempts.get() + ")");
+                }
+            }
+        }
+        assertEquals(List.of(), wrong);
+        assertTrue(store.head(BUCKET, absentKey).isPresent(), "the first attempt did write");
+
+        // The contract that made the fix take this shape still holds: a later replay of the
+        // same bytes is refused, so a caller can tell a resumed step from a fresh one.
+        assertTrue(store.putIfAbsent(BUCKET, absentKey, content, "application/json").isEmpty());
+
+        // And the control: an UNconditional put under the same lost response is still
+        // retried and succeeds, because rewriting the same bytes to a key is idempotent.
+        AtomicInteger attempts = new AtomicInteger();
+        try (S3Client lossy = lossyClient(attempts)) {
+            new S3ObjectStore(lossy).put(BUCKET, key(ObjectKeys.BUNDLE_MANIFEST), content,
+                    "application/json");
+        }
+        assertEquals(2, attempts.get(), "unconditional puts lost their SDK retry");
+    }
+
+    /** A client whose first attempt's response is held past its 1 s attempt timeout. */
+    private static S3Client lossyClient(AtomicInteger attempts) {
+        ExecutionInterceptor holdTheFirstResponse = new ExecutionInterceptor() {
+            @Override
+            public void beforeTransmission(Context.BeforeTransmission context,
+                                           ExecutionAttributes attributes) {
+                attempts.incrementAndGet();
+            }
+
+            @Override
+            public SdkHttpResponse modifyHttpResponse(Context.ModifyHttpResponse context,
+                                                      ExecutionAttributes attributes) {
+                if (attempts.get() == 1) {
+                    try {
+                        Thread.sleep(3_000);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return context.httpResponse();
+            }
+        };
+        return S3Client.builder()
+                .endpointOverride(URI.create(
+                        "http://" + minio.getHost() + ":" + minio.getMappedPort(9000)))
+                .region(Region.of("us-east-1"))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(USER, PASSWORD)))
+                .httpClient(UrlConnectionHttpClient.create())
+                .serviceConfiguration(S3Configuration.builder()
+                        .pathStyleAccessEnabled(true).build())
+                .overrideConfiguration(c -> c.addExecutionInterceptor(holdTheFirstResponse)
+                        .apiCallAttemptTimeout(java.time.Duration.ofSeconds(1)))
+                .build();
     }
 
     @Test
