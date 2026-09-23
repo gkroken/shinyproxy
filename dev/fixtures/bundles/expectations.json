@@ -160,8 +160,8 @@
       "rule": "-",
       "why": "a PAX extended header carrying a legitimate long UTF-8 filename. The plan lists this as a required positive control for a reason: without it, an extractor that rejects every PAX header passes the whole corpus, since PAX otherwise appears only in negatives. Innocuous PAX metadata is allowed under bounds, and this is what proves the difference between allowed and ignored (finding 29857f7-F4)",
       "pins": true,
-      "sha256": "162abcac04974dae30261254d591ea8c7f9e4b13f057711547b693a1802f78ae",
-      "bytes": 701
+      "sha256": "a0366c78be977efc9ca6d6263b2b2cc953288897337b23af2d68645ba7d95487",
+      "bytes": 666
     },
     {
       "name": "trav-dotdot",

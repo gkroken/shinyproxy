@@ -135,6 +135,7 @@ def walk(source):
                     pending_link = payload
                 continue
 
+            gnu_long = pending_name is not None
             if pending_name is not None:
                 name, pending_name = pending_name, None
             if pending_link is not None:
@@ -142,7 +143,8 @@ def walk(source):
 
             members.append({"name": name, "type": typeflag, "linkname": linkname,
                             "mode": mode, "size": size, "size_field": size_field,
-                            "pax": b"", "body": b""})
+                            "pax": b"", "body": b"", "gnu_long": gnu_long,
+                            "raw_name": name})
             # Two payloads ARE content rather than bytes to step over: a PAX header's
             # records, and the manifest. Both are captured here, bounded, and everything
             # else is skipped at constant memory. The manifest is read here rather than
@@ -170,7 +172,27 @@ def walk(source):
         # A broken gzip stream ends the walk; the members read before it are still real,
         # and `gzip_error` is where that failure is reported as a property.
         note = note or ("stream-error:" + type(e).__name__)
+    _apply_pax_paths(members)
     return members, note
+
+
+def _apply_pax_paths(members):
+    """Give each member the name an extractor must judge: its EFFECTIVE path.
+
+    The contract says to validate "the effective path after any approved PAX `path`
+    override", and this checker used to judge the raw header name instead. That went
+    unnoticed while the one accepted PAX fixture also carried a GNU long name equal to the
+    override (af58f2e-F1); once it carried only the override, the checker saw a short
+    placeholder name, twice. `raw_name` keeps what the header itself said, for the
+    predicates whose point is the difference between the two.
+    """
+    for i, m in enumerate(members[:-1]):
+        if m["type"] != b"x":
+            continue
+        after = members[i + 1]
+        path = _pax_records(m).get(b"path")
+        if path and after["type"] not in (b"x", b"g"):
+            after["name"] = path
 
 
 def gunzip(fh, limit=8 * 1024 * 1024):
@@ -273,7 +295,9 @@ def mode_bit(bit):
 def duplicate_names(normalise=lambda s: s):
     def check(ctx):
         seen, dupes = set(), False
-        for n in decoded(ctx["members"]):
+        # A PAX header's own name is a placeholder that nothing extracts; the path it
+        # carries is already on the member it describes (_apply_pax_paths).
+        for n in decoded(m for m in ctx["members"] if m["type"] not in (b"x", b"g")):
             k = normalise(n.rstrip("/"))
             if k in seen:
                 dupes = True
@@ -471,24 +495,32 @@ def _pax_records(m):
 
 
 def _pax_path_resolves(ctx):
-    """A PAX path override naming a member that is really there, under a UTF-8 name.
+    """A PAX path override that is the ONLY thing naming the member after it, in UTF-8.
 
     This fixture exists so that an extractor mishandling PAX cannot pass the corpus, so
-    the record itself is what has to be asserted. Emptying it leaves the GNU long name
-    behind and the archive still looks right from the outside: the fixture degrades from
-    "a long UTF-8 filename carried in a PAX override" to "a long name beside an empty PAX
-    header", which is the silent rot this suite exists to catch.
+    the record itself is what has to be asserted. Emptying it would leave the member under
+    its short ustar name, which the manifest does not declare, and the archive would still
+    look right from the outside -- the silent rot this suite exists to catch.
+
+    The override has to be what names the member, not a copy of a name something else
+    already supplies. This predicate used to require the PAX path to equal a member's own
+    name, which held only because the builder's GNU format quietly put a ././@LongLink
+    between the PAX header and the member. So it certified two stacked metadata headers as
+    "a PAX filename" (finding af58f2e-F1). Now the member right after the PAX header must be
+    a regular file whose own header says something else and that no GNU long name renamed.
 
     Length is deliberately not asserted. Whether the name exceeds the 100-byte ustar
     field depends on max_segment_bytes, and a predicate that stops holding when an
     operator lowers a limit is the defect this corpus keeps finding in itself.
     """
-    present = set(names(ctx["members"]))
-    for m in ctx["members"]:
-        if m["type"] != b"x":
+    members = ctx["members"]
+    for i, m in enumerate(members):
+        if m["type"] != b"x" or i + 1 >= len(members):
             continue
         value = _pax_records(m).get(b"path")
-        if not value or value not in present:
+        named = members[i + 1]
+        if (not value or named["type"] not in (b"0", b"\0") or named["gnu_long"]
+                or named["raw_name"] == value):
             continue
         try:
             text = value.decode()

@@ -13,8 +13,10 @@ the oracle then mistakes for the extractor's.
 
 The classpath comes from target/oracle-classpath.txt, which dev/validate-oracle-java.sh
 writes with Maven before the oracle runs. The heap is capped so that "bounded parser
-memory" is judged rather than assumed: a bomb that makes the extractor buffer comes back
-as a crash (OutOfMemoryError), and a crash is never a rejection.
+memory" is judged rather than assumed. -XX:+ExitOnOutOfMemoryError ends the JVM at once,
+before BundleExtractorCli can print anything, so a bomb that makes the extractor buffer
+comes back from the oracle as "no-verdict" -- not "crash" (finding af58f2e-F2). Neither is
+ever counted as a rejection.
 
 Usage (by the oracle, not by hand):
     python3 skald_extractor.py --root DIR --archive FILE --limits JSON

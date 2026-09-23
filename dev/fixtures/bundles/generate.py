@@ -511,7 +511,14 @@ def _(b):
     b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
     b.add_raw(raw_header("app/www/shortname.txt", b"%011o\0" % len(record), typeflag=b"x"),
               record)
-    b.add(name, b"pax\n")
+    # The member header is raw too, with a short ustar name, so the PAX `path` is the ONLY
+    # thing naming it. It used to be b.add(name), and this builder writes GNU format: for a
+    # name over 100 bytes tarfile quietly emitted its own ././@LongLink between the PAX
+    # header and the member, so the fixture carried two stacked metadata headers and pinned
+    # tolerance of that rather than PAX support (finding af58f2e-F1). An extractor that
+    # ignored the override would now write app/www/shortname.txt, which the manifest does
+    # not declare -- so this also proves the override is applied, not merely tolerated.
+    b.add_raw(raw_header("app/www/shortname.txt", b"%011o\0" % len(b"pax\n")), b"pax\n")
 
 
 # --------------------------------------------------------------------- traversal
