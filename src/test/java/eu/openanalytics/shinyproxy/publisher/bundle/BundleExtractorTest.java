@@ -56,22 +56,27 @@ public class BundleExtractorTest {
 
     @Test
     public void anOrdinaryBundleBecomesFiles(@TempDir Path workspace) throws Exception {
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("www/style.css", "body {}".getBytes(StandardCharsets.UTF_8));
+        byte[] manifest = TarArchives.manifestFor(payload);
         byte[] upload = gzip(TarArchives.archive()
-                .file("manifest.json", "{\"schema_version\":1}".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", manifest)
                 .directory("app")
-                .file("app/app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8))
+                .file("app/app.R", payload.get("app.R"))
+                .file("app/renv.lock", payload.get("renv.lock"))
                 .directory("app/www")
-                .file("app/www/style.css", "body {}".getBytes(StandardCharsets.UTF_8))
+                .file("app/www/style.css", payload.get("www/style.css"))
                 .end());
 
         BundleExtractor.Extracted extracted =
                 BundleExtractor.extract(new ByteArrayInputStream(upload), upload.length,
                         workspace, LIMITS);
         try (ExtractionRoot root = extracted.root()) {
-            assertEquals("{\"schema_version\":1}",
-                    new String(extracted.manifest(), StandardCharsets.UTF_8));
-            assertEquals(2, extracted.files());
-            assertEquals("library(shiny)\n".length() + "body {}".length(), extracted.bytes());
+            assertArrayEquals(manifest, extracted.manifest());
+            assertEquals(payload.keySet(), extracted.validated().files().keySet());
+            assertEquals(3, extracted.files());
+            assertEquals(payload.values().stream().mapToLong(b -> b.length).sum(),
+                    extracted.bytes());
 
             assertEquals("library(shiny)\n", Files.readString(root.path().resolve("app.R")));
             assertEquals("body {}", Files.readString(root.path().resolve("www/style.css")));
@@ -86,17 +91,20 @@ public class BundleExtractorTest {
         // Each of these fails at a different layer, and after each one the workspace must be
         // as empty as it was. The traversal is the one that matters most: it is refused
         // AFTER two members have already been written.
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("one.txt", "one".getBytes(StandardCharsets.UTF_8));
+        payload.put("two.txt", "two".getBytes(StandardCharsets.UTF_8));
         byte[] traversal = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
-                .file("app/one.txt", "one".getBytes(StandardCharsets.UTF_8))
-                .file("app/two.txt", "two".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", TarArchives.manifestFor(payload))
+                .file("app/one.txt", payload.get("one.txt"))
+                .file("app/two.txt", payload.get("two.txt"))
                 .file("app/../../escape.txt", "owned".getBytes(StandardCharsets.UTF_8))
                 .end());
         assertEquals(BundleRule.PATH_TRAVERSAL, refusalFor(traversal, workspace));
         assertEmpty(workspace);
 
         byte[] noMarker = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", TarArchives.manifestFor(TarArchives.shinyPayload()))
                 .unterminated());
         assertEquals(BundleRule.ARCHIVE_NO_END_MARKER, refusalFor(noMarker, workspace));
         assertEmpty(workspace);
@@ -105,10 +113,11 @@ public class BundleExtractorTest {
         assertEquals(BundleRule.ARCHIVE_NOT_GZIP, refusalFor(notGzip, workspace));
         assertEmpty(workspace);
 
+        Map<String, byte[]> once = TarArchives.shinyPayload();
         byte[] duplicate = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
-                .file("app/app.R", "one".getBytes(StandardCharsets.UTF_8))
-                .file("app/app.R", "two".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", TarArchives.manifestFor(once))
+                .file("app/app.R", once.get("app.R"))
+                .file("app/app.R", once.get("app.R"))
                 .end());
         assertEquals(BundleRule.DUPLICATE_MEMBER, refusalFor(duplicate, workspace));
         assertEmpty(workspace);
@@ -127,11 +136,10 @@ public class BundleExtractorTest {
         //
         // A source that throws something else partway is the real case: an I/O layer failing,
         // a bug in any layer below, a cancellation.
-        byte[] upload = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
-                .file("app/one.txt", "one".getBytes(StandardCharsets.UTF_8))
-                .file("app/two.txt", "two".getBytes(StandardCharsets.UTF_8))
-                .end());
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("one.txt", "one".getBytes(StandardCharsets.UTF_8));
+        payload.put("two.txt", "two".getBytes(StandardCharsets.UTF_8));
+        byte[] upload = gzip(TarArchives.bundle(payload).end());
 
         InputStream hostile = new InputStream() {
             private final ByteArrayInputStream delegate = new ByteArrayInputStream(upload);
@@ -162,9 +170,10 @@ public class BundleExtractorTest {
 
     @Test
     public void theManifestComesFirst(@TempDir Path workspace) throws Exception {
+        byte[] valid = TarArchives.manifestFor(TarArchives.shinyPayload());
         byte[] late = gzip(TarArchives.archive()
                 .file("app/app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8))
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", valid)
                 .end());
         assertEquals(BundleRule.MANIFEST_NOT_FIRST, refusalFor(late, workspace));
         assertEmpty(workspace);
@@ -176,8 +185,9 @@ public class BundleExtractorTest {
         // "first regular file" from "first member", so both halves are here.
         byte[] leadingDirectory = gzip(TarArchives.archive()
                 .directory("app")
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
+                .file("manifest.json", valid)
                 .file("app/app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8))
+                .file("app/renv.lock", TarArchives.shinyPayload().get("renv.lock"))
                 .end());
         try (ExtractionRoot root = BundleExtractor.extract(
                 new ByteArrayInputStream(leadingDirectory), leadingDirectory.length,
@@ -201,11 +211,12 @@ public class BundleExtractorTest {
 
     @Test
     public void theManifestIsBoundedOnItsClaim(@TempDir Path workspace) throws Exception {
+        byte[] manifest = TarArchives.manifestFor(TarArchives.shinyPayload());
         ExtractionLimits small = ExtractionLimits.fromOverrides(
-                Map.of("max_manifest_bytes", "16"));
+                Map.of("max_manifest_bytes", Long.toString(manifest.length)));
 
         byte[] declared = gzip(TarArchives.archive()
-                .headerOnly("manifest.json", 1024, '0')
+                .headerOnly("manifest.json", manifest.length + 1, '0')
                 .end());
         CountingStream source = new CountingStream(declared);
         BundleRejection ex = assertThrows(BundleRejection.class,
@@ -215,21 +226,17 @@ public class BundleExtractorTest {
         assertEmpty(workspace);
 
         // The accepted half, at exactly the bound.
-        byte[] atLimit = gzip(TarArchives.archive()
-                .file("manifest.json", "0123456789abcdef".getBytes(StandardCharsets.UTF_8))
-                .end());
+        byte[] atLimit = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
         try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(atLimit),
                 atLimit.length, workspace, small).root()) {
-            assertEquals(0, Files.list(root.path()).count());
+            assertEquals(2, Files.list(root.path()).count());
         }
     }
 
     @Test
     public void anUploadWhoseLengthIsKnownIsRefusedBeforeItIsParsed(@TempDir Path workspace)
             throws Exception {
-        byte[] upload = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
-                .end());
+        byte[] upload = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
         ExtractionLimits tiny = ExtractionLimits.fromOverrides(
                 Map.of("max_compressed_bytes", Long.toString(upload.length - 1)));
 
@@ -250,21 +257,25 @@ public class BundleExtractorTest {
         long cap = 8192;
         ExtractionLimits limits = ExtractionLimits.fromOverrides(
                 Map.of("max_expanded_bytes", Long.toString(cap)));
-        byte[] manifest = "{}".getBytes(StandardCharsets.UTF_8);
+        // The manifest's length depends on fill.bin's declared size, which has four digits
+        // anywhere near this cap, so sizing it against a four-digit placeholder settles it
+        // in one pass. The assertion below is what says it did.
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        long others = payload.values().stream().mapToLong(b -> b.length).sum();
+        payload.put("fill.bin", new byte[1000]);
+        int fill = (int) (cap - TarArchives.manifestFor(payload).length - others);
+        payload.put("fill.bin", new byte[fill]);
+        assertEquals(cap, TarArchives.manifestFor(payload).length + others + fill,
+                "the bundle is not at the cap, so it proves nothing about the cap");
 
-        byte[] atCap = gzip(TarArchives.archive()
-                .file("manifest.json", manifest)
-                .file("app/fill.bin", new byte[(int) (cap - manifest.length)])
-                .end());
+        byte[] atCap = gzip(TarArchives.bundle(payload).end());
         try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(atCap),
                 atCap.length, workspace, limits).root()) {
-            assertEquals(cap - manifest.length, Files.size(root.path().resolve("fill.bin")));
+            assertEquals(fill, Files.size(root.path().resolve("fill.bin")));
         }
 
-        byte[] overCap = gzip(TarArchives.archive()
-                .file("manifest.json", manifest)
-                .file("app/fill.bin", new byte[(int) (cap - manifest.length + 1)])
-                .end());
+        payload.put("fill.bin", new byte[fill + 1]);
+        byte[] overCap = gzip(TarArchives.bundle(payload).end());
         BundleRejection ex = assertThrows(BundleRejection.class,
                 () -> BundleExtractor.extract(new ByteArrayInputStream(overCap),
                         overCap.length, workspace, limits));
@@ -284,20 +295,25 @@ public class BundleExtractorTest {
         // exactly at the cap, the full entry count, every member's content one byte past a
         // block so each carries the most padding (511), and the longest zero tail the tar
         // layer accepts after the marker. It decompresses to exactly the ceiling.
-        long entries = 3;
-        byte[] manifest = ("{}" + " ".repeat(511)).getBytes(StandardCharsets.UTF_8); // 513
-        byte[] one = {'x'};                                                          // 1
-        byte[] rest = new byte[10 * 512 + 1];                                        // 5121
-        long cap = manifest.length + one.length + rest.length;
+        // Every member's content is one byte past a block. For the manifest that means JSON
+        // padded with trailing whitespace, which JSON permits, to a length of 1 mod 512.
+        Map<String, byte[]> payload = new java.util.LinkedHashMap<>();
+        payload.put("app.R", new byte[] {'x'});                                     // 1
+        payload.put("renv.lock", new byte[] {'{'});                                 // 1
+        payload.put("rest.bin", new byte[10 * 512 + 1]);                            // 5121
+        byte[] bare = TarArchives.manifestFor(payload);
+        byte[] manifest = java.util.Arrays.copyOf(bare, bare.length
+                + Math.floorMod(1 - bare.length, 512));
+        java.util.Arrays.fill(manifest, bare.length, manifest.length, (byte) ' ');
+        long entries = 1 + payload.size();
+        long cap = manifest.length + payload.values().stream().mapToLong(b -> b.length).sum();
         ExtractionLimits limits = ExtractionLimits.fromOverrides(Map.of(
                 "max_expanded_bytes", Long.toString(cap),
                 "max_entries", Long.toString(entries)));
 
-        byte[] marked = TarArchives.archive()
-                .file("manifest.json", manifest)
-                .file("app/one.bin", one)
-                .file("app/rest.bin", rest)
-                .end();
+        TarArchives archive = TarArchives.archive().file("manifest.json", manifest);
+        payload.forEach((path, bytes) -> archive.file("app/" + path, bytes));
+        byte[] marked = archive.end();
         byte[] tar = java.util.Arrays.copyOf(marked, marked.length + (int) entries * 512);
         assertEquals(limits.maxTarStreamBytes(), tar.length,
                 "the fixture is not at every bound, so it proves nothing about the ceiling");
@@ -305,8 +321,123 @@ public class BundleExtractorTest {
         byte[] upload = gzip(tar);
         try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(upload),
                 upload.length, workspace, limits).root()) {
-            assertEquals(rest.length, Files.size(root.path().resolve("rest.bin")));
+            assertEquals(payload.get("rest.bin").length,
+                    Files.size(root.path().resolve("rest.bin")));
         }
+    }
+
+    @Test
+    public void aFileTheManifestDoesNotListIsRefusedBeforeItIsWritten(@TempDir Path workspace)
+            throws Exception {
+        // S11. The undeclared member's header claims 256 MiB, under the per-file limit, with
+        // nothing behind it. If the extractor began writing, the walk would end as a
+        // truncation; refused on the header, it ends as the inventory rule.
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        byte[] upload = gzip(TarArchives.bundle(payload)
+                .headerOnly("app/extra.bin", 1L << 28, '0')
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> extractQuietly(upload,
+                workspace));
+        assertEquals(BundleRule.INVENTORY_UNDECLARED_FILE, ex.rule(), ex.getMessage());
+        assertTrue(ex.getMessage().contains("S11: 'extra.bin'"), ex.getMessage());
+        assertEmpty(workspace);
+    }
+
+    @Test
+    public void aSizeTheManifestDidNotDeclareIsRefusedBeforeItIsWritten(@TempDir Path workspace)
+            throws Exception {
+        // S10's size half, the same way: the header's claim is the member's size, and it
+        // disagrees with the declaration before any content is read.
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", TarArchives.manifestFor(payload))
+                .file("app/app.R", payload.get("app.R"))
+                .headerOnly("app/renv.lock", 1L << 28, '0')
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> extractQuietly(upload,
+                workspace));
+        assertEquals(BundleRule.INVENTORY_SIZE_MISMATCH, ex.rule(), ex.getMessage());
+        assertEmpty(workspace);
+    }
+
+    @Test
+    public void bytesThatAreNotTheDeclaredBytesAreRefused(@TempDir Path workspace)
+            throws Exception {
+        // S10's digest half: the same length, different content.
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        byte[] manifest = TarArchives.manifestFor(payload);
+        byte[] swapped = payload.get("app.R").clone();
+        swapped[0] ^= 0x20;
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", manifest)
+                .file("app/app.R", swapped)
+                .file("app/renv.lock", payload.get("renv.lock"))
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> extractQuietly(upload,
+                workspace));
+        assertEquals(BundleRule.INVENTORY_HASH_MISMATCH, ex.rule(), ex.getMessage());
+        assertTrue(ex.getMessage().contains(TarArchives.sha256(swapped)), ex.getMessage());
+        assertEmpty(workspace);
+    }
+
+    @Test
+    public void aDeclaredFileTheArchiveNeverDeliversIsRefused(@TempDir Path workspace)
+            throws Exception {
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("www/gone.txt", "promised".getBytes(StandardCharsets.UTF_8));
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", TarArchives.manifestFor(payload))
+                .file("app/app.R", payload.get("app.R"))
+                .file("app/renv.lock", payload.get("renv.lock"))
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> extractQuietly(upload,
+                workspace));
+        assertEquals(BundleRule.INVENTORY_MISSING_FILE, ex.rule(), ex.getMessage());
+        assertTrue(ex.getMessage().contains("www/gone.txt"), ex.getMessage());
+        assertEmpty(workspace);
+    }
+
+    @Test
+    public void executabilityComesFromTheManifestAndNeverFromTheHeader(@TempDir Path workspace)
+            throws Exception {
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("run.sh", "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+        payload.put("data.csv", "a,b\n".getBytes(StandardCharsets.UTF_8));
+        // The archive's own headers say the opposite of the manifest for both files: 0644 on
+        // the one the manifest marks executable, and 0755 on the one it does not.
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", TarArchives.manifestFor(payload, "run.sh"))
+                .file("app/app.R", payload.get("app.R"))
+                .file("app/renv.lock", payload.get("renv.lock"))
+                .file("app/run.sh", payload.get("run.sh"))
+                .raw(TarArchives.header("app/data.csv", payload.get("data.csv").length, '0',
+                        "0000755"), payload.get("data.csv"))
+                .end());
+        try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(upload),
+                upload.length, workspace, LIMITS).root()) {
+            assertEquals("rwx------", mode(root.path().resolve("run.sh")));
+            assertEquals("rw-------", mode(root.path().resolve("data.csv")));
+            assertEquals("rw-------", mode(root.path().resolve("app.R")));
+        }
+    }
+
+    @Test
+    public void aManifestThatCannotBeTrueIsRefusedBeforeAnyPayloadIsWritten(
+            @TempDir Path workspace) throws Exception {
+        // S5, through the extractor: the entrypoint names a directory with no app. The
+        // payload after the manifest is a header claiming 256 MiB, so a refusal that came
+        // after writing began would be a truncation instead.
+        Map<String, byte[]> payload = new java.util.LinkedHashMap<>();
+        payload.put("readme.md", "no app here".getBytes(StandardCharsets.UTF_8));
+        payload.put("renv.lock", "{}".getBytes(StandardCharsets.UTF_8));
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", TarArchives.manifestFor(payload))
+                .headerOnly("app/readme.md", 1L << 28, '0')
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class, () -> extractQuietly(upload,
+                workspace));
+        assertEquals(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED, ex.rule(), ex.getMessage());
+        assertEmpty(workspace);
     }
 
     @Test
@@ -327,14 +458,13 @@ public class BundleExtractorTest {
         // under --user 0:0 the delete succeeded and the case failed pointing at
         // BundleExtractor rather than at the uid (c97863d-F2). A rename does not depend on
         // who is running, so this case runs, and means the same thing, everywhere.
-        byte[] upload = gzip(TarArchives.archive()
-                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
-                .file("app/one.txt", "one".getBytes(StandardCharsets.UTF_8))
-                // Incompressible, so the halfway point falls well inside it and app/one.txt
-                // is already on disk when the sabotage runs. Without it nothing had been
-                // written yet, and the walk's assertion below passed with the walk deleted.
-                .file("app/tail.bin", incompressible(32 * 1024))
-                .end());
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        payload.put("one.txt", "one".getBytes(StandardCharsets.UTF_8));
+        // Incompressible, so the halfway point falls well inside it and app/one.txt is
+        // already on disk when the sabotage runs. Without it nothing had been written yet,
+        // and the walk's assertion below passed with the walk deleted.
+        payload.put("tail.bin", incompressible(32 * 1024));
+        byte[] upload = gzip(TarArchives.bundle(payload).end());
         java.util.List<Path> heldAtSabotage = new java.util.ArrayList<>();
 
         InputStream sabotage = new InputStream() {
@@ -400,6 +530,17 @@ public class BundleExtractorTest {
         byte[] bytes = new byte[length];
         new java.util.Random(0).nextBytes(bytes);
         return bytes;
+    }
+
+    private static BundleExtractor.Extracted extractQuietly(byte[] upload, Path workspace)
+            throws IOException {
+        return BundleExtractor.extract(new ByteArrayInputStream(upload), upload.length,
+                workspace, LIMITS);
+    }
+
+    private static String mode(Path file) throws IOException {
+        return java.nio.file.attribute.PosixFilePermissions.toString(
+                Files.getPosixFilePermissions(file, java.nio.file.LinkOption.NOFOLLOW_LINKS));
     }
 
     private static BundleRule refusalFor(byte[] upload, Path workspace) {

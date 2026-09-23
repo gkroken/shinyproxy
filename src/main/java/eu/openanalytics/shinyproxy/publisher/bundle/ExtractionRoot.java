@@ -77,6 +77,8 @@ public final class ExtractionRoot implements AutoCloseable {
             PosixFilePermissions.fromString("rwx------");
     private static final Set<PosixFilePermission> PRIVATE_FILE =
             PosixFilePermissions.fromString("rw-------");
+    private static final Set<PosixFilePermission> PRIVATE_EXECUTABLE =
+            PosixFilePermissions.fromString("rwx------");
 
     private final Path root;
     private final SecureDirectoryStream<Path> rootStream;
@@ -233,6 +235,18 @@ public final class ExtractionRoot implements AutoCloseable {
      * @return the number of bytes written
      */
     public long writeFile(MemberPath member, InputStream content) throws IOException {
+        return writeFile(member, content, false);
+    }
+
+    /**
+     * The same, created executable by its owner when {@code executable}.
+     *
+     * <p>The flag is the manifest's, never the archive header's: "executability from the
+     * manifest". It is applied at creation, so there is no moment at which the file exists
+     * with a mode it should not have, and no second, path-resolving chmod.
+     */
+    public long writeFile(MemberPath member, InputStream content, boolean executable)
+            throws IOException {
         List<String> segments = requirePayload(member);
         Deque<SecureDirectoryStream<Path>> opened = new ArrayDeque<>();
         try {
@@ -245,7 +259,8 @@ public final class ExtractionRoot implements AutoCloseable {
             Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
             try (SeekableByteChannel channel = directory.newByteChannel(name, options,
-                    PosixFilePermissions.asFileAttribute(PRIVATE_FILE))) {
+                    PosixFilePermissions.asFileAttribute(
+                            executable ? PRIVATE_EXECUTABLE : PRIVATE_FILE))) {
                 return copy(content, channel);
             } catch (java.nio.file.FileAlreadyExistsException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,

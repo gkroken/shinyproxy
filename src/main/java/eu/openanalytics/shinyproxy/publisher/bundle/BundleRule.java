@@ -176,6 +176,16 @@ public enum BundleRule {
     /** A declared size that is not a whole number of bytes representable in 64 bits. */
     MANIFEST_SIZE_INVALID,
 
+    // ---- the manifest against the bytes that arrived (S10, S11) --------------------------
+    /** S10: a member's size is not the size its inventory entry declares. */
+    INVENTORY_SIZE_MISMATCH,
+    /** S10: a member's SHA-256 is not the digest its inventory entry declares. */
+    INVENTORY_HASH_MISMATCH,
+    /** S11: a payload file the inventory does not list. */
+    INVENTORY_UNDECLARED_FILE,
+    /** S11: an inventory entry the archive never delivered. */
+    INVENTORY_MISSING_FILE,
+
     // ---- writing it down -----------------------------------------------------------------
     /** This platform cannot supply descriptor-relative, no-follow filesystem operations. */
     PLATFORM_UNSAFE_FILESYSTEM,

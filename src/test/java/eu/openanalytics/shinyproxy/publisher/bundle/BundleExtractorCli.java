@@ -26,6 +26,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintStream;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -72,6 +73,15 @@ public final class BundleExtractorCli {
     }
 
     public static void main(String[] args) throws IOException {
+        // Stdout is the verdict channel and nothing else may write to it. Loading the
+        // manifest validator initialises logback, whose test configuration (in the
+        // containerproxy tests jar on this classpath) prints its status and appends to
+        // STDOUT; the oracle then read 26 lines of logging where it expected JSON and reported
+        // every fixture as no-verdict. Taken here, before any logging class loads, so every
+        // library that prints -- now or later -- lands on stderr instead.
+        PrintStream verdictOut = System.out;
+        System.setOut(System.err);
+
         Path root = null;
         Path archive = null;
         String limitsJson = null;
@@ -114,7 +124,8 @@ public final class BundleExtractorCli {
             String message = String.valueOf(crash.getMessage());
             verdict.put("reason", message.substring(0, Math.min(200, message.length())));
         }
-        System.out.println(new ObjectMapper().writeValueAsString(verdict));
+        verdictOut.println(new ObjectMapper().writeValueAsString(verdict));
+        verdictOut.flush();
     }
 
     /** {@link ExtractionRoot#createUnder} without the create. */

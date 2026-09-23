@@ -384,8 +384,8 @@ fails the run, as does citing a fixture that does not exist or removing the tabl
 | S7 | `dependencies.format` agrees with `runtime.language` | `pip-hashed` under an R runtime, or `renv` under Python | `language-format-disagreement` |
 | S8 | `type` is enabled by the recipe matrix, not merely registered | `quarto_static` before its recipe exists | `registered-but-unsupported-type` |
 | S9 | `type` equals the target `content.type` | a `shiny` bundle uploaded to `plumber` content | **owed** — needs a target, so it belongs with T8's upload path |
-| S10 | Each declared `size` and `sha256` matches the bytes actually extracted | a truthful-looking manifest describing different bytes | **owed** — needs real archives, so it belongs with T2/T5 |
-| S11 | The inventory and the payload agree exactly: no extracted file missing from `files`, no listed file absent from the archive | a smuggled extra file, or a phantom entry | **owed** — T2/T5 |
+| S10 | Each declared `size` and `sha256` matches the bytes actually extracted | a truthful-looking manifest describing different bytes | no manifest fixture: needs real archives. **Closed at T5** by the extractor (size from the header before any content is read, digest as it streams), held by the bundle corpus's inventory-size-mismatch and inventory-hash-mismatch |
+| S11 | The inventory and the payload agree exactly: no extracted file missing from `files`, no listed file absent from the archive | a smuggled extra file, or a phantom entry | no manifest fixture: needs real archives. **Closed at T5** by the extractor (an undeclared file refused before it is written; declared-but-absent at the end), held by the bundle corpus's inventory-missing-file and inventory-extra-file |
 
 S1 and S2 look like duplicates of the extraction contract's path rules and are not. Extraction
 validates the *archive's* member names as they stream past; these validate the *manifest's*

@@ -22,8 +22,17 @@
  */
 package eu.openanalytics.shinyproxy.publisher.bundle;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Builds tar archives for tests, by hand.
@@ -43,6 +52,57 @@ final class TarArchives {
 
     static TarArchives archive() {
         return new TarArchives();
+    }
+
+    /** The smallest payload an R Shiny manifest can describe: app.R and its lockfile. */
+    static Map<String, byte[]> shinyPayload() {
+        Map<String, byte[]> payload = new LinkedHashMap<>();
+        payload.put("app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8));
+        payload.put("renv.lock", "{}\n".getBytes(StandardCharsets.UTF_8));
+        return payload;
+    }
+
+    /**
+     * A manifest that passes the schema and S1-S11 for exactly {@code payload}: R Shiny at the
+     * payload root, renv, and each file's real size and SHA-256. The payload must carry
+     * app.R and renv.lock, as {@link #shinyPayload} does.
+     */
+    static byte[] manifestFor(Map<String, byte[]> payload, String... executable) {
+        ObjectMapper json = new ObjectMapper();
+        ObjectNode doc = json.createObjectNode();
+        doc.put("schema_version", 1).put("type", "shiny");
+        doc.putObject("runtime").put("language", "r").put("version", "4.4.1");
+        doc.put("entrypoint", ".");
+        doc.putObject("dependencies").put("format", "renv").put("path", "renv.lock");
+        ArrayNode files = doc.putArray("files");
+        List<String> executables = List.of(executable);
+        payload.forEach((path, bytes) -> {
+            ObjectNode entry = files.addObject().put("path", path).put("size", bytes.length)
+                    .put("sha256", sha256(bytes));
+            if (executables.contains(path)) {
+                entry.put("executable", true);
+            }
+        });
+        try {
+            return json.writeValueAsBytes(doc);
+        } catch (java.io.IOException ex) {
+            throw new java.io.UncheckedIOException(ex);
+        }
+    }
+
+    /** The manifest for {@code payload}, then every payload file under app/, in order. */
+    static TarArchives bundle(Map<String, byte[]> payload) {
+        TarArchives archive = archive().file("manifest.json", manifestFor(payload));
+        payload.forEach((path, bytes) -> archive.file("app/" + path, bytes));
+        return archive;
+    }
+
+    static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     TarArchives file(String name, byte[] content) {

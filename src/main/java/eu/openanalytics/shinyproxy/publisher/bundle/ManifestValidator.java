@@ -104,8 +104,8 @@ public final class ManifestValidator {
         }
         if (!FORMAT_OF_LANGUAGE.get(language).equals(format)) {
             throw new BundleRejection(BundleRule.MANIFEST_FORMAT_LANGUAGE_MISMATCH,
-                    "S7: dependencies.format is '" + format + "', and a " + language
-                            + " runtime uses '" + FORMAT_OF_LANGUAGE.get(language) + "'");
+                    "S7: dependencies.format is '" + format + "', and runtime.language '"
+                            + language + "' uses '" + FORMAT_OF_LANGUAGE.get(language) + "'");
         }
 
         Map<String, Declared> files = inventory(document.path("files"), limits);

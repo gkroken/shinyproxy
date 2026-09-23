@@ -26,6 +26,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Set;
 import java.util.function.LongSupplier;
 
 /**
@@ -48,13 +56,24 @@ import java.util.function.LongSupplier;
  * manifest.json is the first logical regular file". A payload member arriving before it is
  * refused rather than buffered, because the alternative is holding an unbounded amount of
  * unvalidated content while waiting for the document that says what it should be — which is
- * the shape of every bomb in the corpus. What the manifest SAYS is judged later, by the
- * validator that reads it; that it is there and that it is first is decided here.
+ * the shape of every bomb in the corpus.
+ *
+ * <p><b>And it is judged as soon as it arrives.</b> {@link ManifestValidator} (the schema and
+ * S1-S9) runs on the manifest before any payload byte is written. Each payload file must then
+ * be one the inventory lists (S11) with the size it declares, both known from the header
+ * before the content is read, and the SHA-256 it declares, known once it is (S10). At the end,
+ * nothing the inventory lists may be missing (S11). The plan orders S10/S11 after extraction;
+ * doing them while streaming is the same check, earlier, and an undeclared file never reaches
+ * the disk at all. The executable bit comes from the inventory, never from the header.
  */
 public final class BundleExtractor {
 
-    /** What a successful extraction produced. */
-    public record Extracted(ExtractionRoot root, byte[] manifest, long files, long bytes) { }
+    /**
+     * What a successful extraction produced: the payload on disk, the manifest as it arrived
+     * and as validated, and what was written.
+     */
+    public record Extracted(ExtractionRoot root, byte[] manifest,
+                            ManifestValidator.Manifest validated, long files, long bytes) { }
 
     private BundleExtractor() {
     }
@@ -104,7 +123,9 @@ public final class BundleExtractor {
                         "the archive carries no manifest.json, so nothing says what these "
                                 + collector.files + " file(s) are");
             }
-            return new Extracted(root, collector.manifest, collector.files, collector.bytes);
+            collector.requireEverythingDeclaredArrived();
+            return new Extracted(root, collector.manifest, collector.validated, collector.files,
+                    collector.bytes);
         } catch (Throwable failure) {
             // Every failure path, including the ones that are not rejections, and including
             // the envelope check that GzipMember runs when it closes. A partial extraction
@@ -131,6 +152,8 @@ public final class BundleExtractor {
         private final ExtractionLimits limits;
 
         private byte[] manifest;
+        private ManifestValidator.Manifest validated;
+        private final Set<String> written = new HashSet<>();
         private long files;
         private long bytes;
 
@@ -144,6 +167,9 @@ public final class BundleExtractor {
                 throws IOException {
             if (path.role() == MemberPath.Role.MANIFEST) {
                 manifest = readManifest(header, content);
+                // The schema and S1-S9, before a single payload byte is written: the plan's
+                // ordering, and the reason the manifest must come first.
+                validated = ManifestValidator.validate(manifest, limits);
                 return;
             }
             if (header.kind() == TarHeader.Kind.DIRECTORY) {
@@ -164,8 +190,51 @@ public final class BundleExtractor {
                                 + " nothing is written before the document describing it has"
                                 + " been read");
             }
+            ManifestValidator.Declared declared = validated.files().get(path.payloadPath());
+            if (declared == null) {
+                throw new BundleRejection(BundleRule.INVENTORY_UNDECLARED_FILE,
+                        "S11: '" + path.payloadPath() + "' is in the archive but not in the"
+                                + " manifest's files. Refused before any of it is written");
+            }
+            // The header's size is exactly what TarBlocks will deliver (it refuses a
+            // truncation and bounds the content by it), so a size that disagrees with the
+            // declaration is known here, before the content is read.
+            if (header.size() != declared.size()) {
+                throw new BundleRejection(BundleRule.INVENTORY_SIZE_MISMATCH,
+                        "S10: '" + path.payloadPath() + "' is " + header.size() + " bytes and"
+                                + " the manifest declares " + declared.size());
+            }
+            MessageDigest sha256 = sha256();
             files++;
-            bytes += root.writeFile(path, content);
+            bytes += root.writeFile(path, new DigestInputStream(content, sha256),
+                    declared.executable());
+            String actual = HexFormat.of().formatHex(sha256.digest());
+            if (!actual.equals(declared.sha256())) {
+                throw new BundleRejection(BundleRule.INVENTORY_HASH_MISMATCH,
+                        "S10: '" + path.payloadPath() + "' has SHA-256 " + actual + " and the"
+                                + " manifest declares " + declared.sha256());
+            }
+            written.add(path.payloadPath());
+        }
+
+        /** S11's other half: nothing the inventory lists may be absent. */
+        void requireEverythingDeclaredArrived() {
+            List<String> missing = new ArrayList<>(validated.files().keySet());
+            missing.removeAll(written);
+            if (!missing.isEmpty()) {
+                throw new BundleRejection(BundleRule.INVENTORY_MISSING_FILE,
+                        "S11: the manifest declares " + missing.size() + " file(s) the archive"
+                                + " does not carry, first "
+                                + missing.subList(0, Math.min(5, missing.size())));
+            }
+        }
+
+        private static MessageDigest sha256() {
+            try {
+                return MessageDigest.getInstance("SHA-256");
+            } catch (NoSuchAlgorithmException ex) {
+                throw new IllegalStateException("SHA-256 is required of every JDK", ex);
+            }
         }
 
         /**
