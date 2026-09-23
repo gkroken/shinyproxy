@@ -87,6 +87,16 @@ public enum BundleRule {
     /** The archive expands past the configured total bound. */
     ARCHIVE_TOO_LARGE_EXPANDED,
 
+    // ---- the tar stream ------------------------------------------------------------------
+    /** The archive ends inside a block, or inside a member's content. */
+    ARCHIVE_TAR_TRUNCATED,
+    /** No end-of-archive marker, or a zero block where a header should be. */
+    ARCHIVE_NO_END_MARKER,
+    /** More physical headers than the configured bound, metadata included. */
+    ENTRY_COUNT_EXCEEDED,
+    /** The extraction ran past its configured wall-clock deadline. */
+    EXTRACTION_DEADLINE_EXCEEDED,
+
     // ---- one tar header ----------------------------------------------------------------
     /** The header's own checksum does not match its bytes. */
     HEADER_CHECKSUM_MISMATCH,
