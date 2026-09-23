@@ -241,6 +241,75 @@ public class BundleExtractorTest {
     }
 
     @Test
+    public void contentExactlyAtTheExpandedCapIsAcceptedAndOneByteMoreIsNot(
+            @TempDir Path workspace) throws Exception {
+        // bomb-expanded-at-limit, which the corpus found in af58f2e: max_expanded_bytes is
+        // "total bytes written across all members", and GzipMember held the WHOLE tar
+        // stream -- headers, padding, end marker -- to it, so content exactly at the cap
+        // was refused. The manifest is member content too, and counts.
+        long cap = 8192;
+        ExtractionLimits limits = ExtractionLimits.fromOverrides(
+                Map.of("max_expanded_bytes", Long.toString(cap)));
+        byte[] manifest = "{}".getBytes(StandardCharsets.UTF_8);
+
+        byte[] atCap = gzip(TarArchives.archive()
+                .file("manifest.json", manifest)
+                .file("app/fill.bin", new byte[(int) (cap - manifest.length)])
+                .end());
+        try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(atCap),
+                atCap.length, workspace, limits).root()) {
+            assertEquals(cap - manifest.length, Files.size(root.path().resolve("fill.bin")));
+        }
+
+        byte[] overCap = gzip(TarArchives.archive()
+                .file("manifest.json", manifest)
+                .file("app/fill.bin", new byte[(int) (cap - manifest.length + 1)])
+                .end());
+        BundleRejection ex = assertThrows(BundleRejection.class,
+                () -> BundleExtractor.extract(new ByteArrayInputStream(overCap),
+                        overCap.length, workspace, limits));
+        assertEquals(BundleRule.ARCHIVE_TOO_LARGE_EXPANDED, ex.rule());
+        // Which layer refused it matters: the content bound is TarBlocks', and a stream
+        // ceiling that fired first would mean it was still counting framing as content.
+        assertTrue(ex.getMessage().contains("members extracted so far"),
+                "refused by the wrong bound: " + ex.getMessage());
+    }
+
+    @Test
+    public void anArchiveAtEveryTarBoundAtOnceFitsTheGzipCeilingExactly(@TempDir Path workspace)
+            throws Exception {
+        // The gzip layer's ceiling is DERIVED (ExtractionLimits.maxTarStreamBytes), and a
+        // derivation that forgot one kind of framing would refuse a valid archive only when
+        // that framing is at its maximum. So this one is at every maximum at once: content
+        // exactly at the cap, the full entry count, every member's content one byte past a
+        // block so each carries the most padding (511), and the longest zero tail the tar
+        // layer accepts after the marker. It decompresses to exactly the ceiling.
+        long entries = 3;
+        byte[] manifest = ("{}" + " ".repeat(511)).getBytes(StandardCharsets.UTF_8); // 513
+        byte[] one = {'x'};                                                          // 1
+        byte[] rest = new byte[10 * 512 + 1];                                        // 5121
+        long cap = manifest.length + one.length + rest.length;
+        ExtractionLimits limits = ExtractionLimits.fromOverrides(Map.of(
+                "max_expanded_bytes", Long.toString(cap),
+                "max_entries", Long.toString(entries)));
+
+        byte[] marked = TarArchives.archive()
+                .file("manifest.json", manifest)
+                .file("app/one.bin", one)
+                .file("app/rest.bin", rest)
+                .end();
+        byte[] tar = java.util.Arrays.copyOf(marked, marked.length + (int) entries * 512);
+        assertEquals(limits.maxTarStreamBytes(), tar.length,
+                "the fixture is not at every bound, so it proves nothing about the ceiling");
+
+        byte[] upload = gzip(tar);
+        try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(upload),
+                upload.length, workspace, limits).root()) {
+            assertEquals(rest.length, Files.size(root.path().resolve("rest.bin")));
+        }
+    }
+
+    @Test
     public void aCleanupThatFailsDoesNotReplaceTheFailureItWasCleaningUpAfter(
             @TempDir Path workspace) throws Exception {
         // e670073-F2. An exception thrown from a finally block discards the one in flight,

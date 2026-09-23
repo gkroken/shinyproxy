@@ -46,7 +46,9 @@ import java.util.zip.Inflater;
  * the cheaper front-door check for when it is known, and the two are deliberately the same
  * rule stated twice rather than one rule trusted twice. The expanded bound is checked
  * against bytes actually produced, which is what makes a small archive claiming to expand
- * into gigabytes die here rather than on the disk.
+ * into gigabytes die here rather than on the disk. What it is checked against is
+ * {@link ExtractionLimits#maxTarStreamBytes}, the most a tar stream within the limits can
+ * decompress to; the content cap itself is exact, and belongs to {@link TarBlocks}.
  *
  * <p><b>The checks do not depend on the caller draining.</b> A consumer that stops early —
  * a tar reader meeting the end-of-archive marker does exactly that — still gets them, because
@@ -165,10 +167,17 @@ public final class GzipMember extends InputStream {
             }
             if (produced > 0) {
                 expanded += produced;
-                if (expanded > limits.maxExpandedBytes()) {
+                // Against the tar stream's derived ceiling, not max_expanded_bytes: that is a
+                // bound on member CONTENT, which TarBlocks enforces exactly. This stream also
+                // carries headers and padding, and comparing all of it against the content cap
+                // refused a bundle whose content was exactly at the cap.
+                if (expanded > limits.maxTarStreamBytes()) {
                     throw new BundleRejection(BundleRule.ARCHIVE_TOO_LARGE_EXPANDED,
-                            "the archive has expanded to " + expanded + " bytes, over the"
-                                    + " configured " + limits.maxExpandedBytes());
+                            "the archive has decompressed to " + expanded + " bytes, more than"
+                                    + " any tar stream within the configured limits can occupy ("
+                                    + limits.maxTarStreamBytes() + ": max_expanded_bytes "
+                                    + limits.maxExpandedBytes() + " of content, plus framing"
+                                    + " for max_entries " + limits.maxEntries() + ")");
                 }
                 crc.update(output, offset, produced);
                 return produced;
@@ -274,7 +283,7 @@ public final class GzipMember extends InputStream {
                                 bytes, offset, Math.min(bytes.length, offset + 8))) + "'");
     }
 
-    /** Bytes produced so far, which is what the expanded bound is measured against. */
+    /** Bytes produced so far, which is what the tar stream ceiling is measured against. */
     public long expandedBytes() {
         return expanded;
     }

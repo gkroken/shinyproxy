@@ -167,10 +167,30 @@ public class GzipMemberTest {
                 () -> GzipMember.checkUploadSize(member.length, tooSmall)).rule(),
                 "the front-door check and the streaming one must agree about the same member");
 
-        ExtractionLimits expandedExact = limits("max_expanded_bytes", PAYLOAD.length);
-        assertArrayEquals(PAYLOAD, readFully(member, expandedExact));
+        // The expanded side is the tar stream ceiling, derived from max_expanded_bytes and
+        // max_entries, so the pair is built from the derivation rather than from a number
+        // this test would have to keep in step with it.
+        byte[] large = new byte[64 * 1024];
+        java.util.Arrays.fill(large, (byte) 't');
+        byte[] largeMember = gzip(large);
+        ExtractionLimits streamExact = streamCeiling(large.length);
+        assertEquals(large.length, streamExact.maxTarStreamBytes());
+        assertArrayEquals(large, readFully(largeMember, streamExact));
         assertEquals(BundleRule.ARCHIVE_TOO_LARGE_EXPANDED, assertThrows(BundleRejection.class,
-                () -> readFully(member, limits("max_expanded_bytes", PAYLOAD.length - 1))).rule());
+                () -> readFully(largeMember, streamCeiling(large.length - 1))).rule());
+    }
+
+    @Test
+    public void theGzipCeilingIsTheTarStreamsNotTheContentCap() throws Exception {
+        // bomb-expanded-at-limit (found by the corpus in af58f2e). max_expanded_bytes is
+        // member content; this stream also carries headers and padding. Holding the stream
+        // to the content cap refused a bundle whose content was exactly at the cap.
+        byte[] large = new byte[64 * 1024];
+        ExtractionLimits contentCap = ExtractionLimits.fromOverrides(Map.of(
+                "max_expanded_bytes", Long.toString(large.length - 1024),
+                "max_entries", "4"));
+        assertArrayEquals(large, readFully(gzip(large), contentCap),
+                "a stream larger than the content cap by less than its framing was refused");
     }
 
     @Test
@@ -179,7 +199,7 @@ public class GzipMemberTest {
         assertTrue(bomb.length < 128 * 1024,
                 "the fixture is only interesting if it is small: " + bomb.length);
 
-        ExtractionLimits tight = limits("max_expanded_bytes", 1024);
+        ExtractionLimits tight = streamCeiling(4096);
         GzipMember member = GzipMember.open(new ByteArrayInputStream(bomb), tight);
         BundleRejection ex = assertThrows(BundleRejection.class, () -> drain(member));
         assertEquals(BundleRule.ARCHIVE_TOO_LARGE_EXPANDED, ex.rule());
@@ -218,8 +238,9 @@ public class GzipMemberTest {
         // is already unwinding for. The first reason a bundle was refused is the one worth
         // reporting, and the expanded bound below would otherwise be reported as whatever
         // the rest of the member turned out to contain.
-        byte[] smuggled = concat(gzip(PAYLOAD), gzip(PAYLOAD));
-        ExtractionLimits tight = limits("max_expanded_bytes", 32);
+        byte[] large = new byte[64 * 1024];
+        byte[] smuggled = concat(gzip(large), gzip(large));
+        ExtractionLimits tight = streamCeiling(4096);
 
         BundleRejection ex = assertThrows(BundleRejection.class, () -> {
             try (GzipMember member = GzipMember.open(new ByteArrayInputStream(smuggled), tight)) {
@@ -239,6 +260,17 @@ public class GzipMemberTest {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /**
+     * Limits whose derived tar stream ceiling is exactly {@code bytes}: one entry, and the
+     * content cap that leaves. Computed from the derivation itself.
+     */
+    private static ExtractionLimits streamCeiling(long bytes) {
+        long framing = ExtractionLimits.fromOverrides(Map.of("max_entries", "1",
+                "max_expanded_bytes", "1")).maxTarStreamBytes() - 1;
+        return ExtractionLimits.fromOverrides(Map.of("max_entries", "1",
+                "max_expanded_bytes", Long.toString(bytes - framing)));
+    }
 
     private static ExtractionLimits limits(String bound, long value) {
         return ExtractionLimits.fromOverrides(Map.of(bound, Long.toString(value)));

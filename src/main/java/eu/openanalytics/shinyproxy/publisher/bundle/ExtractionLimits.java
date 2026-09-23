@@ -104,6 +104,9 @@ public final class ExtractionLimits {
 
     private static final Map<Bound, Declaration> SPEC = loadSpec(SPEC_RESOURCE);
 
+    /** The tar block size, for {@link #maxTarStreamBytes}. */
+    private static final long TAR_BLOCK = 512;
+
     private final Map<Bound, Long> values;
 
     private ExtractionLimits(Map<Bound, Long> values) {
@@ -207,6 +210,32 @@ public final class ExtractionLimits {
 
     public long maxExpandedBytes() {
         return get(Bound.MAX_EXPANDED_BYTES);
+    }
+
+    /**
+     * The most bytes a tar stream inside these limits can decompress to. Derived, not
+     * configured.
+     *
+     * <p>{@code max_expanded_bytes} is "total bytes written across all members": member
+     * content. A tar stream also carries a 512-byte header per entry, up to 511 bytes of
+     * padding after each member's content, a 1024-byte end marker, and a zero tail after the
+     * marker. {@link TarBlocks} bounds each: content by {@code max_expanded_bytes}, headers by
+     * {@code max_entries}, the tail by {@code max_entries} blocks. This is their sum, so
+     * {@link GzipMember} can bound its output without a number of its own, and without ever
+     * firing on an archive the tar layer would accept.
+     *
+     * <p>{@link GzipMember} used to compare the whole decompressed stream against
+     * {@code max_expanded_bytes} itself, so a bundle whose content was exactly at the cap was
+     * refused for its framing (corpus fixture {@code bomb-expanded-at-limit}, found in
+     * af58f2e). Overflow-safe: {@link Math#addExact} and {@link Math#multiplyExact} throw
+     * rather than wrap if the absolute maxima are ever raised past what a long holds.
+     */
+    public long maxTarStreamBytes() {
+        long perEntry = TAR_BLOCK            // its header
+                + (TAR_BLOCK - 1)            // the most padding after its content
+                + TAR_BLOCK;                 // one block of the zero tail
+        return Math.addExact(maxExpandedBytes(),
+                Math.addExact(Math.multiplyExact(maxEntries(), perEntry), 2L * TAR_BLOCK));
     }
 
     public long maxFileBytes() {
