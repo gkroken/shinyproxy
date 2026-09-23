@@ -82,7 +82,6 @@ public final class BundleExtractor {
 
         ExtractionRoot root = ExtractionRoot.createUnder(workspace);
         Collector collector = new Collector(root, limits);
-        boolean kept = false;
         try (GzipMember member = GzipMember.open(upload, limits)) {
             TarStream.walk(member, limits, nanoTime, collector);
             if (collector.manifest == null) {
@@ -90,15 +89,23 @@ public final class BundleExtractor {
                         "the archive carries no manifest.json, so nothing says what these "
                                 + collector.files + " file(s) are");
             }
-            kept = true;
             return new Extracted(root, collector.manifest, collector.files, collector.bytes);
-        } finally {
-            if (!kept) {
-                // Every failure path, including the ones that are not rejections. A partial
-                // extraction left on disk is a directory some later step may mistake for a
-                // validated one.
+        } catch (Throwable failure) {
+            // Every failure path, including the ones that are not rejections, and including
+            // the envelope check that GzipMember runs when it closes. A partial extraction
+            // left on disk is a directory some later step may mistake for a validated one.
+            //
+            // Not a finally block: an exception thrown from one discards the exception in
+            // flight, so a delete that failed would replace the BundleRejection naming the
+            // rule with an IOException about the filesystem — losing the rule AND leaving
+            // the tree, which is both halves of what this method promises (e670073-F2). The
+            // cleanup's own failure is attached to the original instead.
+            try {
                 root.deleteTree();
+            } catch (Throwable cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
             }
+            throw failure;
         }
     }
 
@@ -124,16 +131,23 @@ public final class BundleExtractor {
                 manifest = readManifest(header, content);
                 return;
             }
+            if (header.kind() == TarHeader.Kind.DIRECTORY) {
+                // Directory headers are permitted before the manifest. The contract's two
+                // clauses are separate — "root manifest.json is the first logical regular
+                // FILE" and "optional directory headers are permitted" — and refusing on
+                // both made the same archive accepted or refused depending only on whether
+                // its 'app/' header came before or after the manifest (finding e670073-F1).
+                // A directory header carries no content, so the reason the rule exists does
+                // not reach it either.
+                root.createDirectory(path);
+                return;
+            }
             if (manifest == null) {
                 throw new BundleRejection(BundleRule.MANIFEST_NOT_FIRST,
                         "'" + path.memberPath() + "' arrives before manifest.json. The"
                                 + " manifest is the first logical regular file, so that"
                                 + " nothing is written before the document describing it has"
                                 + " been read");
-            }
-            if (header.kind() == TarHeader.Kind.DIRECTORY) {
-                root.createDirectory(path);
-                return;
             }
             files++;
             bytes += root.writeFile(path, content);

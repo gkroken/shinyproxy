@@ -1161,12 +1161,13 @@ below are marked passed by this planning document.
       **T2(a) done 2026-09-17 — the corpus and its self-check.** The oracle, the sentinels
       and the deliberately unsafe extractor are T2(b) and are what the Pass line above
       actually turns on; this is the material they will be pointed at. Counts below are as
-      of the limits slice (2026-09-18): 90 fixtures, 19 accepted, 80 predicates, 18 hostile
-      properties.
+      of 2026-09-23: 91 fixtures, 20 accepted, 80 predicates, 18 hostile properties.
 
-      - `dev/fixtures/bundles/generate.py` builds **90 fixtures** across all seven required
-        groups: 14 positive controls, 10 traversal, 6 links, 20 bombs, 13 types and path
-        limits, 8 duplicate/alias, 19 manifest and inventory. Standard library only, no
+      - `dev/fixtures/bundles/generate.py` builds **91 fixtures** across all seven required
+        groups: 15 positive controls, 10 traversal, 6 links, 20 bombs, 13 types and path
+        limits, 8 duplicate/alias, 19 manifest and inventory. The fifteenth positive is
+        `pos-leading-dir-header`, added at T5 after finding e670073-F1: a directory header
+        before the manifest, which the contract permits and which nothing here covered. Standard library only, no
         import of any Skald class, and hand-written tar headers wherever a polite writer
         would refuse — a negative size, a NUL inside a name, a bad checksum, a GNU sparse
         member, an undefined typeflag. A corpus built solely with a well-behaved library

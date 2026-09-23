@@ -420,6 +420,18 @@ def _(b):
     b.add("app/bin/run.sh", script, mode=0o755)
 
 
+@fixture("pos-leading-dir-header", "positive", "accept", "-",
+         "a directory header BEFORE the manifest. The ordering rule is about the first "
+         "regular file, and the next sentence of the same contract permits optional "
+         "directory headers -- so an extractor that refuses any member before the manifest "
+         "accepts or refuses one archive depending only on where its 'app/' header sits. "
+         "Added after finding e670073-F1, which nothing in this corpus caught")
+def _(b):
+    b.add_dir("app")
+    b.add_manifest(manifest(files=[entry("app.R", R_APP), entry("renv.lock", RENV)]))
+    b.add("app/app.R", R_APP).add("app/renv.lock", RENV)
+
+
 @fixture("pos-explicit-dir-headers", "positive", "accept", "-",
          "directory headers present; they are optional and must not be required")
 def _(b):

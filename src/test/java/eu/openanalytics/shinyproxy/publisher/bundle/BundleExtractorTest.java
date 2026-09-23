@@ -32,6 +32,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
@@ -169,6 +170,23 @@ public class BundleExtractorTest {
         assertEquals(BundleRule.MANIFEST_NOT_FIRST, refusalFor(late, workspace));
         assertEmpty(workspace);
 
+        // But a DIRECTORY header before the manifest is permitted: the contract's ordering
+        // clause is about the first regular FILE, and its next sentence permits optional
+        // directory headers. Refusing both made one archive accepted or refused depending
+        // only on where its 'app/' header sat (e670073-F1). The pair is what distinguishes
+        // "first regular file" from "first member", so both halves are here.
+        byte[] leadingDirectory = gzip(TarArchives.archive()
+                .directory("app")
+                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
+                .file("app/app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8))
+                .end());
+        try (ExtractionRoot root = BundleExtractor.extract(
+                new ByteArrayInputStream(leadingDirectory), leadingDirectory.length,
+                workspace, LIMITS).root()) {
+            assertEquals("library(shiny)\n", Files.readString(root.path().resolve("app.R")));
+            root.deleteTree();
+        }
+
         byte[] missing = gzip(TarArchives.archive()
                 .file("app/app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8))
                 .end());
@@ -221,6 +239,62 @@ public class BundleExtractorTest {
                 () -> BundleExtractor.extract(source, upload.length, workspace, tiny)).rule());
         assertEquals(0, source.read, "the upload was read before its declared length was checked");
         assertEmpty(workspace);
+    }
+
+    @Test
+    public void aCleanupThatFailsDoesNotReplaceTheFailureItWasCleaningUpAfter(
+            @TempDir Path workspace) throws Exception {
+        // e670073-F2. An exception thrown from a finally block discards the one in flight,
+        // so a delete that failed would replace the rejection naming the rule with an
+        // IOException about the filesystem — losing the rule AND leaving the tree.
+        //
+        // The review could not arrange for deleteTree to fail from outside, and neither
+        // could I from the workspace alone: the root is ours and writable. But the hostile
+        // source can do it. It makes the workspace read-only on its way out, so removing the
+        // root directory from it fails, and the original failure has to survive that.
+        byte[] upload = gzip(TarArchives.archive()
+                .file("manifest.json", "{}".getBytes(StandardCharsets.UTF_8))
+                .file("app/one.txt", "one".getBytes(StandardCharsets.UTF_8))
+                .end());
+
+        InputStream sabotage = new InputStream() {
+            private final ByteArrayInputStream delegate = new ByteArrayInputStream(upload);
+            private int served;
+
+            @Override
+            public int read() {
+                throw new IllegalStateException("unused");
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) throws IOException {
+                if (served >= upload.length / 2) {
+                    Files.setPosixFilePermissions(workspace,
+                            PosixFilePermissions.fromString("r-x------"));
+                    throw new IllegalStateException("the storage layer gave up");
+                }
+                int n = delegate.read(buffer, offset, Math.min(length, 64));
+                served += Math.max(n, 0);
+                return n;
+            }
+        };
+
+        try {
+            IllegalStateException ex = assertThrows(IllegalStateException.class,
+                    () -> BundleExtractor.extract(sabotage, upload.length, workspace, LIMITS));
+            assertEquals("the storage layer gave up", ex.getMessage(),
+                    "the cleanup's own failure replaced the failure it was cleaning up after");
+            // Two, not one: closing the gzip member fails on the same hostile source, and
+            // that failure is attached as well. Asserting exactly one would have been an
+            // assertion about the fixture rather than about the rule.
+            assertTrue(java.util.Arrays.stream(ex.getSuppressed())
+                            .anyMatch(IOException.class::isInstance),
+                    "the cleanup failed and said nothing about it; suppressed: "
+                            + java.util.Arrays.toString(ex.getSuppressed()));
+        } finally {
+            Files.setPosixFilePermissions(workspace,
+                    PosixFilePermissions.fromString("rwx------"));
+        }
     }
 
     // ------------------------------------------------------------------ helpers

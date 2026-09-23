@@ -94,6 +94,16 @@
       "bytes": 620
     },
     {
+      "name": "pos-leading-dir-header",
+      "group": "positive",
+      "expect": "accept",
+      "rule": "-",
+      "why": "a directory header BEFORE the manifest. The ordering rule is about the first regular file, and the next sentence of the same contract permits optional directory headers -- so an extractor that refuses any member before the manifest accepts or refuses one archive depending only on where its 'app/' header sits. Added after finding e670073-F1, which nothing in this corpus caught",
+      "pins": false,
+      "sha256": "6a75eef830744675f598345cacb8550bc10996d864210a9291060d161d4c1a35",
+      "bytes": 529
+    },
+    {
       "name": "pos-explicit-dir-headers",
       "group": "positive",
       "expect": "accept",
