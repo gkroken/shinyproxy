@@ -247,6 +247,62 @@ public class TarBlocksTest {
                 () -> content.read(new byte[8192], 0, 8192)).rule());
     }
 
+    @Test
+    public void aZeroTailIsBoundedBySomethingOtherThanTheClock() {
+        // e079be4-F1. Padding is neither an entry nor content, so before this it was the one
+        // region of an archive that no size bound reached: 256 MiB of trailing zeros was
+        // accepted in 179 ms, and at that rate the deadline alone permits tens of gigabytes
+        // of tail from an upload well inside max_compressed_bytes.
+        ExtractionLimits four = ExtractionLimits.fromOverrides(Map.of("max_entries", "4"));
+
+        // Four blocks of padding is the accepted half: real archives pad to a 10 KiB record.
+        byte[] within = concat(concat(block('a'), marker()), zeros(4 * TarHeader.BLOCK));
+        TarBlocks ok = new TarBlocks(new ByteArrayInputStream(within), four);
+        assertNotNull(ok.nextHeader());
+        assertNull(ok.nextHeader());
+
+        byte[] beyond = concat(concat(block('a'), marker()), zeros(5 * TarHeader.BLOCK));
+        TarBlocks over = new TarBlocks(new ByteArrayInputStream(beyond), four);
+        assertNotNull(over.nextHeader());
+        BundleRejection ex = assertThrows(BundleRejection.class, over::nextHeader);
+        assertEquals(BundleRule.ENTRY_COUNT_EXCEEDED, ex.rule());
+        assertTrue(ex.getMessage().contains("padding"),
+                "the rejection has to say it is about the tail rather than about members: "
+                        + ex.getMessage());
+
+        // And the clock is not what stopped it: this clock never moves.
+        TarBlocks frozen = new TarBlocks(new ByteArrayInputStream(beyond), four, () -> 0L);
+        frozen.nextHeader();
+        assertEquals(BundleRule.ENTRY_COUNT_EXCEEDED,
+                assertThrows(BundleRejection.class, frozen::nextHeader).rule());
+    }
+
+    @Test
+    public void aNegativeContentSizeIsACallerErrorRatherThanASkewedStream() {
+        // e079be4-F2. Unguarded, content(-1) makes the padding computation consume one byte,
+        // so every later block starts one byte late and the archive fails as truncated —
+        // a real defect reported as something else entirely.
+        byte[] archive = concat(concat(block('a'), block('B')), marker());
+        TarBlocks blocks = new TarBlocks(new ByteArrayInputStream(archive), LIMITS);
+        assertNotNull(blocks.nextHeader());
+
+        assertThrows(IllegalArgumentException.class, () -> blocks.content(-1));
+
+        // The control: zero is a legitimate size, and the stream stays aligned across it.
+        assertEquals(0, drainQuietly(blocks.content(0)).length);
+        assertEquals('B', blocks.nextHeader()[0],
+                "the next header did not start where it should, so the guard is hiding a"
+                        + " skew rather than preventing one");
+    }
+
+    private static byte[] drainQuietly(InputStream in) {
+        try {
+            return drain(in);
+        } catch (IOException ex) {
+            throw new AssertionError(ex);
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static byte[] drain(InputStream in) throws IOException {

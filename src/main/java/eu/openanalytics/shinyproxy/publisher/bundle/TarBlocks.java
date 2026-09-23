@@ -125,6 +125,16 @@ public final class TarBlocks {
      * block boundary, and anything left unread, are dealt with before the next header.
      */
     public InputStream content(long size) {
+        if (size < 0) {
+            // Not a bundle defect: TarHeader refuses a negative declared size when it parses
+            // the octal field, so the walk cannot produce one. It is a caller error, and an
+            // unguarded one skews the stream — a size of -1 makes the padding computation
+            // consume one byte and every subsequent block starts one byte late
+            // (finding e079be4-F2). The class promises alignment; a caller must not be able
+            // to break it by passing a value the class accepted without comment.
+            throw new IllegalArgumentException("a member's content size cannot be negative: "
+                    + size);
+        }
         finishOpenContent();
         open = new BoundedContent(size);
         return open;
@@ -156,11 +166,25 @@ public final class TarBlocks {
         // Everything after the marker must be padding. Anything else is a second archive or
         // an appendix, and either way the bundle has more than one meaning.
         byte[] after;
+        long padding = 0;
         while ((after = readBlock("padding after the end-of-archive marker")) != null) {
             if (!TarHeader.isAllZero(after)) {
                 throw new BundleRejection(BundleRule.ARCHIVE_TRAILING_DATA,
                         "there is data after the end-of-archive marker, beginning '"
                                 + BundleRejection.renderBounded(after, 32, false) + "'");
+            }
+            // Padding is neither an entry nor member content, so without this it is the one
+            // region of an archive that no size bound reaches and only the deadline ends
+            // (finding e079be4-F1). GNU tar's default blocking factor is twenty blocks, so a
+            // real archive carries about 10 KiB here; the entry bound is reused rather than
+            // inventing a number, which leaves three orders of magnitude of headroom at the
+            // documented default and moves with an operator who changes it.
+            if (++padding > limits.maxEntries()) {
+                throw new BundleRejection(BundleRule.ENTRY_COUNT_EXCEEDED,
+                        "more than the configured " + limits.maxEntries() + " blocks of"
+                                + " padding after the end-of-archive marker. A zero tail is"
+                                + " neither an entry nor content, so the entry bound is what"
+                                + " counts it");
             }
             checkDeadline();
         }
