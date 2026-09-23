@@ -107,6 +107,16 @@ public enum BundleRule {
     /** A member larger than the configured per-file bound. */
     ENTRY_TOO_LARGE,
 
+    // ---- PAX extended headers ------------------------------------------------------------
+    /** An extended header larger than the configured per-header bound. */
+    PAX_HEADER_TOO_LARGE,
+    /** A record that does not parse: a bad length, a missing '=' or a missing newline. */
+    PAX_RECORD_MALFORMED,
+    /** A keyword this extractor does not accept, because honouring it changes what a member is. */
+    PAX_KEYWORD_NOT_ALLOWED,
+    /** The same keyword twice in one header; two readers would disagree about which wins. */
+    PAX_DUPLICATE_KEYWORD,
+
     // ---- members against each other ----------------------------------------------------
     /** The same member path twice. Last-entry-wins means what was validated is not what is on disk. */
     DUPLICATE_MEMBER,
