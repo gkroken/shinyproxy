@@ -80,7 +80,22 @@ public final class BundleExtractor {
             GzipMember.checkUploadSize(uploadSize, limits);
         }
 
-        ExtractionRoot root = ExtractionRoot.createUnder(workspace);
+        return extractInto(ExtractionRoot.createUnder(workspace), upload, limits, nanoTime);
+    }
+
+    /**
+     * The same, into a root that has already been adopted.
+     *
+     * <p>Package-private, and split out only so the independent corpus oracle can judge this
+     * code rather than a reference extractor: the oracle hands its subject an existing
+     * directory, which a test-tree adapter adopts through
+     * {@link ExtractionRoot#adopt} — the same identity, no-follow and permission checks
+     * {@link ExtractionRoot#createUnder} ends in. Production never takes this path; it
+     * always creates the root itself.
+     */
+    static Extracted extractInto(ExtractionRoot root, InputStream upload,
+                                 ExtractionLimits limits, LongSupplier nanoTime)
+            throws IOException {
         Collector collector = new Collector(root, limits);
         try (GzipMember member = GzipMember.open(upload, limits)) {
             TarStream.walk(member, limits, nanoTime, collector);
