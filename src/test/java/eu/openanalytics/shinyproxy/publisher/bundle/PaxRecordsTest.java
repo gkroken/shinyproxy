@@ -240,11 +240,16 @@ public class PaxRecordsTest {
 
     @Test
     public void theRecordBuilderIsRightAtEveryLengthItWillBeUsedAt() {
-        // The helper's own test. Every keyword length from 1 to 200 crosses the powers of
-        // ten where a guessed digit count goes wrong — 94 is where the previous version
-        // produced a record with a silently empty value (3b37820-F1) — and each record is
-        // parsed back to prove it says what it was asked to say.
-        for (int length = 1; length <= 200; length++) {
+        // The helper's own test. The arithmetic depends only on the SUM of the parts, so
+        // sweeping one dimension contiguously covers every body length in the range however
+        // it is split — but the range has to reach the boundaries that matter. 94 is where
+        // the previous version produced a record with a silently empty value (3b37820-F1);
+        // the next boundary is where the body crosses 997-999, and that is exactly where a
+        // realistic long `path` override lands, since PAX exists for names that do not fit a
+        // header field and max_path_bytes defaults to 1024 (e8b2f66-F1). The sweep now runs
+        // past it, and the four-to-five digit boundary is checked directly below.
+        java.util.Set<Integer> widths = new java.util.TreeSet<>();
+        for (int length = 1; length <= 1100; length++) {
             byte[] keyword = new byte[length];
             java.util.Arrays.fill(keyword, (byte) 'k');
             keyword[0] = 'p';
@@ -261,7 +266,35 @@ public class PaxRecordsTest {
                             + " disagree, so the record the test built is not the record the"
                             + " test named");
             assertEquals('\n', record[record.length - 1]);
+            widths.add(space);
         }
+        // The sweep has to CROSS the boundaries, not merely be long. Shortening it back to
+        // 200 fails here rather than passing quietly with less coverage — which is the only
+        // way to guard a range, since a mutation that is wrong only past 999 and right below
+        // it is contrived enough to prove nothing.
+        assertEquals(java.util.Set.of(2, 3, 4), widths,
+                "the sweep did not cross both the two/three and three/four digit boundaries");
+
+        // The four-digit to five-digit boundary, reached with a long value rather than a
+        // 10,000-iteration sweep.
+        // 9980..9995 is where the total crosses 10000 for a 4-byte keyword. The first
+        // version of this loop ran 9990..10010, which is entirely above the boundary: every
+        // record in it had a five-digit field, so the assertion below held no matter how
+        // short the loop was, and shortening it survived as a mutation.
+        java.util.Set<Integer> wideWidths = new java.util.TreeSet<>();
+        for (int value = 9980; value <= 9995; value++) {
+            byte[] record = paxRecord("path".getBytes(StandardCharsets.UTF_8), new byte[value]);
+            int space = 0;
+            while (record[space] != ' ') {
+                space++;
+            }
+            assertEquals(record.length,
+                    Integer.parseInt(new String(record, 0, space, StandardCharsets.UTF_8)),
+                    "at value length " + value + " the length field and the record disagree");
+            wideWidths.add(space);
+        }
+        assertEquals(java.util.Set.of(4, 5), wideWidths,
+                "the loop did not straddle the four/five digit boundary");
 
         // And one end to end through the parser, at the length that used to break.
         byte[] keyword = new byte[94];
