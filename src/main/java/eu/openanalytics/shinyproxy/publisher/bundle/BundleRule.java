@@ -138,6 +138,14 @@ public enum BundleRule {
     /** Two paths differing only by case, which are one file on a case-insensitive filesystem. */
     MEMBER_CASE_COLLISION,
 
+    // ---- writing it down -----------------------------------------------------------------
+    /** This platform cannot supply descriptor-relative, no-follow filesystem operations. */
+    PLATFORM_UNSAFE_FILESYSTEM,
+    /** The extraction root is not a private directory this extractor created and owns. */
+    EXTRACTION_ROOT_UNSAFE,
+    /** A path component changed under the extractor, or was never what it claimed to be. */
+    WRITE_PATH_NOT_AS_EXPECTED,
+
     // ---- archive layout ----------------------------------------------------------------
     /** A member that is neither the manifest nor under the payload root. */
     LAYOUT_UNEXPECTED_MEMBER;
