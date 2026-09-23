@@ -212,6 +212,74 @@ public class ExtractionRootTest {
     }
 
     @Test
+    public void theManifestIsNotAPayloadFileAndIsRefusedHere(@TempDir Path tmp) throws Exception {
+        // d13212e-F1. manifest.json is a MANIFEST-role member with no payload segments, and
+        // writeFile reached subList(0, -1) on it: an untyped IllegalArgumentException out of
+        // the only class that writes to a disk, on the first member of every bundle.
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work")) {
+            MemberPath manifest = member("manifest.json");
+            assertEquals(MemberPath.Role.MANIFEST, manifest.role());
+            assertTrue(manifest.payloadSegments().isEmpty());
+
+            BundleRejection ex = assertThrows(BundleRejection.class,
+                    () -> root.writeFile(manifest,
+                            new ByteArrayInputStream("{}".getBytes(StandardCharsets.UTF_8))));
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule());
+
+            // The reason it is refused rather than written at the root: a bundle may carry
+            // its own app/manifest.json, which lands exactly there.
+            root.writeFile(member("app/manifest.json"),
+                    new ByteArrayInputStream("payload".getBytes(StandardCharsets.UTF_8)));
+            assertEquals("payload", Files.readString(root.path().resolve("manifest.json")));
+        }
+    }
+
+    @Test
+    public void adoptingARootChecksWhatTheDescriptorPointsAt(@TempDir Path tmp) throws Exception {
+        // d13212e-F2. From outside, each of these needs a swap between the create and the
+        // open, which no deterministic test can arrange; adopt() takes its expectations as
+        // arguments so they are three ordinary cases.
+        Path real = Files.createDirectory(tmp.resolve("real"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        Path other = Files.createDirectory(tmp.resolve("other"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        Path loose = Files.createDirectory(tmp.resolve("loose"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+        Files.createSymbolicLink(tmp.resolve("link"), real);
+        Object realKey = Files.readAttributes(real, java.nio.file.attribute.BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS).fileKey();
+        Object looseKey = Files.readAttributes(loose, java.nio.file.attribute.BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS).fileKey();
+
+        // A symbolic link where the root should be: refused at the open, not by a later
+        // check of the same name.
+        assertEquals(BundleRule.EXTRACTION_ROOT_UNSAFE,
+                assertThrows(BundleRejection.class,
+                        () -> ExtractionRoot.adopt(parentOf(tmp), real, "link", realKey)).rule());
+
+        // A different directory in its place: the open succeeds and the identity does not.
+        BundleRejection swapped = assertThrows(BundleRejection.class,
+                () -> ExtractionRoot.adopt(parentOf(tmp), other, "other", realKey));
+        assertEquals(BundleRule.EXTRACTION_ROOT_UNSAFE, swapped.rule());
+        assertTrue(swapped.getMessage().contains("not the one it created"), swapped.getMessage());
+
+        // The right directory, not private: this extractor is not its only writer.
+        BundleRejection open = assertThrows(BundleRejection.class,
+                () -> ExtractionRoot.adopt(parentOf(tmp), loose, "loose", looseKey));
+        assertEquals(BundleRule.EXTRACTION_ROOT_UNSAFE, open.rule());
+        assertTrue(open.getMessage().contains("rather than private"), open.getMessage());
+
+        // The control: the directory that was created, private, opens and is adopted.
+        try (ExtractionRoot adopted = ExtractionRoot.adopt(parentOf(tmp), real, "real", realKey)) {
+            assertEquals(real, adopted.path());
+        }
+    }
+
+    private static SecureDirectoryStream<Path> parentOf(Path directory) throws IOException {
+        return (SecureDirectoryStream<Path>) Files.newDirectoryStream(directory);
+    }
+
+    @Test
     public void aPlatformWithoutDescriptorRelativeStreamsIsRefused(@TempDir Path tmp)
             throws Exception {
         // The guard that cannot fire here. Removing it altogether survived as a mutation,

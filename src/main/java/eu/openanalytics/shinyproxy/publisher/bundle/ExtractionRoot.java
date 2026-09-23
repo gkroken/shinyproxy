@@ -33,6 +33,9 @@ import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayDeque;
@@ -77,34 +80,100 @@ public final class ExtractionRoot implements AutoCloseable {
 
     private final Path root;
     private final SecureDirectoryStream<Path> rootStream;
+    private final DirectoryStream<Path> parentStream;
 
-    private ExtractionRoot(Path root, SecureDirectoryStream<Path> rootStream) {
+    private ExtractionRoot(Path root, SecureDirectoryStream<Path> rootStream,
+                           DirectoryStream<Path> parentStream) {
         this.root = root;
         this.rootStream = rootStream;
+        // Held open for the object's lifetime rather than closed after the adoption: the
+        // documented relationship between a SecureDirectoryStream and one opened through it
+        // does not promise the child survives the parent, and assuming it does would be an
+        // assumption in the one place this class exists to remove them from.
+        this.parentStream = parentStream;
     }
 
     /**
-     * Creates a fresh private directory under {@code parent} and opens it safely.
+     * Creates a fresh private directory under {@code parent} and adopts it safely.
      *
-     * @throws BundleRejection if the platform cannot supply the primitives, or if the
-     *                         directory that was created is not the one that opens
+     * <p>The sequence used to be create by name, open by name following links, then check by
+     * name — three resolutions of one name, in the single call that establishes what "inside
+     * the root" means, using the pattern this class's own javadoc calls insufficient. An
+     * actor able to write in {@code parent} could replace the new directory with a symlink
+     * between the create and the open and restore a real directory before the check, leaving
+     * this object holding a descriptor on a directory of their choosing — after which every
+     * descriptor-relative operation below is faithfully relative to the wrong root
+     * (finding d13212e-F2).
+     *
+     * <p>Now the directory is created, its identity recorded, and then opened THROUGH the
+     * parent's descriptor with links refused — and the open directory is required to be the
+     * same inode that was created. A swap is refused whether or not it is restored, because
+     * the check is on what the descriptor points at rather than on what the name resolves to
+     * a third time.
      */
     public static ExtractionRoot createUnder(Path parent, String name) throws IOException {
         FileAttribute<Set<PosixFilePermission>> mode =
                 PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY);
-        Path root = Files.createDirectory(parent.resolve(name), mode);
+        Path created = Files.createDirectory(parent.resolve(name), mode);
+        Object createdKey = Files.readAttributes(created, BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS).fileKey();
 
-        // Opened NOFOLLOW so that a root replaced by a symlink between the create and the
-        // open is refused rather than followed. The permissions are re-read from the open
-        // directory rather than trusted from the create.
-        DirectoryStream<Path> stream = Files.newDirectoryStream(root);
-        requireDescriptorRelative(stream);
-        if (Files.isSymbolicLink(root)) {
-            stream.close();
-            throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE,
-                    "the extraction root is a symbolic link");
+        DirectoryStream<Path> parentStream = Files.newDirectoryStream(parent);
+        boolean adopted = false;
+        try {
+            requireDescriptorRelative(parentStream);
+            ExtractionRoot root = adopt((SecureDirectoryStream<Path>) parentStream, created,
+                    name, createdKey);
+            adopted = true;
+            return root;
+        } finally {
+            if (!adopted) {
+                parentStream.close();
+            }
         }
-        return new ExtractionRoot(root, (SecureDirectoryStream<Path>) stream);
+    }
+
+    /**
+     * Opens {@code name} under an already-open parent and checks it is the directory that was
+     * created.
+     *
+     * <p>Package-private and taking its expectations as arguments so the three refusals can
+     * be exercised. From outside, each of them needs a swap between the create and the open,
+     * which no deterministic test can arrange; from here they are three ordinary cases.
+     */
+    static ExtractionRoot adopt(SecureDirectoryStream<Path> parentStream, Path root,
+                                String name, Object expectedKey) throws IOException {
+        SecureDirectoryStream<Path> rootStream;
+        try {
+            rootStream = parentStream.newDirectoryStream(Path.of(name),
+                    LinkOption.NOFOLLOW_LINKS);
+        } catch (IOException ex) {
+            parentStream.close();
+            throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE,
+                    "the extraction root could not be opened as a directory through its"
+                            + " parent's descriptor (" + ex.getClass().getSimpleName()
+                            + "); a symbolic link in its place is the usual cause");
+        }
+        try {
+            PosixFileAttributes attributes = rootStream.getFileAttributeView(
+                    PosixFileAttributeView.class).readAttributes();
+            if (!attributes.fileKey().equals(expectedKey)) {
+                throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE,
+                        "the directory this extractor opened is not the one it created;"
+                                + " something replaced it between the two");
+            }
+            if (!attributes.permissions().equals(PRIVATE_DIRECTORY)) {
+                throw new BundleRejection(BundleRule.EXTRACTION_ROOT_UNSAFE,
+                        "the extraction root is " + PosixFilePermissions.toString(
+                                attributes.permissions()) + " rather than private, so this"
+                                + " extractor is not its only writer");
+            }
+        } catch (RuntimeException | IOException ex) {
+            rootStream.close();
+            parentStream.close();
+            throw ex;
+        }
+        return new ExtractionRoot(root, rootStream, parentStream);
     }
 
     /**
@@ -138,7 +207,7 @@ public final class ExtractionRoot implements AutoCloseable {
      * @return the number of bytes written
      */
     public long writeFile(MemberPath member, InputStream content) throws IOException {
-        List<String> segments = member.payloadSegments();
+        List<String> segments = requirePayload(member);
         Deque<SecureDirectoryStream<Path>> opened = new ArrayDeque<>();
         try {
             SecureDirectoryStream<Path> directory = descend(segments.subList(0, segments.size() - 1),
@@ -160,6 +229,33 @@ public final class ExtractionRoot implements AutoCloseable {
         } finally {
             closeAll(opened);
         }
+    }
+
+    /**
+     * The members this directory holds, which is the payload and nothing else.
+     *
+     * <p>This directory IS the payload root: {@code app/www/x} lands at {@code <root>/www/x},
+     * because the {@code app/} prefix is the platform's rather than the publisher's. The
+     * manifest is not part of that namespace and must not be written into it — a bundle may
+     * legitimately contain {@code app/manifest.json}, which lands at {@code <root>/manifest.json}
+     * and would collide with the archive-root manifest put in the same place. MemberIndex
+     * does not catch that pair, because {@code manifest.json} and {@code app/manifest.json}
+     * are two different members; only keeping the manifest out of this directory does.
+     *
+     * <p>So a non-payload member is refused here and the caller routes it elsewhere. Before
+     * this, {@code writeFile} reached {@code subList(0, -1)} on the manifest and threw an
+     * untyped IllegalArgumentException out of the middle of the only class that writes to a
+     * disk — on the first member of every well-formed bundle (finding d13212e-F1).
+     */
+    private static List<String> requirePayload(MemberPath member) {
+        if (member.role() != MemberPath.Role.PAYLOAD || member.payloadSegments().isEmpty()) {
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + member.memberPath() + "' is not a payload file. This directory is"
+                            + " the payload root, and a bundle may carry its own"
+                            + " 'app/manifest.json'; putting the archive's manifest here too"
+                            + " would put two different members at one path");
+        }
+        return member.payloadSegments();
     }
 
     /** Creates the directory a member declares, and the directories above it. */
@@ -253,7 +349,7 @@ public final class ExtractionRoot implements AutoCloseable {
      */
     public void deleteTree() throws IOException {
         deleteContents(rootStream);
-        rootStream.close();
+        close();
         Files.deleteIfExists(root);
     }
 
@@ -277,6 +373,10 @@ public final class ExtractionRoot implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
-        rootStream.close();
+        try {
+            rootStream.close();
+        } finally {
+            parentStream.close();
+        }
     }
 }
