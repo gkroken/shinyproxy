@@ -127,6 +127,9 @@ public enum BundleRule {
     /** The same keyword twice in one header; two readers would disagree about which wins. */
     PAX_DUPLICATE_KEYWORD,
 
+    /** A metadata header with no member after it, or two where one member can use only one. */
+    METADATA_HEADER_MISPLACED,
+
     // ---- members against each other ----------------------------------------------------
     /** The same member path twice. Last-entry-wins means what was validated is not what is on disk. */
     DUPLICATE_MEMBER,
