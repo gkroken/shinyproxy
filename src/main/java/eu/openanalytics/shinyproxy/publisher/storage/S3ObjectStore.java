@@ -24,6 +24,7 @@ package eu.openanalytics.shinyproxy.publisher.storage;
 
 import software.amazon.awssdk.awscore.AwsRequestOverrideConfiguration;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.exception.SdkServiceException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.retries.DefaultRetryStrategy;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -69,29 +70,79 @@ public class S3ObjectStore implements ObjectStore {
     }
 
     /**
-     * A conditional put is never retried by the SDK.
+     * A conditional put is retried only when the store has proved it did not apply it.
+     *
+     * <p>Every write this platform makes is conditional (BundleWriter and BuildLogWriter use
+     * putIfAbsent, putStreamingIfAbsent and putIfMatch, and nothing else), so this policy is
+     * the platform's write policy, not a corner of it.
      *
      * <p>A retry of a conditional PutObject cannot tell its own first attempt from someone
-     * else's write. If the store wrote and the response was lost -- a socket or attempt
-     * timeout under a stalled store is exactly this, and the SDK retries it -- the retry's
-     * If-None-Match: * or If-Match gets 412, and this class used to return empty: "something
-     * was already at that key", the call's own write reported as a competitor's, to callers
-     * that decide from that answer whether they won. Reproduced deterministically by
-     * S3ObjectStoreTest.aLostResponseIsNotReportedAsAConflict (2 attempts, own write read as a
-     * conflict).
+     * else's write. If the store wrote and the response was lost -- an attempt timeout under a
+     * stalled store is exactly this, and the SDK's default strategy retries it -- the retry's
+     * If-None-Match: * or If-Match gets 412, which reads as "already there": the call's own
+     * write reported as a competitor's (S3ObjectStoreTest.aLostResponseIsNotReportedAsAConflict).
+     * So an AMBIGUOUS failure is never retried: timeouts, I/O after the request began, and
+     * server errors other than throttling. It surfaces as "outcome unknown", and the protocol's
+     * restart-safe replay settles it.
+     *
+     * <p>But a failure that proves nothing was applied is still retried, with backoff:
+     * throttling (503 SlowDown, 429, or whatever the SDK classifies as throttling), which S3
+     * returns routinely under request-rate pressure and which BuildLogWriter's many small
+     * chunks are the likeliest to meet; and a connection that was never established. The first
+     * version of this fix dropped every retry, including these, and turned an ordinary
+     * throttled write into a failure (finding 7833943-F1).
      *
      * <p>Rejected: treating a 412 whose stored digest matches ours as our write. The store's
      * contract deliberately refuses a replay of identical bytes, so a caller can tell a
      * resumed step from a fresh one (retryingTheSameWriteIsSafe); a digest match cannot tell
-     * this call's first attempt from an earlier call's write, and would break that.
-     * Without the retry, a lost response surfaces as an ObjectStoreException that says the
-     * outcome is unknown, and the protocol's restart-safe replay settles it: a replay then
-     * reads "already there", which is the truth. Unconditional puts keep the SDK's retries;
-     * rewriting the same bytes to the same key is idempotent.
+     * this call's first attempt from an earlier call's write.
      */
-    private static final Consumer<AwsRequestOverrideConfiguration.Builder> NOT_RETRIED =
+    private static final Consumer<AwsRequestOverrideConfiguration.Builder> RETRY_ONLY_IF_NOT_APPLIED =
             override -> override.addPlugin(config -> config.overrideConfiguration(
-                    options -> options.retryStrategy(DefaultRetryStrategy.doNotRetry())));
+                    options -> options.retryStrategy(DefaultRetryStrategy.standardStrategyBuilder()
+                            .useClientDefaults(false)
+                            .maxAttempts(3)
+                            .retryOnException(S3ObjectStore::provesNotApplied)
+                            .treatAsThrottling(S3ObjectStore::isThrottling)
+                            .build())));
+
+    /** The store refused the request before acting on it, or it never reached the store. */
+    static boolean provesNotApplied(Throwable failure) {
+        if (isThrottling(failure)) {
+            return true;
+        }
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.net.ConnectException
+                    || cause instanceof java.net.UnknownHostException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isThrottling(Throwable failure) {
+        return failure instanceof SdkServiceException service
+                && (service.isThrottlingException() || service.statusCode() == 503
+                        || service.statusCode() == 429);
+    }
+
+    /**
+     * What a status failure means for the caller. Throttling that outlasted the retries is a
+     * definite "not written"; any other 5xx on a conditional write is as ambiguous as a lost
+     * response; a 4xx is a definite refusal.
+     */
+    private static String refused(String bucket, String key, boolean conditional,
+                                  S3Exception e) {
+        if (isThrottling(e)) {
+            return "could not write " + bucket + "/" + key + ": the store is throttling ("
+                    + describe(e) + ") and still refused after the retries; nothing was"
+                    + " written, and it is safe to try again later";
+        }
+        if (conditional && e.statusCode() >= 500) {
+            return failed(bucket, key, true) + " (" + describe(e) + ")";
+        }
+        return "could not write " + bucket + "/" + key + ": " + describe(e);
+    }
 
     private static String failed(String bucket, String key, boolean conditional) {
         return "could not write " + bucket + "/" + key + (conditional
@@ -146,7 +197,7 @@ public class S3ObjectStore implements ObjectStore {
         }
         boolean conditional = onlyIfAbsent || expectedEtag != null;
         if (conditional) {
-            request.overrideConfiguration(NOT_RETRIED);
+            request.overrideConfiguration(RETRY_ONLY_IF_NOT_APPLIED);
         }
         try {
             PutObjectResponse response =
@@ -159,8 +210,7 @@ public class S3ObjectStore implements ObjectStore {
                 // Not an error for a caller that asked for conditional semantics.
                 return Optional.empty();
             }
-            throw new ObjectStoreException(
-                    "could not write " + bucket + "/" + key + ": " + describe(e), e);
+            throw new ObjectStoreException(refused(bucket, key, conditional, e), e);
         } catch (RuntimeException e) {
             throw new ObjectStoreException(failed(bucket, key, conditional), e);
         }
@@ -195,7 +245,7 @@ public class S3ObjectStore implements ObjectStore {
                 .contentLength(declaredLength);
         if (onlyIfAbsent) {
             request.ifNoneMatch("*");
-            request.overrideConfiguration(NOT_RETRIED);
+            request.overrideConfiguration(RETRY_ONLY_IF_NOT_APPLIED);
         }
         PutObjectResponse response;
         try {
@@ -208,8 +258,7 @@ public class S3ObjectStore implements ObjectStore {
             if (onlyIfAbsent && e.statusCode() == 412) {
                 return Optional.empty();
             }
-            throw new ObjectStoreException(
-                    "could not write " + bucket + "/" + key + ": " + describe(e), e);
+            throw new ObjectStoreException(refused(bucket, key, onlyIfAbsent, e), e);
         } catch (RuntimeException e) {
             throw new ObjectStoreException(failed(bucket, key, onlyIfAbsent), e);
         }

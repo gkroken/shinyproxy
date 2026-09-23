@@ -189,6 +189,15 @@
             <artifactId>url-connection-client</artifactId>
             <version>${aws-sdk.version}</version>
         </dependency>
+        <!-- Skald: S3ObjectStore builds its conditional-put retry strategy from this module
+             directly (DefaultRetryStrategy). It already arrived through s3 at the same
+             version, so declaring it resolves nothing new; it makes the direct use visible
+             rather than leaning on a transitive path. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>retries</artifactId>
+            <version>${aws-sdk.version}</version>
+        </dependency>
 
         <!-- Skald: the bundle manifest is validated against the published JSON Schema
              (schemas/manifest/v1.schema.json, dialect 2020-12) rather than a Java copy of

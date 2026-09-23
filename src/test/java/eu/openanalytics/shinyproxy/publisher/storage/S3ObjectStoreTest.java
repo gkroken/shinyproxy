@@ -29,9 +29,11 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.core.interceptor.Context;
-import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
-import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.http.AbortableInputStream;
+import software.amazon.awssdk.http.ExecutableHttpRequest;
+import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.HttpExecuteResponse;
+import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpResponse;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -119,100 +121,166 @@ class S3ObjectStoreTest {
         return ObjectKeys.bundleObject(UUID.randomUUID(), UUID.randomUUID(), name);
     }
 
+    /** What happens to the FIRST request a scripted client sends; later ones go through. */
+    private enum FirstAttempt {
+        /** Reaches the store and is applied; the response is held past the attempt timeout. */
+        APPLIED_THEN_RESPONSE_LOST(false),
+        /** Reaches the store and is applied; the response is replaced by a 500. */
+        APPLIED_THEN_SERVER_ERROR(false),
+        /** Never sent: answered 503 SlowDown, as a throttling store does before acting. */
+        THROTTLED_BEFORE_SENDING(true),
+        /** Never sent: the connection is refused. */
+        CONNECTION_REFUSED(true);
+
+        final boolean provesNotApplied;
+
+        FirstAttempt(boolean provesNotApplied) {
+            this.provesNotApplied = provesNotApplied;
+        }
+    }
+
     @Test
-    @DisplayName("a conditional put whose response was lost is not reported as someone else's write")
-    void aLostResponseIsNotReportedAsAConflict() {
-        // Raised on 9991ff1 and recommended before T8 by its review. The store writes; the
-        // response never reaches us; the SDK retries the same PutObject with its
-        // precondition; the retry gets 412 because the FIRST attempt wrote. The store then
-        // answered "something was already at that key" (or "it changed under us") -- this
-        // call's own write, reported as someone else's, to callers that use exactly that
-        // answer to decide whether they won.
-        //
-        // Simulated deterministically: the first attempt reaches MinIO and is processed,
-        // and its response is then held past a 1 s attempt timeout, which is the failure the
-        // SDK retries (measured with an attempt counter in 9991ff1's investigation). A first
-        // version raised an I/O error from the interceptor instead; the SDK does not retry
-        // that, and the test passed against the defect.
+    @DisplayName("a conditional put is retried only when the store proved it did not apply it")
+    void conditionalPutsRetryOnlyWhatProvablyDidNotHappen() {
+        // 7833943 stopped the SDK retrying conditional puts, because a retry after a lost
+        // response reads the call's own write as a conflict. Its review (7833943-F1): every
+        // production write is conditional, so that also dropped the retries that are safe --
+        // a 503 SlowDown, which S3 returns routinely, and a connection that never opened --
+        // and turned an ordinary throttled write into a failure. Each first-attempt failure
+        // below is scripted in the HTTP client, deterministically, for each of the three
+        // conditional calls, and asserted both ways: ambiguous ones are not retried and say
+        // the outcome is unknown; ones that prove nothing was applied are retried and succeed.
         byte[] content = "{\"schema_version\":1}".getBytes(StandardCharsets.UTF_8);
-        byte[] replacement = "{\"schema_version\":1} ".getBytes(StandardCharsets.UTF_8);
-
-        java.util.Map<String, java.util.function.Function<ObjectStore, Optional<StoredObject>>>
-                conditional = new java.util.LinkedHashMap<>();
-        String absentKey = key(ObjectKeys.BUNDLE_MANIFEST);
-        conditional.put("putIfAbsent", flaky -> flaky.putIfAbsent(BUCKET, absentKey, content,
-                "application/json"));
-        String streamedKey = key(ObjectKeys.BUNDLE_ARCHIVE);
-        conditional.put("putStreamingIfAbsent", flaky -> flaky.putStreamingIfAbsent(BUCKET,
-                streamedKey, new ByteArrayInputStream(content), content.length,
-                "application/gzip"));
-        String matchedKey = key(ObjectKeys.BUNDLE_RECEIPT);
-        String etag = store.put(BUCKET, matchedKey, content, "application/json").etag();
-        conditional.put("putIfMatch", flaky -> flaky.putIfMatch(BUCKET, matchedKey,
-                replacement, "application/json", etag));
-
         List<String> wrong = new ArrayList<>();
-        for (var call : conditional.entrySet()) {
-            AtomicInteger attempts = new AtomicInteger();
-            try (S3Client lossy = lossyClient(attempts)) {
+
+        for (FirstAttempt first : FirstAttempt.values()) {
+            for (String call : List.of("putIfAbsent", "putStreamingIfAbsent", "putIfMatch")) {
+                String k = key(call.equals("putStreamingIfAbsent")
+                        ? ObjectKeys.BUNDLE_ARCHIVE : ObjectKeys.BUNDLE_MANIFEST);
+                String etag = call.equals("putIfMatch")
+                        ? store.put(BUCKET, k, "older".getBytes(StandardCharsets.UTF_8),
+                                "application/json").etag()
+                        : null;
+                AtomicInteger sent = new AtomicInteger();
+                String where = first + " / " + call;
                 Optional<StoredObject> answer = null;
-                try {
-                    answer = call.getValue().apply(new S3ObjectStore(lossy));
-                } catch (ObjectStoreException unknown) {
-                    // The honest answer when the response was lost: the outcome is unknown,
-                    // and the caller's restart-safe replay settles it.
-                    if (!unknown.getMessage().contains("outcome is unknown")) {
-                        wrong.add(call.getKey() + ": failed without saying the outcome is"
-                                + " unknown: " + unknown.getMessage());
+                String failure = null;
+                try (S3Client scripted = scriptedClient(first, sent)) {
+                    ObjectStore s3 = new S3ObjectStore(scripted);
+                    answer = switch (call) {
+                        case "putIfAbsent" -> s3.putIfAbsent(BUCKET, k, content,
+                                "application/json");
+                        case "putStreamingIfAbsent" -> s3.putStreamingIfAbsent(BUCKET, k,
+                                new ByteArrayInputStream(content), content.length,
+                                "application/gzip");
+                        default -> s3.putIfMatch(BUCKET, k, content, "application/json", etag);
+                    };
+                } catch (ObjectStoreException ex) {
+                    failure = ex.getMessage();
+                }
+
+                if (first.provesNotApplied) {
+                    if (answer == null || answer.isEmpty() || sent.get() != 2) {
+                        wrong.add(where + ": expected a retry that writes; attempts "
+                                + sent.get() + ", answer " + answer + ", failure " + failure);
+                    }
+                } else {
+                    if (answer != null && answer.isEmpty()) {
+                        wrong.add(where + ": its own write reported as a conflict (attempts "
+                                + sent.get() + ")");
+                    }
+                    if (sent.get() != 1) {
+                        wrong.add(where + ": an ambiguous failure was retried (attempts "
+                                + sent.get() + ")");
+                    }
+                    if (failure == null || !failure.contains("outcome is unknown")) {
+                        wrong.add(where + ": did not say the outcome is unknown: " + failure);
                     }
                 }
-                if (answer != null && answer.isEmpty()) {
-                    wrong.add(call.getKey() + ": its own write reported as a conflict"
-                            + " (attempts: " + attempts.get() + ")");
-                }
-                if (attempts.get() != 1) {
-                    wrong.add(call.getKey() + ": retried by the SDK (attempts: "
-                            + attempts.get() + ")");
+                // In every case the bytes ended up stored, by this call. Recorded rather than
+                // thrown, so a scenario that wrote nothing is named like every other failure.
+                try {
+                    if (!java.util.Arrays.equals(content, store.readVerified(BUCKET, k,
+                            sha256Of(content)))) {
+                        wrong.add(where + ": the store holds other bytes");
+                    }
+                } catch (ObjectStoreException absent) {
+                    wrong.add(where + ": nothing was stored (" + absent.getMessage() + ")");
                 }
             }
         }
         assertEquals(List.of(), wrong);
-        assertTrue(store.head(BUCKET, absentKey).isPresent(), "the first attempt did write");
 
-        // The contract that made the fix take this shape still holds: a later replay of the
-        // same bytes is refused, so a caller can tell a resumed step from a fresh one.
-        assertTrue(store.putIfAbsent(BUCKET, absentKey, content, "application/json").isEmpty());
-
-        // And the control: an UNconditional put under the same lost response is still
-        // retried and succeeds, because rewriting the same bytes to a key is idempotent.
-        AtomicInteger attempts = new AtomicInteger();
-        try (S3Client lossy = lossyClient(attempts)) {
-            new S3ObjectStore(lossy).put(BUCKET, key(ObjectKeys.BUNDLE_MANIFEST), content,
-                    "application/json");
-        }
-        assertEquals(2, attempts.get(), "unconditional puts lost their SDK retry");
+        // The contract that shaped the fix still holds: a later replay of the same bytes is
+        // refused, so a caller can tell a resumed step from a fresh one.
+        String k = key(ObjectKeys.BUNDLE_MANIFEST);
+        assertTrue(store.putIfAbsent(BUCKET, k, content, "application/json").isPresent());
+        assertTrue(store.putIfAbsent(BUCKET, k, content, "application/json").isEmpty());
     }
 
-    /** A client whose first attempt's response is held past its 1 s attempt timeout. */
-    private static S3Client lossyClient(AtomicInteger attempts) {
-        ExecutionInterceptor holdTheFirstResponse = new ExecutionInterceptor() {
+    private static String sha256Of(byte[] bytes) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    /**
+     * A client whose HTTP layer does {@code first} to the first request it is given, counts
+     * every request, and passes the rest through to MinIO.
+     */
+    private static S3Client scriptedClient(FirstAttempt first, AtomicInteger sent) {
+        SdkHttpClient real = UrlConnectionHttpClient.create();
+        SdkHttpClient scripted = new SdkHttpClient() {
             @Override
-            public void beforeTransmission(Context.BeforeTransmission context,
-                                           ExecutionAttributes attributes) {
-                attempts.incrementAndGet();
+            public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+                ExecutableHttpRequest through = real.prepareRequest(request);
+                return new ExecutableHttpRequest() {
+                    @Override
+                    public HttpExecuteResponse call() throws IOException {
+                        if (sent.incrementAndGet() > 1) {
+                            return through.call();
+                        }
+                        switch (first) {
+                            case THROTTLED_BEFORE_SENDING:
+                                return canned(503, "SlowDown", "Please reduce your request rate.");
+                            case CONNECTION_REFUSED:
+                                throw new java.net.ConnectException("Connection refused");
+                            case APPLIED_THEN_SERVER_ERROR: {
+                                HttpExecuteResponse applied = through.call();
+                                applied.responseBody().ifPresent(body -> {
+                                    try {
+                                        body.close();
+                                    } catch (IOException ignored) {
+                                        // the real response is being discarded on purpose
+                                    }
+                                });
+                                return canned(500, "InternalError", "simulated");
+                            }
+                            default: {  // APPLIED_THEN_RESPONSE_LOST
+                                HttpExecuteResponse applied = through.call();
+                                try {
+                                    Thread.sleep(3_000);   // past the 1 s attempt timeout
+                                } catch (InterruptedException interrupted) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                return applied;
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void abort() {
+                        through.abort();
+                    }
+                };
             }
 
             @Override
-            public SdkHttpResponse modifyHttpResponse(Context.ModifyHttpResponse context,
-                                                      ExecutionAttributes attributes) {
-                if (attempts.get() == 1) {
-                    try {
-                        Thread.sleep(3_000);
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-                return context.httpResponse();
+            public void close() {
+                real.close();
             }
         };
         return S3Client.builder()
@@ -221,11 +289,23 @@ class S3ObjectStoreTest {
                 .region(Region.of("us-east-1"))
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(USER, PASSWORD)))
-                .httpClient(UrlConnectionHttpClient.create())
+                .httpClient(scripted)
                 .serviceConfiguration(S3Configuration.builder()
                         .pathStyleAccessEnabled(true).build())
-                .overrideConfiguration(c -> c.addExecutionInterceptor(holdTheFirstResponse)
-                        .apiCallAttemptTimeout(java.time.Duration.ofSeconds(1)))
+                .overrideConfiguration(c -> c.apiCallAttemptTimeout(
+                        java.time.Duration.ofSeconds(1)))
+                .build();
+    }
+
+    private static HttpExecuteResponse canned(int status, String code, String message) {
+        byte[] body = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>" + code
+                + "</Code><Message>" + message + "</Message></Error>")
+                .getBytes(StandardCharsets.UTF_8);
+        return HttpExecuteResponse.builder()
+                .response(SdkHttpResponse.builder().statusCode(status)
+                        .putHeader("Content-Type", "application/xml")
+                        .putHeader("Content-Length", Integer.toString(body.length)).build())
+                .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
                 .build();
     }
 
