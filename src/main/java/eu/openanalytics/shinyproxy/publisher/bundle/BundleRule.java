@@ -138,6 +138,14 @@ public enum BundleRule {
     /** Two paths differing only by case, which are one file on a case-insensitive filesystem. */
     MEMBER_CASE_COLLISION,
 
+    // ---- the bundle as a whole -----------------------------------------------------------
+    /** The manifest is larger than the configured bound. */
+    MANIFEST_TOO_LARGE,
+    /** No manifest.json in the archive. */
+    MANIFEST_MISSING,
+    /** Payload arrived before the manifest that is supposed to describe it. */
+    MANIFEST_NOT_FIRST,
+
     // ---- writing it down -----------------------------------------------------------------
     /** This platform cannot supply descriptor-relative, no-follow filesystem operations. */
     PLATFORM_UNSAFE_FILESYSTEM,
