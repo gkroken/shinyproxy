@@ -185,8 +185,15 @@ public class BundleFuzzTest {
                 }
             }
             if (extracted != null) {
-                try (ExtractionRoot root = extracted.root()) {
-                    requireOnlyPrivateFilesAndDirectories(root.path());
+                ExtractionRoot root = extracted.root();
+                requireOnlyPrivateFilesAndDirectories(root.path());
+                // Deleted by the product's own deleteTree, so every accepted input also
+                // proves a frozen tree can still be removed.
+                root.deleteTree();
+                try (Stream<Path> left = Files.list(workspace)) {
+                    if (left.findAny().isPresent()) {
+                        throw new AssertionError("deleteTree left a frozen tree behind");
+                    }
                 }
             }
             try (Stream<Path> entries = Files.list(sentinel)) {
@@ -217,10 +224,11 @@ public class BundleFuzzTest {
                 }
                 String mode = PosixFilePermissions.toString(
                         Files.getPosixFilePermissions(p, LinkOption.NOFOLLOW_LINKS));
+                // Frozen: an accepted tree is read-only, executable only where declared.
                 boolean ok = Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)
-                        ? mode.equals("rwx------")
+                        ? mode.equals("r-x------")
                         : Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)
-                                && (mode.equals("rw-------") || mode.equals("rwx------"));
+                                && (mode.equals("r--------") || mode.equals("r-x------"));
                 if (!ok) {
                     throw new AssertionError("extracted " + p + " with mode " + mode);
                 }
@@ -236,17 +244,20 @@ public class BundleFuzzTest {
         return out.toByteArray();
     }
 
+    /** The test's own cleanup, for whatever a failed case left: directories made writable
+     *  first (a frozen tree's are not), then everything removed deepest first. */
     private static void deleteTree(Path top) throws IOException {
+        List<Path> all;
         try (Stream<Path> tree = Files.walk(top)) {
-            for (Path p : tree.sorted(java.util.Comparator.reverseOrder()).toList()) {
-                try {
-                    Files.setPosixFilePermissions(p, PosixFilePermissions.fromString(
-                            Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS) ? "rwx------" : "rw-------"));
-                } catch (IOException | UnsupportedOperationException ignored) {
-                    // best effort; the delete below says whether it mattered
-                }
-                Files.deleteIfExists(p);
+            all = tree.toList();
+        }
+        for (Path p : all) {
+            if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+                Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rwx------"));
             }
+        }
+        for (Path p : all.stream().sorted(java.util.Comparator.reverseOrder()).toList()) {
+            Files.deleteIfExists(p);
         }
     }
 

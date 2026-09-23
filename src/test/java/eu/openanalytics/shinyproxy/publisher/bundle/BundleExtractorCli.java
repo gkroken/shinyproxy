@@ -141,6 +141,11 @@ public final class BundleExtractorCli {
 
     private static void writeManifestForTheOracle(Path root, byte[] manifest)
             throws IOException {
+        // The extractor froze the accepted tree (r-x------ on the root). Opened for exactly
+        // this write and closed again, so the tree the oracle inspects is the frozen one,
+        // plus the manifest it needs to judge it by.
+        Files.setPosixFilePermissions(root, java.nio.file.attribute.PosixFilePermissions
+                .fromString("rwx------"));
         try {
             Files.write(root.resolve("manifest.json"), manifest,
                     StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
@@ -149,6 +154,9 @@ public final class BundleExtractorCli {
             throw new IllegalStateException("adapter collision: the payload already has a"
                     + " manifest.json at its root, where this adapter puts the bundle"
                     + " manifest for the oracle; refusing to overwrite what is being judged");
+        } finally {
+            Files.setPosixFilePermissions(root, java.nio.file.attribute.PosixFilePermissions
+                    .fromString("r-x------"));
         }
     }
 

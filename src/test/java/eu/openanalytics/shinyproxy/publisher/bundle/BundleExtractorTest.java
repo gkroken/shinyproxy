@@ -415,9 +415,12 @@ public class BundleExtractorTest {
                 .end());
         try (ExtractionRoot root = BundleExtractor.extract(new ByteArrayInputStream(upload),
                 upload.length, workspace, LIMITS).root()) {
-            assertEquals("rwx------", mode(root.path().resolve("run.sh")));
-            assertEquals("rw-------", mode(root.path().resolve("data.csv")));
-            assertEquals("rw-------", mode(root.path().resolve("app.R")));
+            // Frozen once validated: read-only, and executable only where the manifest said.
+            assertEquals("r-x------", mode(root.path().resolve("run.sh")));
+            assertEquals("r--------", mode(root.path().resolve("data.csv")));
+            assertEquals("r--------", mode(root.path().resolve("app.R")));
+            assertEquals("r-x------", mode(root.path()));
+            assertTrue(root.isFrozen());
         }
     }
 

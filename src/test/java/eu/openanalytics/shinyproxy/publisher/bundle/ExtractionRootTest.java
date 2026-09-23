@@ -194,6 +194,81 @@ public class ExtractionRootTest {
     private static final int RACE_ATTEMPTS = 20_000;
 
     @Test
+    public void aTreeChangedUnderTheFreezeIsRefusedNotCrashedOn(@TempDir Path tmp)
+            throws Exception {
+        // The rename race, set up exactly: something has put a symlink into the tree by the
+        // time it is frozen. The no-follow walk refuses to touch it; before this was typed,
+        // that refusal surfaced as a raw ELOOP FileSystemException, a crash.
+        Path outside = Files.createDirectory(tmp.resolve("outside"));
+        ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work");
+        root.writeFile(member("app/app.R"),
+                new ByteArrayInputStream("library(shiny)".getBytes(StandardCharsets.UTF_8)));
+        Files.createSymbolicLink(root.path().resolve("www"), outside);
+        String outsideMode = PosixFilePermissions.toString(Files.getPosixFilePermissions(outside));
+
+        BundleRejection ex = assertThrows(BundleRejection.class, root::freeze);
+        assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+        assertEquals(outsideMode, PosixFilePermissions.toString(
+                Files.getPosixFilePermissions(outside)), "the link's target was re-moded");
+        root.deleteTree();
+
+        // A planted link is read as "neither a file nor a directory" above. The crash the
+        // race found is the other shape: the entry changes between the listing and the
+        // access, and the filesystem error must be typed. Set up exactly: an entry that is
+        // gone by the time it is read.
+        try (SecureDirectoryStream<Path> directory =
+                     (SecureDirectoryStream<Path>) Files.newDirectoryStream(tmp)) {
+            BundleRejection gone = assertThrows(BundleRejection.class,
+                    () -> ExtractionRoot.freezeEntry(directory, Path.of("renamed-away")));
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, gone.rule());
+            assertTrue(gone.getMessage().contains("changed while it was being frozen")
+                    && gone.getMessage().contains("NoSuchFileException"), gone.getMessage());
+        }
+    }
+
+    @Test
+    public void aFrozenTreeIsReadOnlyRefusesWritesAndCanStillBeDeleted(@TempDir Path tmp)
+            throws Exception {
+        ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work");
+        root.createDirectory(member("app/www/"));
+        root.writeFile(member("app/www/style.css"),
+                new ByteArrayInputStream("body {}".getBytes(StandardCharsets.UTF_8)), false);
+        root.writeFile(member("app/run.sh"),
+                new ByteArrayInputStream("#!/bin/sh".getBytes(StandardCharsets.UTF_8)), true);
+        root.writeFile(member("app/app.R"),
+                new ByteArrayInputStream("library(shiny)".getBytes(StandardCharsets.UTF_8)));
+
+        root.freeze();
+        root.freeze();     // idempotent: a second call changes nothing and does not throw
+
+        // Modes, not write attempts: root ignores modes, and this must mean the same under
+        // any uid (c97863d-F2 was a test that did not).
+        java.util.Map<String, String> expected = java.util.Map.of(
+                "", "r-x------", "www", "r-x------", "www/style.css", "r--------",
+                "run.sh", "r-x------", "app.R", "r--------");
+        expected.forEach((relative, mode) -> {
+            try {
+                assertEquals(mode, PosixFilePermissions.toString(Files.getPosixFilePermissions(
+                        root.path().resolve(relative), LinkOption.NOFOLLOW_LINKS)),
+                        "'" + relative + "'");
+            } catch (IOException ex) {
+                throw new java.io.UncheckedIOException(ex);
+            }
+        });
+        assertTrue(root.isFrozen());
+        assertThrows(IllegalStateException.class, () -> root.writeFile(member("app/late.txt"),
+                new ByteArrayInputStream(new byte[0])));
+        assertThrows(IllegalStateException.class,
+                () -> root.createDirectory(member("app/late/")));
+
+        // Every failure path deletes the tree; freezing must not take that away.
+        root.deleteTree();
+        try (var left = Files.list(tmp)) {
+            assertEquals(List.of(), left.toList(), "a frozen tree could not be deleted");
+        }
+    }
+
+    @Test
     public void aCreateUnderAParentSwappedAfterItWasOpenedLandsInTheRealParent(@TempDir Path tmp)
             throws Exception {
         // The race above, with its window set up exactly instead of hoped for (5cb3d04's

@@ -79,10 +79,17 @@ public final class ExtractionRoot implements AutoCloseable {
             PosixFilePermissions.fromString("rw-------");
     private static final Set<PosixFilePermission> PRIVATE_EXECUTABLE =
             PosixFilePermissions.fromString("rwx------");
+    private static final Set<PosixFilePermission> FROZEN_DIRECTORY =
+            PosixFilePermissions.fromString("r-x------");
+    private static final Set<PosixFilePermission> FROZEN_FILE =
+            PosixFilePermissions.fromString("r--------");
+    private static final Set<PosixFilePermission> FROZEN_EXECUTABLE =
+            PosixFilePermissions.fromString("r-x------");
 
     private final Path root;
     private final SecureDirectoryStream<Path> rootStream;
     private final DirectoryStream<Path> parentStream;
+    private boolean frozen;
 
     private ExtractionRoot(Path root, SecureDirectoryStream<Path> rootStream,
                            DirectoryStream<Path> parentStream) {
@@ -256,6 +263,7 @@ public final class ExtractionRoot implements AutoCloseable {
      */
     public long writeFile(MemberPath member, InputStream content, boolean executable)
             throws IOException {
+        requireNotFrozen();
         List<String> segments = requirePayload(member);
         Deque<SecureDirectoryStream<Path>> opened = new ArrayDeque<>();
         try {
@@ -310,6 +318,7 @@ public final class ExtractionRoot implements AutoCloseable {
 
     /** Creates the directory a member declares, and the directories above it. */
     public void createDirectory(MemberPath member) throws IOException {
+        requireNotFrozen();
         if (member.role() != MemberPath.Role.PAYLOAD) {
             // Refused before the empty check, so that "this is the payload root" and "this
             // member is not mine" stop being the same silent return. writeFile refuses the
@@ -467,9 +476,123 @@ public final class ExtractionRoot implements AutoCloseable {
      * primitives the writing uses, for the same reason.
      */
     public void deleteTree() throws IOException {
-        deleteContents(rootStream);
+        // A frozen tree's directories are read-only, and removing an entry needs write on
+        // its directory; so each directory is made writable again, through its descriptor,
+        // just before its contents go. Harmless for a tree that was never frozen.
+        rootStream.getFileAttributeView(PosixFileAttributeView.class)
+                .setPermissions(PRIVATE_DIRECTORY);
+        try (SecureDirectoryStream<Path> top = reopenRoot()) {
+            deleteContents(top);
+        }
         close();
         Files.deleteIfExists(root);
+    }
+
+    /**
+     * Makes the validated tree read-only: files r-------- (r-x------ where the manifest made
+     * them executable), directories r-x------, the root included. After this, writeFile and
+     * createDirectory refuse.
+     *
+     * <p>"Freeze the validated tree before handing it to a worker" is the extraction
+     * contract's wording. What this buys, stated rather than implied: nothing in the platform
+     * can change validated content by accident, a bug included, and anything that tries
+     * fails loudly instead. What it does not buy: a process running as the platform's own
+     * user can change the modes back, because ownership is not a boundary against the owner.
+     * The boundary between this tree and untrusted build code is elsewhere: the worker is
+     * sent the context as a stream and never sees this directory (the launcher contract,
+     * T3).
+     *
+     * <p>Every change goes through a descriptor, with links refused, like every other
+     * operation in this class. The walk opens a fresh listing of the root rather than
+     * iterating {@code rootStream}, because a directory stream can be iterated once and
+     * deleteTree needs it afterwards.
+     */
+    public void freeze() throws IOException {
+        if (frozen) {
+            return;
+        }
+        frozen = true;     // first: no write may begin while the walk runs
+        try (SecureDirectoryStream<Path> top = reopenRoot()) {
+            freezeContents(top);
+        }
+        rootStream.getFileAttributeView(PosixFileAttributeView.class)
+                .setPermissions(FROZEN_DIRECTORY);
+    }
+
+    /** Whether {@link #freeze} has run. */
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    private static void freezeContents(SecureDirectoryStream<Path> directory)
+            throws IOException {
+        try {
+            for (Path entry : directory) {
+                freezeEntry(directory, entry.getFileName());
+            }
+        } catch (java.nio.file.DirectoryIteratorException ex) {
+            throw changedUnderUs("(listing)", ex.getCause());
+        }
+    }
+
+    /**
+     * One entry, with any filesystem error typed.
+     *
+     * <p>The walk refuses links and reads through descriptors, so a tree changed underneath
+     * it cannot take anything outside the root. But the change surfaced as a raw IOException:
+     * a symlink swapped in gives ELOOP (the no-follow open refusing it), an entry renamed away
+     * between the listing and the access gives NoSuchFile. The corpus's rename race found 7
+     * such crashes in 273 runs on this commit's first version, where every run had been clean
+     * before freezing existed. Under tampering, refusing is correct and crashing is not; the
+     * refusal then deletes the tree like any other.
+     *
+     * <p>Package-private so the conversion can be tested exactly (an entry that is gone by the
+     * time it is read), where from outside it can only be raced.
+     */
+    static void freezeEntry(SecureDirectoryStream<Path> directory, Path name) {
+        try {
+            PosixFileAttributeView view = directory.getFileAttributeView(name,
+                    PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+            PosixFileAttributes attributes = view.readAttributes();
+            if (attributes.isDirectory()) {
+                try (SecureDirectoryStream<Path> child =
+                             directory.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
+                    freezeContents(child);
+                }
+                view.setPermissions(FROZEN_DIRECTORY);
+            } else if (attributes.isRegularFile()) {
+                view.setPermissions(attributes.permissions()
+                        .contains(PosixFilePermission.OWNER_EXECUTE)
+                        ? FROZEN_EXECUTABLE : FROZEN_FILE);
+            } else {
+                // This class creates nothing else, so something else put it there. Refused
+                // rather than frozen around: the tree is not the one that was validated.
+                throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                        "'" + name + "' in the extraction root is neither a file nor a"
+                                + " directory; something other than this extractor wrote it");
+            }
+        } catch (IOException ex) {
+            throw changedUnderUs(name.toString(), ex);
+        }
+    }
+
+    private static BundleRejection changedUnderUs(String name, Throwable cause) {
+        return new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                "the extraction root changed while it was being frozen, at '" + name + "' ("
+                        + (cause == null ? "unknown" : cause.getClass().getSimpleName())
+                        + "); something other than this extractor is writing to it");
+    }
+
+    private void requireNotFrozen() {
+        if (frozen) {
+            throw new IllegalStateException("the extraction root is frozen: it was validated"
+                    + " as it stands, and nothing may be written to it any more");
+        }
+    }
+
+    /** A fresh, descriptor-relative listing of the root, which can be iterated again. */
+    private SecureDirectoryStream<Path> reopenRoot() throws IOException {
+        return rootStream.newDirectoryStream(Path.of("."), LinkOption.NOFOLLOW_LINKS);
     }
 
     private static void deleteContents(SecureDirectoryStream<Path> directory) throws IOException {
@@ -479,6 +602,8 @@ public final class ExtractionRoot implements AutoCloseable {
                     java.nio.file.attribute.BasicFileAttributeView.class,
                     LinkOption.NOFOLLOW_LINKS).readAttributes().isDirectory();
             if (isDirectory) {
+                directory.getFileAttributeView(name, PosixFileAttributeView.class,
+                        LinkOption.NOFOLLOW_LINKS).setPermissions(PRIVATE_DIRECTORY);
                 try (SecureDirectoryStream<Path> child =
                              directory.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
                     deleteContents(child);

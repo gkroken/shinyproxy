@@ -1640,6 +1640,15 @@ below are marked passed by this planning document.
       long `make fuzz` run from the committed tree and report its duration and outcome, as
       it does for the corpus.
 
+      **"Freeze the validated tree", done 2026-09-24.** An accepted extraction ends with
+      `ExtractionRoot.freeze()`: files `r--------` (`r-x------` where the manifest says
+      executable), directories and the root `r-x------`, all through descriptors, and the
+      object refuses further writes. `deleteTree` still removes a frozen tree. What it buys:
+      nothing in the platform can change validated content by accident. What it does not:
+      a process running as the platform's own user can change the modes back. The boundary
+      against untrusted build code is that the worker is sent the context as a stream and
+      never sees this directory (T3's launcher contract), not these modes.
+
 - [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
       uniqueness constraints. Add idempotency, leases/fencing, cancellation and admission

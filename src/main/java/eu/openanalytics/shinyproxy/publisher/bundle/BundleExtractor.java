@@ -124,6 +124,8 @@ public final class BundleExtractor {
                                 + collector.files + " file(s) are");
             }
             collector.requireEverythingDeclaredArrived();
+            // Everything has passed; from here the tree is what was validated, and stays so.
+            root.freeze();
             return new Extracted(root, collector.manifest, collector.validated, collector.files,
                     collector.bytes);
         } catch (Throwable failure) {
