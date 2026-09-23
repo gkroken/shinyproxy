@@ -275,8 +275,6 @@ public class PaxRecordsTest {
         assertEquals(java.util.Set.of(2, 3, 4), widths,
                 "the sweep did not cross both the two/three and three/four digit boundaries");
 
-        // The four-digit to five-digit boundary, reached with a long value rather than a
-        // 10,000-iteration sweep.
         // The boundary BELOW the sweep, which the sweep cannot reach: with a nine-byte
         // value the smallest body it builds is 13, so every record in it has a length field
         // of two digits or more. A one-byte keyword and a value from 0 to 20 bytes crosses
@@ -296,10 +294,12 @@ public class PaxRecordsTest {
         assertEquals(java.util.Set.of(1, 2), narrowWidths,
                 "the loop did not straddle the one/two digit boundary");
 
-        // 9980..9995 is where the total crosses 10000 for a 4-byte keyword. The first
-        // version of this loop ran 9990..10010, which is entirely above the boundary: every
-        // record in it had a five-digit field, so the assertion below held no matter how
-        // short the loop was, and shortening it survived as a mutation.
+        // The four-digit to five-digit boundary, reached with a long value rather than a
+        // 10,000-iteration sweep. 9980..9995 is where the total crosses 10000 for a
+        // 4-byte keyword. The first version of this loop ran 9990..10010, which is entirely
+        // above the boundary: every record in it had a five-digit field, so the assertion
+        // below held no matter how short the loop was, and shortening it survived as a
+        // mutation.
         java.util.Set<Integer> wideWidths = new java.util.TreeSet<>();
         for (int value = 9980; value <= 9995; value++) {
             byte[] record = paxRecord("path".getBytes(StandardCharsets.UTF_8), new byte[value]);
