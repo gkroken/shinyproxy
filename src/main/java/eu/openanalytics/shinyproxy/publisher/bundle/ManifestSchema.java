@@ -118,7 +118,53 @@ public final class ManifestSchema {
     }
 
     static JsonNode parse(byte[] manifest) {
-        String text = strictUtf8(manifest);
+        JsonNode document = parseText(strictUtf8(manifest));
+        requirePairedSurrogates(document, "");
+        return document;
+    }
+
+    /**
+     * Refuses a string, key or value, holding a surrogate that is not half of a pair.
+     *
+     * <p>{@code "\ud800"} is legal JSON syntax and survives both the strict decode, which sees
+     * only ASCII escape text, and the schema. Java's {@code getBytes(UTF_8)} then silently
+     * turns the unpaired half into '?', so a declared path "a\ud800b" would compare equal to a
+     * real member named "a?b", where Python refuses to encode the string at all (finding
+     * recorded in 0573fc2's review). Refused here, once, so every string past this point
+     * encodes to exactly one byte sequence and every comparison after it can be exact.
+     */
+    private static void requirePairedSurrogates(JsonNode node, String where) {
+        if (node.isTextual()) {
+            requirePaired(node.textValue(), where);
+        } else if (node.isObject()) {
+            node.fields().forEachRemaining(field -> {
+                String at = where + "/" + field.getKey();
+                requirePaired(field.getKey(), at);
+                requirePairedSurrogates(field.getValue(), at);
+            });
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                requirePairedSurrogates(node.get(i), where + "/" + i);
+            }
+        }
+    }
+
+    private static void requirePaired(String text, String where) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean paired = Character.isHighSurrogate(c)
+                    ? i + 1 < text.length() && Character.isLowSurrogate(text.charAt(++i))
+                    : !Character.isLowSurrogate(c);
+            if (!paired) {
+                throw new BundleRejection(BundleRule.MANIFEST_NOT_JSON,
+                        (where.isEmpty() ? "(the manifest)" : where) + " contains an escaped"
+                                + " surrogate that is not half of a pair, which no UTF-8 text"
+                                + " can hold");
+            }
+        }
+    }
+
+    private static JsonNode parseText(String text) {
         try {
             JsonNode document = STRICT.readTree(text);
             if (document == null || document.isMissingNode()) {

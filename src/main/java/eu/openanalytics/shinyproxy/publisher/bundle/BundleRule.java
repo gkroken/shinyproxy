@@ -156,6 +156,26 @@ public enum BundleRule {
     /** The document does not satisfy the published schema for its version. */
     MANIFEST_SCHEMA_INVALID,
 
+    // ---- what the manifest claims (the plan's S1-S9; the message starts with the S-number)
+    /** S1: an inventory, dependency or entrypoint path that leaves the payload root. */
+    MANIFEST_PATH_ESCAPES,
+    /** S2: a path that is not in the one canonical form an archive member could carry. */
+    MANIFEST_PATH_NOT_CANONICAL,
+    /** S3: two inventory paths that are the same path under case folding. */
+    MANIFEST_PATH_DUPLICATE,
+    /** S4/S5: the entrypoint does not resolve through the inventory the way its language needs. */
+    MANIFEST_ENTRYPOINT_UNRESOLVED,
+    /** S6: dependencies.path names nothing in the inventory. */
+    MANIFEST_LOCKFILE_NOT_IN_INVENTORY,
+    /** S7: the dependency format is not the one the runtime language uses. */
+    MANIFEST_FORMAT_LANGUAGE_MISMATCH,
+    /** S8: a registered type no reviewed recipe builds yet. */
+    MANIFEST_TYPE_UNSUPPORTED,
+    /** S9: the bundle's type is not the type of the content it was uploaded to. */
+    MANIFEST_TYPE_MISMATCH,
+    /** A declared size that is not a whole number of bytes representable in 64 bits. */
+    MANIFEST_SIZE_INVALID,
+
     // ---- writing it down -----------------------------------------------------------------
     /** This platform cannot supply descriptor-relative, no-follow filesystem operations. */
     PLATFORM_UNSAFE_FILESYSTEM,

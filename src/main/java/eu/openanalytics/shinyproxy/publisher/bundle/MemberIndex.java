@@ -187,8 +187,12 @@ public final class MemberIndex {
      * <p>Case folding only. NFC is already required by {@link MemberPath}, so a decomposed
      * alias never reaches this map, and folding anything else here would start altering
      * names rather than comparing them.
+     *
+     * <p>Package-private because the manifest's inventory (S3) must collide on exactly the
+     * same key as the archive's members: two definitions of "the same path" would let a
+     * name through one that the other refuses.
      */
-    private static String fold(String path) {
+    static String fold(String path) {
         return path.toLowerCase(Locale.ROOT);
     }
 
