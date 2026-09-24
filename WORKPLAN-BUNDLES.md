@@ -1724,6 +1724,28 @@ below are marked passed by this planning document.
       adapter's 256 MiB heap. An operator raising `max_entries` towards its absolute maximum
       must size the platform's heap with it, and T8's deployment notes owe that sentence.
 
+      **"No reads outside the root", traced, done 2026-09-24** (deferred from T2). The
+      oracle's snapshots prove nothing outside the root *changed*; they cannot see a read or
+      a refused attempt, and this host's atime regime does not record reads. `bash
+      dev/trace-extraction.sh` runs the same oracle over the same corpus with each JVM
+      under `strace -f -y` and `dev/trace-check.py` reads every trace: no path the
+      extractor named, and no descriptor it used, may be a traversal target —
+      `escape.txt`, `pax-escape.txt`, `neighbour/`, `via-symlink-target/` beside the
+      root, and `/etc/skald-escape.txt`. `-y` is what makes this meaningful: the extractor
+      works through descriptors, including one on the root's *parent*, which is the
+      directory the targets live in, and `-y` resolves each descriptor-relative call to a
+      real path. Result in the reduced, `--full` and `--symlinked-root` modes: 91 of 91
+      traces clean each time. `--rename-race` is excluded because its racer deliberately
+      renames the root to the neighbour's name; the oracle's containment check covers it.
+      The checker's self-test makes real traces of each target touched each way and a
+      control, and refuses a trace made without `-y`. A mutation that makes the shipped
+      `ExtractionRoot.adopt` read `escape.txt` through the parent's descriptor is invisible
+      to the oracle (91/91 clean) and fails 90 of 90 traces (the one fixture refused before
+      the root is opened never names the world). strace (GPL-2.0-or-later) is used only in
+      the throwaway image `dev/oracle-java-trace`, never shipped, as the user approved.
+      Not covered, and stated in the checker: listing a directory (`getdents`) takes no
+      path, so learning a target's *name* by listing the parent is not seen.
+
 - [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
       uniqueness constraints. Add idempotency, leases/fencing, cancellation and admission

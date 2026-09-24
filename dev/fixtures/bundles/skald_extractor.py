@@ -47,10 +47,47 @@ def main(argv):
     command = [java, "-Xmx" + HEAP, "-XX:+ExitOnOutOfMemoryError", "-XX:-UsePerfData",
                "-cp", classpath,
                "eu.openanalytics.shinyproxy.publisher.bundle.BundleExtractorCli"] + argv
+    trace = os.environ.get("SKALD_TRACE")
+    if trace:
+        traced(command, argv, trace)
     measurements = os.environ.get("SKALD_MEASURE")
     if not measurements:
         os.execv(java, command)
     return measured(command, argv, measurements)
+
+
+def traced(command, argv, directory):
+    """Replaces this process with strace watching the JVM. Used by dev/trace-extraction.sh.
+
+    One trace per fixture, named after the archive (and this pid, so a repeated fixture
+    cannot overwrite an earlier trace). The flags are what the checker relies on:
+      -f             follow every thread and child, which is all of the JVM
+      -y             print each descriptor with the path it refers to, so a
+                     descriptor-relative call -- openat(5</work/w003/root>, "app.R") --
+                     names a real directory rather than a number. The extractor works
+                     almost entirely through descriptors; without -y a trace of it says
+                     nothing about where it went.
+      -s 4096        path arguments in full
+      -e trace=%file every call that takes a path, plus fchdir, which changes what a
+                     relative path means; the checker refuses a trace that shows either
+                     chdir or fchdir rather than guessing a working directory
+      --seccomp-bpf  stop only on those calls, so the JVM is not slowed by every read
+    """
+    archive = pathlib.Path(argv[argv.index("--archive") + 1]).name
+    out = os.path.join(directory, "%s.%d.strace" % (archive, os.getpid()))
+    os.execvp("strace", prepare_trace(out) + command)
+
+
+def prepare_trace(out):
+    """The one definition of how the extractor is traced; dev/trace-check.py's self-test
+    uses it too, so the check is proved against traces made exactly this way.
+
+    Records the working directory beside the trace, because a path with no directory
+    descriptor means nothing without it, and returns the strace argv to prefix.
+    """
+    pathlib.Path(out + ".cwd").write_text(os.getcwd())
+    return ["strace", "-f", "-y", "-qq", "-s", "4096", "--seccomp-bpf",
+            "-e", "trace=%file,fchdir", "-o", out]
 
 
 def measured(command, argv, measurements):

@@ -293,6 +293,19 @@ def self_test(tmp, base, ctx):
         print("  FAIL a RUN that wrote the wrong content was counted as built")
         missed.append("wrong content")
 
+    # The judge's per-call half, offline: two filters present and one call reached must
+    # still fail. The live control below drops the inner profile, which fails BOTH halves,
+    # so on its own it cannot show this half works (117dbc9 review, nonblocking).
+    two_filters_one_reached = ("\n".join("%s=x: Operation not permitted" % c
+                                          for c in worker_profile.HOSTILE_CALLS
+                                          if c != "mount")
+                               + "\nmount=ok\nSeccomp:2\nSeccomp_filters:2\n")
+    if not worker_profile.judge_hostile(two_filters_one_reached)[0]:
+        print("  ok   two filters with one call reached is not judged contained")
+    else:
+        print("  FAIL two filters with one call reached was judged contained")
+        missed.append("per-call half of the judge")
+
     # The build-code check next, for the same reason: it has to be able to fail. With
     # BuildKit's inner profile dropped, the same hostile RUN must be judged NOT contained.
     produced = []
