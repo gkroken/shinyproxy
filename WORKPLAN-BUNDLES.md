@@ -1649,6 +1649,17 @@ below are marked passed by this planning document.
       against untrusted build code is that the worker is sent the context as a stream and
       never sees this directory (T3's launcher contract), not these modes.
 
+      **Resource measurements** come from `bash dev/measure-extraction.sh [--full]`: the
+      same oracle over the same corpus, with the adapter recording each extraction's wall
+      time, the JVM's peak resident memory and the most bytes its root held at any 20 ms
+      sample (a floor). The oracle enforces the deadline and disk budget; this records what
+      was actually spent, so a gate can compare its own run with the author's. **One thing
+      it established that no limit states:** memory grows with `max_entries`, because the
+      duplicate index and the parsed manifest hold one entry per file. The entry-cap
+      fixtures are by far the most memory-hungry in the corpus. The defaults fit under the
+      adapter's 256 MiB heap. An operator raising `max_entries` towards its absolute maximum
+      must size the platform's heap with it, and T8's deployment notes owe that sentence.
+
 - [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
       uniqueness constraints. Add idempotency, leases/fencing, cancellation and admission

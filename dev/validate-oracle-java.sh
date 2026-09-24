@@ -16,6 +16,7 @@
 # --rename-race [--repeat N], --only FIXTURE.
 #
 # Usage: bash dev/validate-oracle-java.sh [ORACLE ARGS...]
+#        bash dev/validate-oracle-java.sh --compile-only
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -35,6 +36,11 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/m2home \
 
 docker build -q -t "$IMAGE" dev/oracle-java >/dev/null \
     || { echo "  FAIL could not build $IMAGE"; exit 1; }
+
+# --compile-only: stop here, for a caller that runs the oracle itself (measure-extraction.sh).
+if [ "${1:-}" = "--compile-only" ]; then
+    exit 0
+fi
 
 docker run --rm --user 0:0 --network none -v "$PWD":/ws:ro -v "$M2":/m2:ro -w /ws \
     -e HOME=/tmp -e SKALD_WORLD_BASE=/work "$IMAGE" \
