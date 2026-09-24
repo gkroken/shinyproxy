@@ -8,8 +8,7 @@
 
 T3: "Pin a rootless BuildKit candidate and prototype only the launcher/worker contract...
 If it requires a weakened invariant, stop and present the failed probe and alternatives
-for Q2 sign-off." This is that measurement, and the answer is better than the published
-recipes suggest.
+for Q2 sign-off." This is that measurement.
 
 **What the documentation prescribes, and why this does not do it.** BuildKit's own
 rootless guide runs the container with `--security-opt seccomp=unconfined
@@ -19,27 +18,27 @@ rootless guide runs the container with `--security-opt seccomp=unconfined
 question this probe answers is not "does rootless BuildKit run" but "does it run without
 the things we have already refused".
 
-**It does.** Docker's default profile is deny-by-default and blocks clone/unshare/mount
-for a process without CAP_SYS_ADMIN, which is why rootlesskit fails with "failed to start
-the child: fork/exec /proc/self/exe: operation not permitted". Adding exactly TWO syscalls
--- clone and mount -- is enough to build HERE, with the process sandbox intact. That is a
-NAMED profile, which the contract allows, rather than no profile at all. A third,
-umount2, is added for an intermittent failure seen in the realistic configuration; see
-INTERMITTENTLY_NEEDED, which is kept separate precisely so the two justifications are not
-confused.
+**It does, under a named profile**: Docker's default, plus the namespace-management calls
+a nested runc needs, with keyctl still denied. The profile and the reason for each member
+are in dev/buildkit_worker_profile.py, which the launcher probe shares.
 
-**A real build is the test, not a running daemon**, and the difference is not academic: a
-set without umount2 starts the daemon, reports a healthy worker, and then fails every
-build at "failed to unmount ...: operation not permitted". Anything measuring startup
-would have shipped a profile that cannot build.
+**What "builds" means here, and the defect that taught it.** Until 2026-09-24 this probe
+counted a build as done when its marker string appeared in buildctl's output. The marker
+was also in the Dockerfile, and BuildKit prints each step's command as the step's name
+whether or not the step runs, so "[2/2] RUN echo BUILD-RAN-ROOTLESS ..." satisfied the
+check while the step failed with "failed to unshare remaining namespaces". The RUN step
+never completed under the old two-syscall profile, and every claim built on it inherited a
+check that could not fail: that two syscalls sufficed, that the host was fine because this
+passed 5/5, that the full configuration's failure was intermittent and peculiar to it.
 
-**And a superset is not a safe answer.** Removing one syscall at a time from a larger
-working set gave clone+mount+umount2, which also builds -- but umount2 is only needed
-because allowing pivot_root makes runc take a mount-and-pivot path. With pivot_root denied
-nothing unmounts and umount2 is dead weight. The members are not independent, so
-`--self-test` re-derives the set from scratch and fails if any member turns out optional;
-it is what caught umount2. Every extra syscall is one the build did not need and an
-attacker might.
+Now the RUN writes a file whose content the shell computes, the build exports it, and the
+probe reads it back. The expected text appears nowhere in the Dockerfile, so no step name
+can supply it, and `--self-test` runs a RUN that writes the file and then fails, which
+must not count as built.
+
+**A real build is the test, not a running daemon.** Without sethostname the daemon starts
+and reports a healthy worker, and every RUN still fails. Anything measuring startup would
+ship a profile that cannot build -- which, through the check above, is what happened.
 
 Usage: python3 dev/rootless-buildkit-probe.py [--json] [--self-test]
 """
@@ -52,48 +51,25 @@ import subprocess
 import sys
 import tempfile
 
-# Docker's default seccomp profile: deny-by-default, ~300 syscalls allowed. Fetched rather
-# than vendored, because T7 owns the decision of what this deployment actually ships and
-# a copy here would be a second answer to that question. Apache-2.0, same as the rest.
-DEFAULT_PROFILE_URL = ("https://raw.githubusercontent.com/moby/profiles/main/"
-                       "seccomp/default.json")
+import buildkit_worker_profile as worker_profile
+
 BUILDKIT_IMAGE = os.environ.get("BUILDKIT_IMAGE", "moby/buildkit:rootless")
 SOCKET = "unix:///run/user/1000/buildkit/buildkitd.sock"
 CONTAINER = "skald-rootless-buildkit"
-MARKER = "BUILD-RAN-ROOTLESS"
+OUT = "/home/user/out"
 
-# The minimum that lets a build COMPLETE, measured by removing one at a time and
-# confirmed by --self-test, which rejects a set where any member turns out optional.
-#
-# It is TWO, and the road to that number is worth recording because the obvious method
-# gives the wrong answer twice over:
-#   - Measuring whether the DAEMON STARTS gives a smaller set that cannot build. Without
-#     umount2 the daemon runs and reports a healthy worker, and then every build fails at
-#     "failed to unmount ...: operation not permitted".
-#   - Measuring by removing one syscall from a larger working set gives a LARGER set than
-#     necessary, because the members are not independent. Allowing pivot_root makes runc
-#     take a mount-and-pivot path that then needs umount2; with pivot_root denied it never
-#     unmounts, and umount2 is not needed at all. A superset is not a safe answer here:
-#     every extra syscall is one the build did not need and an attacker might.
-REQUIRED_SYSCALLS = ["clone", "mount"]
+# What the RUN step writes. The shell computes the 42, so this exact text is in no step
+# name and no command line: only in a file the step produced.
+EVIDENCE = "42-BUILD-RAN-ROOTLESS"
+DOCKERFILE = 'FROM alpine:3.20\nRUN echo "$((6*7))-BUILD-RAN-ROOTLESS" > /out.txt\n'
+# The negative control: writes the evidence and then fails. A check that counted this as
+# built would be the check this probe used to have.
+FAILING_DOCKERFILE = ('FROM alpine:3.20\n'
+                      'RUN echo "$((6*7))-BUILD-RAN-ROOTLESS" > /out.txt && exit 1\n')
 
-# Included for a reason minimality analysis cannot give, and kept separate from the set
-# above so that the distinction is visible rather than averaged away.
-#
-# clone+mount was measured minimal HERE, where the build pulls its base over ordinary
-# Docker egress. In the configuration dev/launcher-contract-probe.py builds -- base pulled
-# from a registry through the egress gateway, which EXTRACTS a layer -- the same set
-# intermittently fails at "failed to unmount /run/user/1000/containerd-mount...:
-# operation not permitted". Observed twice, and not reproducible on demand: three
-# consecutive runs then succeeded, and a later pair of runs passed with and without it.
-#
-# So this is not "umount2 is required", which --self-test would rightly refuse to certify.
-# It is: the minimum measured in a simple configuration is intermittently insufficient in
-# the real one, and an intermittent "operation not permitted" is close to undebuggable for
-# a publisher. mount without umount2 is also an odd pairing -- a process that may mount
-# and may not unmount. The marginal risk is small in a rootless, userns-confined worker
-# that already holds mount.
-INTERMITTENTLY_NEEDED = ["umount2"]
+# Removed in the main run's minimality check: the last call runc makes, so the daemon
+# starts, reports a worker, and only the RUN fails -- the case a startup check misses.
+RUN_STAGE_SYSCALL = "sethostname"
 
 # Decision 6 rejects each of these by name; none may appear in the launch arguments.
 FORBIDDEN = ["--privileged", "seccomp=unconfined", "apparmor=unconfined",
@@ -120,34 +96,19 @@ def docker(args, **kw):
     return subprocess.run(["docker"] + args, capture_output=True, text=True, **kw)
 
 
-def fetch_default_profile(directory):
-    path = pathlib.Path(directory) / "default.json"
-    got = subprocess.run(["curl", "-sS", "-o", str(path), "-w", "%{http_code}",
-                          DEFAULT_PROFILE_URL], capture_output=True, text=True,
-                         timeout=120)
-    if got.stdout.strip() != "200":
-        raise SystemExit(
-            "could not fetch Docker's default seccomp profile (HTTP %s) from %s.\n"
-            "This probe compares against it and will not substitute something weaker."
-            % (got.stdout.strip(), DEFAULT_PROFILE_URL))
-    return json.loads(path.read_text())
-
-
-def write_profile(directory, base, added):
-    """Docker's default, plus a named set of extra syscalls. Never 'unconfined'."""
-    profile = json.loads(json.dumps(base))
-    if added:
-        profile["syscalls"].append({"names": list(added), "action": "SCMP_ACT_ALLOW"})
-    path = pathlib.Path(directory) / "profile.json"
-    path.write_text(json.dumps(profile))
-    path.chmod(0o644)
-    return str(path)
+def make_context(tmp, name, dockerfile):
+    ctx = pathlib.Path(tmp) / name
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text(dockerfile)
+    assert EVIDENCE not in dockerfile, "the evidence must not be spelled in the Dockerfile"
+    return str(ctx)
 
 
 def try_build(profile_path, context, extra=()):
     """Start rootless buildkitd under `profile_path` and run one real build.
 
-    Returns (started, worker_found, process_mode, built, detail).
+    Returns (started, process_mode, built, detail). `built` means the RUN step's own file
+    came back out of the build with the computed content, and nothing less.
     """
     docker(["rm", "-f", CONTAINER])
     args = ["run", "-d", "--name", CONTAINER]
@@ -177,15 +138,17 @@ def try_build(profile_path, context, extra=()):
     if started:
         out = docker(["exec", CONTAINER, "buildctl", "--addr", SOCKET, "build",
                       "--frontend", "dockerfile.v0", "--local", "context=/ctx",
-                      "--local", "dockerfile=/ctx"], timeout=600)
+                      "--local", "dockerfile=/ctx",
+                      "--output", "type=local,dest=" + OUT], timeout=600)
         blob = out.stdout + out.stderr
-        built = MARKER in blob
+        produced = docker(["exec", CONTAINER, "cat", OUT + "/out.txt"]).stdout.strip()
+        built = out.returncode == 0 and produced == EVIDENCE
         detail = next((l for l in blob.splitlines()
-                       if "operation not permitted" in l or "failed to solve" in l), "")
+                       if "not permitted" in l or "ERROR" in l), "")
     else:
         detail = next((l for l in logs.splitlines() if "not permitted" in l), "")
     docker(["rm", "-f", CONTAINER])
-    return started, mode, built, detail.strip()[:110]
+    return started, mode, built, detail.strip()[:140]
 
 
 def main(argv):
@@ -193,18 +156,16 @@ def main(argv):
     print()
     tmp = tempfile.mkdtemp(prefix="skald-rootless-")
     try:
-        base = fetch_default_profile(tmp)
-        ctx = pathlib.Path(tmp) / "ctx"
-        ctx.mkdir()
-        (ctx / "Dockerfile").write_text(
-            "FROM alpine:3.20\nRUN echo %s > /out.txt && cat /out.txt\n" % MARKER)
+        base = worker_profile.fetch_default(tmp)
+        ctx = make_context(tmp, "ctx", DOCKERFILE)
 
         if "--self-test" in argv:
-            return self_test(tmp, base, str(ctx))
+            return self_test(tmp, base, ctx)
 
         # 1. Docker's default ALONE must fail. If it did not, adding syscalls would be
         #    unjustified -- a relaxation nobody needs is one nobody should grant.
-        started, mode, built, detail = try_build(write_profile(tmp, base, []), str(ctx))
+        started, mode, built, detail = try_build(
+            worker_profile.write(tmp, base, allowed=[], enosys=[]), ctx)
         record("unmodified default is refused",
                "rootlesskit cannot start under deny-by-default",
                "refused: %s" % (detail or "did not start"), not started,
@@ -212,12 +173,12 @@ def main(argv):
                                       "addition below needs no justification and should "
                                       "not be made")
 
-        # 2. Default plus exactly three syscalls: a real build, end to end.
-        path = write_profile(tmp, base, REQUIRED_SYSCALLS + INTERMITTENTLY_NEEDED)
-        started, mode, built, detail = try_build(path, str(ctx))
-        record("builds with a named profile",
-               "default + %s completes a build" % ", ".join(REQUIRED_SYSCALLS),
-               "built" if built else "FAILED: %s" % (detail or "no build"), built)
+        # 2. The profile of record: a real build whose RUN step demonstrably ran.
+        started, mode, built, detail = try_build(worker_profile.write(tmp, base), ctx)
+        record("the RUN step runs",
+               "default + %s, keyctl -> ENOSYS: the RUN's file comes back"
+               % ",".join(worker_profile.ALLOWED),
+               "ran" if built else "FAILED: %s" % (detail or "no build"), built)
 
         # 3. The process sandbox is the thing decision 6 refused to trade away.
         record("process sandbox intact",
@@ -230,8 +191,7 @@ def main(argv):
 
         # 4. Nothing forbidden was used to get here -- checked against the argv actually
         #    issued, every launch of it, not against a string this function writes.
-        offenders = sorted({f for argv in launches for a in argv for f in FORBIDDEN
-                            if f in a})
+        offenders = forbidden_in_launches()
         record("no forbidden argument used",
                "none of decision 6's rejected flags appear in any launch",
                "clean across %d launch(es)" % len(launches) if not offenders
@@ -240,14 +200,18 @@ def main(argv):
                "" if launches else "no launch was recorded, so this check examined "
                                    "nothing")
 
-        # 5. Minimality, which is a claim and therefore gets a control: drop one syscall
-        #    and the build must stop working. Otherwise "minimum" is decoration.
-        reduced = [s for s in REQUIRED_SYSCALLS if s != "mount"]
-        _, _, still, _ = try_build(write_profile(tmp, base, reduced), str(ctx))
-        record("the addition is minimal",
-               "removing mount breaks the build",
-               "broken, as required" if not still
-               else "STILL BUILDS without mount, so the set is not minimal", not still)
+        # 5. Minimality at the stage that matters: without the last call runc makes, the
+        #    daemon still starts and reports a worker, and the RUN must fail. The whole
+        #    set is checked one member at a time by --self-test.
+        reduced = [s for s in worker_profile.ALLOWED if s != RUN_STAGE_SYSCALL]
+        started, _, still, _ = try_build(worker_profile.write(tmp, base, allowed=reduced),
+                                         ctx)
+        record("a RUN-stage call is load-bearing",
+               "without %s the daemon starts and the RUN fails" % RUN_STAGE_SYSCALL,
+               "RUN failed, daemon up, as required" if started and not still
+               else ("the daemon did not start, so this measured startup instead"
+                     if not started else "STILL RAN without %s" % RUN_STAGE_SYSCALL),
+               started and not still)
     finally:
         docker(["rm", "-f", CONTAINER])
         shutil.rmtree(tmp, ignore_errors=True)
@@ -256,8 +220,8 @@ def main(argv):
     print()
     print("  %d check(s), %d failed" % (len(results), len(bad)))
     print()
-    print("RESULT:", "rootless BuildKit builds under a named profile, sandbox intact"
-          if not bad else "%d check(s) FAILED" % len(bad))
+    print("RESULT:", "rootless BuildKit runs a RUN step under a named profile, sandbox "
+                     "intact" if not bad else "%d check(s) FAILED" % len(bad))
     if "--json" in argv:
         print(json.dumps(results, indent=2))
     return 0 if not bad else 1
@@ -268,13 +232,24 @@ def forbidden_in_launches():
 
 
 def self_test(tmp, base, ctx):
-    """Each required syscall must be required; the forbidden check must see a violation."""
+    """The success check must see a failure; every profile member must be needed."""
     print("== self-test: each claim must fail when its premise is removed ==")
     missed = []
+    full = worker_profile.write(tmp, base)
 
-    # The forbidden-argument check first, because it is the one that certified this
-    # probe's headline claim while being unable to fail. Each flag must be SEEN when it
-    # is actually passed to docker.
+    # The success check first, because it is the one that certified this probe's headline
+    # claim while being unable to fail. A RUN that writes the evidence and then exits
+    # non-zero must not count.
+    failing = make_context(tmp, "failing", FAILING_DOCKERFILE)
+    started, _, built, _ = try_build(full, failing)
+    if started and not built:
+        print("  ok   a RUN that fails is not counted as built")
+    else:
+        print("  FAIL a failing RUN was counted as built (or the daemon did not start)")
+        missed.append("failing RUN")
+
+    # The forbidden-argument check. Each flag must be SEEN when it is actually passed to
+    # docker.
     for label, extra, expect in (
             ("the Docker socket is mounted",
              ("-v", "/var/run/docker.sock:/var/run/docker.sock"), "/var/run/docker.sock"),
@@ -283,7 +258,7 @@ def self_test(tmp, base, ctx):
              ("--security-opt", "apparmor=unconfined"), "apparmor=unconfined"),
     ):
         launches.clear()
-        try_build(write_profile(tmp, base, REQUIRED_SYSCALLS), ctx, extra=extra)
+        try_build(full, ctx, extra=extra)
         seen = forbidden_in_launches()
         if expect in seen:
             print("  ok   forbidden flag detected: %s" % label)
@@ -291,18 +266,33 @@ def self_test(tmp, base, ctx):
             print("  FAIL NOT detected: %s (saw %s)" % (label, seen or "nothing"))
             missed.append(label)
     launches.clear()
-    # Only REQUIRED_SYSCALLS is asserted load-bearing. INTERMITTENTLY_NEEDED deliberately
-    # is not: its justification is an observed flake, not a deterministic failure, and a
-    # self-test that certified it as "required" would be asserting something this host
-    # does not reliably show.
-    for syscall in REQUIRED_SYSCALLS:
-        reduced = [s for s in REQUIRED_SYSCALLS if s != syscall]
-        _, _, built, _ = try_build(write_profile(tmp, base, reduced), ctx)
+
+    # The positive control for the loop below: with nothing removed the RUN runs, so a
+    # failure below is the removal and not a broken setup.
+    if not try_build(full, ctx)[2]:
+        print("  FAIL the full profile does not run the RUN; nothing below means anything")
+        missed.append("positive control")
+
+    # Every member, one at a time, against the RUN -- not against startup.
+    for syscall in worker_profile.ALLOWED:
+        reduced = [s for s in worker_profile.ALLOWED if s != syscall]
+        started, _, built, detail = try_build(
+            worker_profile.write(tmp, base, allowed=reduced), ctx)
         if built:
-            print("  FAIL %s is NOT required; the set is not minimal" % syscall)
+            print("  FAIL %s is NOT required; the RUN ran without it" % syscall)
             missed.append(syscall)
         else:
-            print("  ok   %s is required: removing it breaks the build" % syscall)
+            print("  ok   %s is required: %s" % (
+                syscall, "the RUN fails" if started else "the daemon cannot start"))
+    for syscall in worker_profile.ENOSYS:
+        reduced = [s for s in worker_profile.ENOSYS if s != syscall]
+        started, _, built, _ = try_build(
+            worker_profile.write(tmp, base, enosys=reduced), ctx)
+        if built:
+            print("  FAIL %s -> ENOSYS is NOT required; the RUN ran with EPERM" % syscall)
+            missed.append(syscall + " -> ENOSYS")
+        else:
+            print("  ok   %s -> ENOSYS is required: with EPERM the RUN fails" % syscall)
 
     # There was a case here that reported the worker's process-mode and printed "ok"
     # whatever it read -- including "unknown". It is removed rather than reworded: a
@@ -312,10 +302,10 @@ def self_test(tmp, base, ctx):
     docker(["rm", "-f", CONTAINER])
     print()
     if missed:
-        print("RESULT: self-test FAILED, %d syscall(s) not actually required"
-              % len(missed))
+        print("RESULT: self-test FAILED: %s" % ", ".join(missed))
         return 1
-    print("RESULT: self-test passed -- every syscall in the set is load-bearing")
+    print("RESULT: self-test passed -- the success check can fail, and every member of "
+          "the profile is load-bearing")
     return 0
 
 

@@ -7,9 +7,9 @@
 # and streams it over the BuildKit session; the worker's only route out is the egress
 # gateway, allowlisted to the registry alone.
 #
-# It asserts what it can demonstrate. The nested RUN step does NOT reliably complete in
-# this configuration and that is recorded as owed in T3, not asserted here -- see the
-# probe's docstring for the two failures observed and the evidence that the host is fine.
+# It asserts the whole build: each image is pulled back from the registry by the launcher
+# and must hold the file its nested RUN step wrote. The worker's seccomp profile is
+# dev/buildkit_worker_profile.py; the probe's docstring records why the RUN used to fail.
 #
 # Creates two networks, a registry, a gateway and one worker per attempt, and removes all
 # of them including on failure.

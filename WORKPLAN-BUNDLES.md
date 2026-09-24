@@ -1470,9 +1470,9 @@ below are marked passed by this planning document.
       | Malicious code in a real dependency-install hook | `dev/validate-hostile-deps.sh` | **9 escape attempts** in `dev/hostile-dep-probe.py` from inside a real `setup.py`, across 11 detection sites, all contained; 9 deliberate holes, all detected |
       | Second worker/canary | same | A sibling workspace with data in it, looked for and not found; proved by mounting it |
       | Egress gateway and allowlist | `dev/validate-egress.sh` | Deny-all except the configured host, 6 checks, 7 weakenings detected |
-      | Rootless BuildKit | `dev/validate-rootless-buildkit.sh` | Builds under Docker's **deny-by-default** profile plus 2 syscalls, `process-mode:sandbox` intact |
+      | Rootless BuildKit | `dev/validate-rootless-buildkit.sh` | ~~Builds under Docker's deny-by-default profile plus 2 syscalls~~ — **false, corrected 2026-09-24:** the RUN never ran; the check matched the step's name. A RUN runs under the default plus **7 namespace-management syscalls, `keyctl` answered ENOSYS**, `process-mode:sandbox` intact, each member shown necessary by `--self-test` (`dev/buildkit_worker_profile.py`) |
       | Launcher/worker contract | `dev/validate-launcher-contract.sh` | One daemon per attempt by its own id, no socket, no context mount, no credentials, none outliving its attempt |
-      | Trusted registry transport | same | Base pulled from the registry **through** the allowlisted gateway; pushing a built image is part of the blocked item below |
+      | Trusted registry transport | same | Base pulled from the registry **through** the allowlisted gateway; since 2026-09-24 the built image is pushed through it too and pulled back by the launcher, holding its RUN's file |
 
       **Q2's default needed no relaxation.** Every published rootless-BuildKit recipe
       reaches it through `seccomp=unconfined`, `apparmor=unconfined` or
@@ -1481,22 +1481,53 @@ below are marked passed by this planning document.
       profile plus `clone` and `mount` is enough, which is a *named* profile rather than
       the absence of one. No sign-off was required and none is requested.
 
-      **A minimal syscall set is a property of a configuration, not of a program.** The
+      > **Corrected 2026-09-24 (T5): "clone and mount is enough" was false.** The probe
+      > counted a build as done when its marker appeared in buildctl's output, and the
+      > marker was in the Dockerfile, which BuildKit prints as the step's name whether or
+      > not the step runs. Under that profile rootlesskit starts, and every `RUN` fails at
+      > `failed to unshare remaining namespaces`. The conclusion that no *relaxation* is
+      > needed survives; the size of the named profile does not. A nested runc needs
+      > `clone, mount, umount2, unshare, setns, pivot_root, sethostname` — each one a call
+      > Docker's default grants only with CAP_SYS_ADMIN, and each one acting on namespaces
+      > the worker itself created — and `keyctl` is **still denied**, answered with ENOSYS
+      > instead of EPERM because runc tolerates only the former (Docker's own profile does
+      > the same for `clone3`). No `seccomp=unconfined`, `apparmor=unconfined` or
+      > `--oci-worker-no-process-sandbox`. The profile is now one definition shared by both
+      > probes, against Docker's default **pinned by commit and hash**: it had been fetched
+      > from `main`, which changed twice in August 2026. The success check reads back a
+      > file the `RUN` wrote, with content the shell computes so no step name can supply
+      > it, and `--self-test` requires a failing `RUN` not to count and every member of the
+      > profile to be necessary. The exact profile is the T5 gate's to review.
+
+      **A minimal syscall set is a property of a configuration, not of a program.**
+      *(Superseded 2026-09-24: there was no configuration dependence and no intermittency
+      to explain. Both "sets" were measured with the check above, which could not fail;
+      `umount2` is required in every configuration, like the other six.)* The
       two above were measured where the base is pulled over ordinary Docker egress. Where
       a layer is *extracted* from a registry pull, that set intermittently fails on
       `umount2`, so `umount2` is carried in a separate `INTERMITTENTLY_NEEDED` list — its
       justification is an observed flake, and the self-test would rightly refuse to
       certify it as required.
 
-      **BLOCKED — to be fixed inside T5, before its gate's Phase 2 (user decision
-      2026-09-24).** It was recorded here as gating T7; the user moved it forward, because
-      T5's Pass requires "no skipped isolation probe" and this is one, so leaving it for T7
-      would have meant either blocking T5's pass or carving the probe out of it. Diagnosis
-      runs one variable at a time with A/B, as for the MinIO flake (`9991ff1`), and the
-      first experiment is a snapshotter other than `--oci-worker-snapshotter=native`, since
-      both failures are mount-related. Decision 6 is not relaxed to get there: no
-      `seccomp=unconfined`, no `apparmor=unconfined`, no disabled process sandbox, without
-      the user's sign-off. The text below is the state as T3(b) left it. The nested `RUN` step does not reliably complete in
+      **RESOLVED 2026-09-24, inside T5 (user decision the same day to fix it there,
+      before the gate's Phase 2, rather than let it gate T7).** The `RUN` failed every
+      time, in both probes; it looked intermittent and configuration-specific only because
+      the simple probe's success check could not fail. Diagnosed one variable at a time,
+      each failure naming the next denied call — `unshare`, `setns`, `keyctl`,
+      `pivot_root`, `sethostname` — and then the push, which had two causes of its own:
+      `registry.insecure=true` on the client output sent it over HTTPS direct to a name the
+      internal network cannot resolve, and the tinyproxy gateway dropped pooled keep-alive
+      connections, which fails a blob-upload POST: pushes 13 of 22 through tinyproxy (6 of
+      them with its idle timeout raised to 600 s, which did not help) and 16 of 16 through
+      squid with the same one-host rule; every `RUN` that executed, rather than hitting the
+      cache, completed under both. The launcher probe
+      now uses squid, and the gateway T7 picks must be tested with a push, not only a pull.
+      The snapshotter experiment planned first was not needed: no failure involved it. The
+      launcher suite asserts the `RUN` and the push by pulling each image back and reading
+      the file its `RUN` wrote. The snapshot of what T3(b) recorded follows, kept because
+      the record of a wrong conclusion is the useful part.
+
+      The nested `RUN` step does not reliably complete in
       the full configuration — internal network, proxied egress, registry pull,
       TCP-addressed worker, session-streamed context. Two intermittent failures seen,
       `failed to unmount ...: operation not permitted` and `nsexec: failed to sync with
@@ -1583,6 +1614,10 @@ below are marked passed by this planning document.
       left to gate T7; the probe then asserts the `RUN` and the push, and the Phase 2
       session re-runs it like the others. Decision 6 bounds the fix: no relaxation of the
       seccomp/AppArmor profile or the process sandbox without the user's sign-off.
+      **Closed 2026-09-24** — see T3(b). No relaxation was needed; the named profile grew
+      from two syscalls to seven plus `keyctl` → ENOSYS, and the Phase 2 session should
+      review that profile (`dev/buildkit_worker_profile.py`) as part of the sandbox
+      configuration.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in

@@ -29,24 +29,30 @@ launcher's filesystem for the whole life of the build; a session is a bounded tr
 that ends. This probe asserts the worker has no such mount, by reading the container's
 actual mount list rather than by trusting how it was started.
 
-**What this does NOT assert, and why.** The nested `RUN` step does not reliably complete
-in this configuration. Two distinct failures were seen -- `failed to unmount
-/run/user/1000/containerd-mount...: operation not permitted`, and `nsexec: failed to sync
-with stage-1` -- both intermittent, and neither fixed by widening the seccomp set
-(clone+mount+umount2+setns+unshare+pivot_root failed the same way). The host is not
-degraded: dev/validate-rootless-buildkit.sh, which builds on the default bridge network
-with a mounted context, passes 5/5 immediately before and after.
+**The RUN and the push are asserted, end to end.** Until 2026-09-24 this probe asserted
+only that the build reached its second stage, and recorded the nested RUN as an
+unexplained, intermittent failure specific to this configuration. It was neither. Every
+RUN failed, here and in dev/rootless-buildkit-probe.py alike; that probe reported success
+because its marker was also in the step's name. The profile lacked the namespace calls a
+nested runc makes, and keyctl answered EPERM where runc tolerates only ENOSYS -- see
+dev/buildkit_worker_profile.py, which both probes now share. With it the RUN runs.
 
-So the difference is this configuration -- internal network, proxied egress, registry
-pull, TCP-addressed worker, session-streamed context -- and it is unexplained. Rather than
-assert a build that passes sometimes, this probe asserts what it can demonstrate: that the
-worker is correctly constrained, that the context ARRIVES over the session, and that the
-base image is pulled through the gateway. Both of those are proved by the build reaching
-its second stage, which it does every time.
+Two things then stood between the RUN and the registry, both fixed here:
+  - `registry.insecure=true` on the client's output makes BuildKit try HTTPS first, direct
+    to the registry by name, which no worker on an internal network can resolve. The
+    worker's own buildkitd.toml already says the registry speaks plain HTTP; that is the
+    one place it is said now.
+  - tinyproxy intermittently broke the push: "http: server closed idle connection" on the
+    blob-upload POST. A proxy that drops a pooled keep-alive connection costs a GET nothing
+    (Go retries it) and fails a POST (Go may not replay one). Squid, with the same
+    allow-one-host rule, does not. The gateway here is a stand-in for the operator's
+    egress proxy (T7 chooses that); what this establishes for T7 is that the choice must be
+    tested with a push, not a pull.
 
-Completing the nested RUN and pushing the result are recorded as owed in T3 rather than
-claimed here. A probe that asserted them would be red, and a probe that dropped them
-quietly would be the thing this repository keeps deleting.
+The proof of a RUN is not a string in buildctl's output. The launcher pulls each pushed
+image back from the registry and reads the file its RUN wrote, whose content the shell
+computed, so it appears in no step name. That one check covers the RUN, the push through
+the gateway, and the image being readable by the trusted side.
 
 Usage: python3 dev/launcher-contract-probe.py [--json]
 """
@@ -59,17 +65,12 @@ import subprocess
 import sys
 import tempfile
 
+import buildkit_worker_profile as worker_profile
+
 INNER, OUTER = "skald-lc-inner", "skald-lc-outer"
 GATEWAY, REGISTRY = "skald-lc-gateway", "skald-lc-registry"
 WORKER_PREFIX = "skald-lc-worker-"
 BUILDKIT_IMAGE = os.environ.get("BUILDKIT_IMAGE", "moby/buildkit:rootless")
-DEFAULT_PROFILE_URL = ("https://raw.githubusercontent.com/moby/profiles/main/"
-                       "seccomp/default.json")
-# clone and mount are measured minimal by dev/rootless-buildkit-probe.py; umount2 is
-# added there for an intermittent unmount failure seen in THIS configuration, where the
-# base image is pulled and a layer extracted. Kept in step with that file deliberately:
-# two probes disagreeing about the profile would be worse than either being wrong.
-REQUIRED_SYSCALLS = ["clone", "mount", "umount2"]
 REGISTRY_PORT = 15001
 ATTEMPTS = 2          # two attempts, so "one worker per attempt" is observable
 BUILD_REPEATS = 2     # each build run twice, so an intermittent failure is a failure
@@ -104,30 +105,27 @@ def cleanup():
 
 
 def build_gateway(tmp):
+    """Squid, allowing exactly the registry on its port. No cache: it forwards, and that is
+    all it may do. Why squid and not tinyproxy is in the module docstring."""
     d = pathlib.Path(tmp)
-    (d / "filter").write_text("^%s$\n" % REGISTRY)
-    (d / "tinyproxy.conf").write_text(
-        "User nobody\nGroup nobody\nPort 8888\nListen 0.0.0.0\nTimeout 60\n"
-        "Allow 0.0.0.0/0\nFilterDefaultDeny Yes\n"
-        'Filter "/etc/tinyproxy/filter"\nFilterURLs Off\n'
-        "ConnectPort 443\nConnectPort 5000\nLogLevel Info\n")
+    (d / "squid.conf").write_text(
+        "http_port 8888\n"
+        "acl registry dstdomain %s\n"
+        "acl registry_port port 5000\n"
+        "http_access allow registry registry_port\n"
+        "http_access deny all\n"
+        "cache deny all\n"
+        "access_log stdio:/dev/stdout\n"
+        "cache_log stdio:/dev/stderr\n"
+        "pid_filename none\n"
+        "coredump_dir /tmp\n" % REGISTRY)
     (d / "Dockerfile.gw").write_text(
-        "FROM alpine:3.20\nRUN apk add --no-cache tinyproxy\n"
-        "COPY tinyproxy.conf /etc/tinyproxy/tinyproxy.conf\n"
-        "COPY filter /etc/tinyproxy/filter\n"
-        'CMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]\n')
+        "FROM alpine:3.20\nRUN apk add --no-cache squid\n"
+        "COPY squid.conf /etc/squid/squid.conf\nUSER squid\n"
+        'CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]\n')
     if docker(["build", "-q", "-t", "skald-lc-gateway:local", "-f",
                str(d / "Dockerfile.gw"), tmp], timeout=900).returncode != 0:
         raise SystemExit("could not build the gateway image")
-
-
-def write_profile(tmp, base):
-    profile = json.loads(json.dumps(base))
-    profile["syscalls"].append({"names": REQUIRED_SYSCALLS, "action": "SCMP_ACT_ALLOW"})
-    path = pathlib.Path(tmp) / "profile.json"
-    path.write_text(json.dumps(profile))
-    path.chmod(0o644)
-    return str(path)
 
 
 def start_worker(tmp, profile, index):
@@ -159,8 +157,7 @@ def run_build(worker, ctx, tag):
                   "--addr", "tcp://%s:1234" % worker, "build",
                   "--frontend", "dockerfile.v0",
                   "--local", "context=/ctx", "--local", "dockerfile=/ctx",
-                  "--output", "type=image,name=%s,push=true,registry.insecure=true"
-                  % tag], timeout=900)
+                  "--output", "type=image,name=%s,push=true" % tag], timeout=900)
     return out.stdout + out.stderr
 
 
@@ -169,13 +166,7 @@ def main(argv):
     print()
     tmp = tempfile.mkdtemp(prefix="skald-lc-")
     try:
-        got = subprocess.run(["curl", "-sS", "-o", tmp + "/default.json", "-w",
-                              "%{http_code}", DEFAULT_PROFILE_URL],
-                             capture_output=True, text=True, timeout=120)
-        if got.stdout.strip() != "200":
-            raise SystemExit("could not fetch Docker's default seccomp profile")
-        base = json.loads(pathlib.Path(tmp + "/default.json").read_text())
-        profile = write_profile(tmp, base)
+        profile = worker_profile.write(tmp, worker_profile.fetch_default(tmp))
         pathlib.Path(tmp + "/buildkitd.toml").write_text(
             '[registry."%s:5000"]\n  http = true\n' % REGISTRY)
         pathlib.Path(tmp + "/buildkitd.toml").chmod(0o644)
@@ -201,7 +192,7 @@ def main(argv):
                   timeout=600).returncode != 0:
             raise SystemExit("could not seed the base image; nothing below would build")
 
-        workers, worker_ids, built, pushed = [], [], [], []
+        workers, worker_ids, built = [], [], []
         survivors_at_start, offenders, inspected = [], [], []
         for attempt in range(1, ATTEMPTS + 1):
             # Before this attempt starts, no PREVIOUS attempt's worker may still be
@@ -213,10 +204,11 @@ def main(argv):
                 ["ps", "-q", "--filter", "name=" + WORKER_PREFIX]).stdout.split())
             ctx = pathlib.Path(tmp) / ("ctx%d" % attempt)
             ctx.mkdir()
-            marker = "ATTEMPT-%d-RAN" % attempt
+            # The shell computes the 42, so the evidence is in no step name.
+            evidence = "42-ATTEMPT-%d-RAN" % attempt
             (ctx / "Dockerfile").write_text(
                 "FROM %s:5000/base/alpine:3.20\n"
-                "RUN echo %s > /o.txt && cat /o.txt\n" % (REGISTRY, marker))
+                'RUN echo "$((6*7))-ATTEMPT-%d-RAN" > /o.txt\n' % (REGISTRY, attempt))
             worker = start_worker(tmp, profile, attempt)
             workers.append(worker)
             if not worker:
@@ -230,19 +222,27 @@ def main(argv):
                           "debug", "workers", "--format", "{{range .}}{{.ID}}\n{{end}}"],
                          timeout=180).stdout.strip().splitlines()
             worker_ids.append(dbg[0] if dbg else None)
-            tag = "%s:5000/built/attempt%d:1" % (REGISTRY, attempt)
-            # Reaching stage 2 means the context streamed in AND the base resolved and
-            # pulled through the gateway. That is what this probe asserts; whether the
-            # RUN then completes is the unexplained part, recorded but not claimed.
+            # Each build is pushed under its own tag and pulled back by the LAUNCHER, which
+            # then reads the file the RUN wrote. The second build on a worker reuses the
+            # cached RUN layer; it still has to push, and the file still has to be there.
             reached = 0
-            for _ in range(BUILD_REPEATS):
-                blob = run_build(worker, str(ctx), tag)
-                if "[1/2] FROM" in blob and "[2/2] RUN" in blob:
+            for repeat in range(1, BUILD_REPEATS + 1):
+                pushed_as = "built/attempt%d:%d" % (attempt, repeat)
+                blob = run_build(worker, str(ctx), "%s:5000/%s" % (REGISTRY, pushed_as))
+                local = "localhost:%d/%s" % (REGISTRY_PORT, pushed_as)
+                docker(["rmi", "-f", local])
+                pulled = docker(["pull", "-q", local], timeout=600).returncode == 0
+                produced = docker(["run", "--rm", "--network", "none", "--entrypoint",
+                                   "cat", local, "/o.txt"],
+                                  timeout=300).stdout.strip() if pulled else ""
+                docker(["rmi", "-f", local])
+                if produced == evidence:
                     reached += 1
                 else:
-                    print("     did not reach stage 2: %s" % blob.strip()[-200:])
-                if "exporting manifest" in blob:
-                    pushed.append(True)
+                    err = next((l for l in blob.splitlines() if "ERROR" in l
+                                or "not permitted" in l), blob.strip()[-200:])
+                    print("     %s: %s" % (pushed_as, err[:200] if pulled
+                                            else "not in the registry; " + err[:160]))
             built.append(reached == BUILD_REPEATS)
 
             # Inspected while the worker is ALIVE, because that is when the contract is
@@ -277,13 +277,14 @@ def main(argv):
                                                  "without it this only compares names "
                                                  "this probe chose")
 
-        record("context streamed and base pulled",
-               "every build reaches stage 2, %d/%d times" % (BUILD_REPEATS,
-                                                             BUILD_REPEATS),
-               "reached every time" if all(built) else "a build did not reach stage 2",
-               bool(built) and all(built),
-               "" if all(built) else "the context or the gateway pull failed, which is "
-                                     "what this asserts; the RUN step is not asserted")
+        record("the RUN ran and its image was pushed",
+               "every build's image comes back from the registry holding its RUN's "
+               "file, %d/%d per worker" % (BUILD_REPEATS, BUILD_REPEATS),
+               "every image, every time" if built and all(built)
+               else "%d of %d worker(s) fell short" % (built.count(False), len(built)),
+               len(built) == ATTEMPTS and all(built),
+               "" if built and all(built) else "the context, the base pull, the RUN or "
+                                                "the push failed; the lines above say which")
 
         record("nothing forbidden reaches the worker",
                "no docker socket, no context mount, no credentials",
@@ -295,7 +296,7 @@ def main(argv):
 
         # The registry is reachable from the gateway's side and holds the seeded base,
         # which is what makes the pull above a pull THROUGH the gateway rather than a
-        # cached layer. Whether a BUILT image lands here is owed, not asserted.
+        # cached layer. The built images are asserted above, by pulling them back.
         tags = docker(["run", "--rm", "--network", OUTER, "--entrypoint", "sh",
                        "alpine:3.20", "-c",
                        "apk add --no-cache -q curl >/dev/null; "
