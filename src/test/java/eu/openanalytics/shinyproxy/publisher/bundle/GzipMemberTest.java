@@ -251,6 +251,29 @@ public class GzipMemberTest {
                 "the bound that actually stopped the read was replaced by a later one");
     }
 
+    @Test
+    public void anAbandonedMemberIsReleasedWithoutBeingDrained() throws Exception {
+        // eb47651-F1. A caller that has already refused the bundle abandons the member, and
+        // closing it must not inflate the rest. Measured in bytes produced, not time.
+        byte[] bomb = gzip(new byte[64 * 1024 * 1024]);
+
+        GzipMember abandoned = GzipMember.open(new ByteArrayInputStream(bomb), LIMITS);
+        abandoned.read(new byte[16], 0, 16);
+        abandoned.abandon();
+        abandoned.close();
+        assertTrue(abandoned.expandedBytes() < 1024 * 1024,
+                "an abandoned member was inflated to " + abandoned.expandedBytes()
+                        + " bytes on close");
+
+        // The control: the same member closed without abandoning is drained to its end, so
+        // the assertion above is measuring the abandon and not a close that never drains.
+        // aConsumerThatStopsEarlyStillGetsEveryCheck is what that drain is for.
+        GzipMember kept = GzipMember.open(new ByteArrayInputStream(bomb), LIMITS);
+        kept.read(new byte[16], 0, 16);
+        kept.close();
+        assertEquals(64L * 1024 * 1024, kept.expandedBytes());
+    }
+
     /** Reads a little and closes, the way a tar reader meeting its end marker does. */
     private static void readSixteenBytesAndClose(byte[] archive, ExtractionLimits limits)
             throws IOException {

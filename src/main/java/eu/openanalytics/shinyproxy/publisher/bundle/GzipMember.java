@@ -53,7 +53,9 @@ import java.util.zip.Inflater;
  * <p><b>The checks do not depend on the caller draining.</b> A consumer that stops early —
  * a tar reader meeting the end-of-archive marker does exactly that — still gets them, because
  * {@link #close()} finishes the member when {@code read} has not. A rule enforced only when
- * the caller cooperates is not a rule, and nothing else in this class trusts the caller.
+ * the caller cooperates is not a rule, and nothing else in this class trusts the caller. The
+ * one exception is opt-out, not opt-in: a caller that has already refused the bundle may
+ * {@link #abandon()} it, and nothing is left to check.
  *
  * <p>The trailer is verified rather than skipped. A gzip member whose CRC or length does not
  * match what came out of it is corrupt, and a lenient parser that ignores the trailer will
@@ -80,6 +82,7 @@ public final class GzipMember extends InputStream {
     private long compressedRead;
     private long expanded;
     private boolean verified;
+    private boolean abandoned;
     private boolean closed;
 
     private GzipMember(InputStream source, ExtractionLimits limits) {
@@ -309,6 +312,9 @@ public final class GzipMember extends InputStream {
      * than decompressed. A rejection raised here during unwinding is suppressed by
      * try-with-resources and the original rejection still propagates, which is the right way
      * round: the first reason a bundle was refused is the one worth reporting.
+     *
+     * <p>Unless the member was {@linkplain #abandon() abandoned}: then the inflater is
+     * released and nothing more is read.
      */
     @Override
     public void close() throws IOException {
@@ -316,7 +322,7 @@ public final class GzipMember extends InputStream {
             return;
         }
         try {
-            if (!verified) {
+            if (!verified && !abandoned) {
                 byte[] discard = new byte[BUFFER];
                 while (read(discard, 0, discard.length) >= 0) {
                     continue;
@@ -326,6 +332,27 @@ public final class GzipMember extends InputStream {
             closed = true;
             inflater.end();
         }
+    }
+
+    /**
+     * Declares that the bundle has already been refused, so {@link #close()} releases the
+     * member without draining it.
+     *
+     * <p>Finding eb47651-F1: the drain in {@code close()} exists to decide whether a bundle
+     * that looked complete is one. Once something has refused it there is nothing left to
+     * decide, yet the drain still inflated the rest of the member up to the tar stream
+     * ceiling — about 2 GiB of zeros for the corpus's bomb-expanded-over-limit, refused on a
+     * header a few KiB in, and up to 256 GiB at the largest configurable limit. All of it
+     * after the decision and outside the extraction deadline, which only {@link TarBlocks}
+     * checks.
+     *
+     * <p>An explicit call rather than a close that never drains: the default stays the strict
+     * one. A caller that forgets this pays for an unneeded drain; a caller that forgot a
+     * "finish" call under the opposite design would silently lose the envelope check, which
+     * is b50b378-F1 again.
+     */
+    public void abandon() {
+        abandoned = true;
     }
 
     private int required(String what) {

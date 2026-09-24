@@ -117,13 +117,21 @@ public final class BundleExtractor {
             throws IOException {
         Collector collector = new Collector(root, limits);
         try (GzipMember member = GzipMember.open(upload, limits)) {
-            TarStream.walk(member, limits, nanoTime, collector);
-            if (collector.manifest == null) {
-                throw new BundleRejection(BundleRule.MANIFEST_MISSING,
-                        "the archive carries no manifest.json, so nothing says what these "
-                                + collector.files + " file(s) are");
+            try {
+                TarStream.walk(member, limits, nanoTime, collector);
+                if (collector.manifest == null) {
+                    throw new BundleRejection(BundleRule.MANIFEST_MISSING,
+                            "the archive carries no manifest.json, so nothing says what these "
+                                    + collector.files + " file(s) are");
+                }
+                collector.requireEverythingDeclaredArrived();
+            } catch (Throwable refused) {
+                // Already refused, so closing must not inflate the rest of the member to find
+                // out more (eb47651-F1). On success, close() still drains and checks the
+                // trailer and what follows it.
+                member.abandon();
+                throw refused;
             }
-            collector.requireEverythingDeclaredArrived();
             // Everything has passed; from here the tree is what was validated, and stays so.
             root.freeze();
             return new Extracted(root, collector.manifest, collector.validated, collector.files,

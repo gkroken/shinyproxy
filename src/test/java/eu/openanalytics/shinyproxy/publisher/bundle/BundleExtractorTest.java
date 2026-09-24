@@ -344,6 +344,39 @@ public class BundleExtractorTest {
     }
 
     @Test
+    public void aRefusedBundleIsNotReadPastItsRefusal(@TempDir Path workspace) throws Exception {
+        // eb47651-F1, the shape of the corpus's bomb-expanded-over-limit: refused on an
+        // undeclared member's header a few KiB in, with the bulk of the upload behind it.
+        // Closing the gzip member used to drain all of it after the decision. Incompressible
+        // content, so bytes consumed from the source track bytes inflated and a count can
+        // show it without timing anything.
+        byte[] bulk = incompressible(4 * 1024 * 1024);
+        byte[] upload = gzip(TarArchives.bundle(TarArchives.shinyPayload())
+                .file("app/www/zeros.bin", bulk)
+                .end());
+        CountingStream source = new CountingStream(upload);
+        assertEquals(BundleRule.INVENTORY_UNDECLARED_FILE, assertThrows(BundleRejection.class,
+                () -> BundleExtractor.extract(source, upload.length, workspace, LIMITS)).rule());
+        assertTrue(source.read < 512 * 1024,
+                "a bundle refused on a header near its start was read " + source.read + " of "
+                        + upload.length + " bytes; the rest was inflated for nothing");
+        assertEmpty(workspace);
+
+        // The other half: abandoning on failure must not leak into the success path, where a
+        // second member behind a valid bundle is still refused. In this pipeline that check
+        // runs from read(), because TarBlocks reads to the end of the stream looking for
+        // non-padding after the marker; the close() drain is the backstop for a consumer
+        // that stops early, and GzipMemberTest.aConsumerThatStopsEarlyStillGetsEveryCheck is
+        // what fails without it. Removing the drain does not fail this assertion.
+        byte[] valid = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
+        byte[] smuggled = new byte[valid.length * 2];
+        System.arraycopy(valid, 0, smuggled, 0, valid.length);
+        System.arraycopy(valid, 0, smuggled, valid.length, valid.length);
+        assertEquals(BundleRule.ARCHIVE_MULTIPLE_MEMBERS, refusalFor(smuggled, workspace));
+        assertEmpty(workspace);
+    }
+
+    @Test
     public void aSizeTheManifestDidNotDeclareIsRefusedBeforeItIsWritten(@TempDir Path workspace)
             throws Exception {
         // S10's size half, the same way: the header's claim is the member's size, and it
@@ -510,9 +543,10 @@ public class BundleExtractorTest {
                 () -> BundleExtractor.extract(sabotage, upload.length, workspace, LIMITS));
         assertEquals("the storage layer gave up", ex.getMessage(),
                 "the cleanup's own failure replaced the failure it was cleaning up after");
-        // Two, not one: closing the gzip member fails on the same hostile source, and that
-        // failure is attached as well. So the assertion names the cleanup's own exception
-        // rather than any IOException, which the close could one day satisfy on its own.
+        // The assertion names the cleanup's own exception rather than any IOException. Until
+        // eb47651-F1 closing the gzip member also read the hostile source and failed, and
+        // that failure was attached too; an abandoned member no longer reads, but a check
+        // that one suppressed exception of any kind would satisfy is still the wrong one.
         assertTrue(java.util.Arrays.stream(ex.getSuppressed())
                         .anyMatch(java.nio.file.DirectoryNotEmptyException.class::isInstance),
                 "the cleanup failed and said nothing about it; suppressed: "
