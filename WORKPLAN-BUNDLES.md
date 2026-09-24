@@ -1488,7 +1488,15 @@ below are marked passed by this planning document.
       justification is an observed flake, and the self-test would rightly refuse to
       certify it as required.
 
-      **BLOCKED, and this gates T7.** The nested `RUN` step does not reliably complete in
+      **BLOCKED — to be fixed inside T5, before its gate's Phase 2 (user decision
+      2026-09-24).** It was recorded here as gating T7; the user moved it forward, because
+      T5's Pass requires "no skipped isolation probe" and this is one, so leaving it for T7
+      would have meant either blocking T5's pass or carving the probe out of it. Diagnosis
+      runs one variable at a time with A/B, as for the MinIO flake (`9991ff1`), and the
+      first experiment is a snapshotter other than `--oci-worker-snapshotter=native`, since
+      both failures are mount-related. Decision 6 is not relaxed to get there: no
+      `seccomp=unconfined`, no `apparmor=unconfined`, no disabled process sandbox, without
+      the user's sign-off. The text below is the state as T3(b) left it. The nested `RUN` step does not reliably complete in
       the full configuration — internal network, proxied egress, registry pull,
       TCP-addressed worker, session-streamed context. Two intermittent failures seen,
       `failed to unmount ...: operation not permitted` and `nsexec: failed to sync with
@@ -1566,6 +1574,15 @@ below are marked passed by this planning document.
       finding resolved, the five conditions below satisfied and recorded, and no skipped
       isolation probe; same corpus through the upload pipeline once T8 exists.
       Driver/log plumbing may proceed only against reviewed boundaries after this gate.
+
+      **T3's blocked nested-`RUN` item is T5's to close (user decision 2026-09-24).** The
+      launcher-contract probe asserts only that the build reaches stage 2, because the
+      nested `RUN` does not reliably complete in the full configuration (see T3(b)). That
+      is a skipped isolation probe in all but name, and this gate's Pass admits none. So it
+      is diagnosed and fixed as part of T5, before the gate's Phase 2 begins, rather than
+      left to gate T7; the probe then asserts the `RUN` and the push, and the Phase 2
+      session re-runs it like the others. Decision 6 bounds the fix: no relaxation of the
+      seccomp/AppArmor profile or the process sandbox without the user's sign-off.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in
