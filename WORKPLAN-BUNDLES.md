@@ -1487,11 +1487,21 @@ below are marked passed by this planning document.
       > not the step runs. Under that profile rootlesskit starts, and every `RUN` fails at
       > `failed to unshare remaining namespaces`. The conclusion that no *relaxation* is
       > needed survives; the size of the named profile does not. A nested runc needs
-      > `clone, mount, umount2, unshare, setns, pivot_root, sethostname` — each one a call
-      > Docker's default grants only with CAP_SYS_ADMIN, and each one acting on namespaces
-      > the worker itself created — and `keyctl` is **still denied**, answered with ENOSYS
-      > instead of EPERM because runc tolerates only the former (Docker's own profile does
-      > the same for `clone3`). No `seccomp=unconfined`, `apparmor=unconfined` or
+      > `clone, mount, umount2, unshare, setns, sethostname` — six calls Docker's default
+      > grants a container holding CAP_SYS_ADMIN, acting on namespaces the worker itself
+      > created — **plus `pivot_root`, which Docker's default denies to every container
+      > whatever its capabilities**, so it is outside anything Docker grants
+      > (`98c00fb-F1` corrected an earlier version of this sentence that grouped it with
+      > the six). runc cannot jail a RUN container without it and the alternative,
+      > no-pivot plus chroot, is a weaker jail; **the user signed it off on 2026-09-24**,
+      > and any further addition outside Docker's default needs the same. `keyctl` is
+      > **still denied**, answered with ENOSYS instead of EPERM because runc tolerates only
+      > the former (Docker's own profile does the same for `clone3`). All of this is the
+      > *worker's* filter: BuildKit puts each RUN container under a second, stricter
+      > profile, so build code gets none of these calls — and since that is what makes
+      > the wider worker profile acceptable, both probes now assert it with a hostile RUN,
+      > and the self-test shows the assertion fails when the inner profile is dropped
+      > (`98c00fb-F2`). No `seccomp=unconfined`, `apparmor=unconfined` or
       > `--oci-worker-no-process-sandbox`. The profile is now one definition shared by both
       > probes, against Docker's default **pinned by commit and hash**: it had been fetched
       > from `main`, which changed twice in August 2026. The success check reads back a
@@ -1614,8 +1624,10 @@ below are marked passed by this planning document.
       left to gate T7; the probe then asserts the `RUN` and the push, and the Phase 2
       session re-runs it like the others. Decision 6 bounds the fix: no relaxation of the
       seccomp/AppArmor profile or the process sandbox without the user's sign-off.
-      **Closed 2026-09-24** — see T3(b). No relaxation was needed; the named profile grew
-      from two syscalls to seven plus `keyctl` → ENOSYS, and the Phase 2 session should
+      **Closed 2026-09-24** — see T3(b). None of decision 6's named relaxations was
+      needed; the named profile grew from two syscalls to seven plus `keyctl` → ENOSYS, one
+      of the seven (`pivot_root`) outside Docker's default and signed off by the user, and
+      the Phase 2 session should
       review that profile (`dev/buildkit_worker_profile.py`) as part of the sandbox
       configuration.
 

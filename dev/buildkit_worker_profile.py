@@ -20,13 +20,35 @@ Apache-2.0, same as the rest.
 **The additions, and why they are these.** A rootless worker runs runc inside its own user
 namespace, and runc builds the RUN step's container there: it clones and unshares the
 namespaces, joins the new mount namespace from a helper thread, mounts and unmounts,
-pivots into the rootfs and sets the hostname. Each of those is a syscall the default
-profile grants only with CAP_SYS_ADMIN, which the worker's container does not hold in the
-host's user namespace -- and does hold, as far as the kernel is concerned, inside the user
-namespace it creates. So these are the calls that let a process manage namespaces it owns;
-the kernel still checks each one against that namespace's credentials. None of them is
-seccomp=unconfined, apparmor=unconfined or --oci-worker-no-process-sandbox, which decision
-6 rejects by name, and the process sandbox stays on.
+pivots into the rootfs and sets the hostname.
+
+Six of those -- clone, mount, umount2, unshare, setns, sethostname -- the default profile
+grants to a container holding CAP_SYS_ADMIN, which the worker's container does not hold in
+the host's user namespace and does hold, as far as the kernel is concerned, inside the user
+namespace it creates. Adding them gives the worker what Docker would give a CAP_SYS_ADMIN
+container, and no more; the kernel still checks each against the owning namespace.
+
+**pivot_root is different, and was signed off separately.** Docker's default does not list
+it at all, so it denies it to EVERY container, whatever its capabilities (finding
+98c00fb-F1, which corrected this docstring's earlier claim that all seven were
+CAP_SYS_ADMIN-gated). runc cannot jail a RUN container without it; the alternative, runc's
+no-pivot mode (a move-mount plus chroot), is a weaker jail and BuildKit exposes no switch
+for it. The kernel requires CAP_SYS_ADMIN in the worker's own user namespace for it, and
+the build's own code runs under BuildKit's second, stricter filter, where pivot_root is
+denied -- which the probes now demonstrate rather than assume (98c00fb-F2). The user
+approved it on 2026-09-24. Any further addition outside Docker's default needs the same.
+
+None of these is seccomp=unconfined, apparmor=unconfined or --oci-worker-no-process-sandbox,
+which decision 6 rejects by name, and the process sandbox stays on.
+
+**What the build's own code gets: none of it.** These additions are the WORKER's filter --
+rootlesskit, buildkitd and runc. BuildKit installs its own profile on each RUN container,
+so a RUN step runs under two filters and cannot unshare, mount, setns, pivot_root,
+sethostname or keyctl. That is load-bearing for everything above, so it is asserted: both
+probes run a hostile RUN that tries each call and requires every one denied under two
+filters, and the rootless probe's self-test shows the check fails when BuildKit's inner
+profile is dropped (the security.insecure entitlement, which the probes also forbid on any
+real launch).
 
 Measured one at a time on 2026-09-24, each failure naming the next call (see the commit
 that introduced this file): unshare ("failed to unshare remaining namespaces"), setns
@@ -39,9 +61,9 @@ each one in turn and requires the RUN step to stop working.
 each container, and treats ENOSYS as "keyrings unsupported, carry on" but EPERM as fatal.
 The default profile answers keyctl with EPERM. Allowing keyctl was the other way through,
 and it was not taken: the keyring interface is kernel attack surface with its own history
-of vulnerabilities, and nothing in a build needs it. Answering ENOSYS keeps the call denied to everything in
-the worker, runc and the build's own code alike, and is the same device Docker's own
-profile uses for clone3.
+of vulnerabilities, and nothing in a build needs it. Answering ENOSYS keeps it denied to runc and everything
+else in the worker, and is the same device Docker's own profile uses for clone3. Build code
+is denied keyctl by BuildKit's inner filter as well, as above.
 """
 
 import hashlib
@@ -96,3 +118,53 @@ def write(directory, base, allowed=None, enosys=None, name="profile.json"):
     path.write_text(json.dumps(profile))
     path.chmod(0o644)
     return str(path)
+
+
+# ------------------------------------------------------------------ the build's own code
+#
+# A RUN step that tries each namespace call the worker's profile allows, and records what
+# happened. Busybox only, so it runs on the plain alpine base both probes already build
+# from. keyctl is not here: the worker's own filter already denies it (ENOSYS), so its
+# denial does not depend on the inner profile this checks.
+#
+# Measured 2026-09-24 against the rootless worker: under BuildKit's normal RUN profile all
+# six are denied with EPERM and /proc/self/status shows Seccomp_filters: 2; with the
+# security.insecure entitlement (BuildKit's inner profile dropped) five succeed, pivot_root
+# reaches the kernel's own argument check (EINVAL), and Seccomp_filters is 1. So a
+# denial here is the filter, not a malformed call.
+HOSTILE_SCRIPT = r"""t() { n=$1; shift; if out=$("$@" 2>&1); then echo "$n=ok"; else echo "$n=$(echo "$out" | tr '\n' ' ')"; fi; }
+t unshare_user unshare -U true
+t unshare_mount unshare -m true
+t mount mount -t tmpfs none /mnt
+t sethostname hostname hostile
+t setns nsenter -t 1 -u true
+t pivot_root pivot_root / /
+grep '^Seccomp' /proc/self/status | tr -d '\t '
+"""
+HOSTILE_CALLS = ["unshare_user", "unshare_mount", "mount", "sethostname", "setns",
+                 "pivot_root"]
+# busybox's own wording for EPERM, per applet: mount says "permission denied".
+_DENIED = ("Operation not permitted", "permission denied")
+
+
+def judge_hostile(text):
+    """(ok, detail) for the hostile RUN's output: every call denied, under >= 2 filters.
+
+    Anything but a denial counts against it -- success, and also an error such as EINVAL,
+    which means the call reached the kernel's own argument checks and the filter did not
+    stop it.
+    """
+    seen = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    fields = dict(line.split(":", 1) for line in text.splitlines() if ":" in line
+                  and "=" not in line)
+    reached = [c for c in HOSTILE_CALLS
+               if c not in seen or not any(d in seen[c] for d in _DENIED)]
+    try:
+        filters = int(fields.get("Seccomp_filters", "0"))
+    except ValueError:
+        filters = 0
+    if reached or filters < 2:
+        return False, "reached: %s; Seccomp_filters %d" % (
+            ", ".join("%s (%s)" % (c, seen.get(c, "no result").strip()[:40])
+                      for c in reached) or "none", filters)
+    return True, "all %d denied under %d filters" % (len(HOSTILE_CALLS), filters)

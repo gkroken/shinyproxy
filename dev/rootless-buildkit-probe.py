@@ -66,6 +66,19 @@ DOCKERFILE = 'FROM alpine:3.20\nRUN echo "$((6*7))-BUILD-RAN-ROOTLESS" > /out.tx
 # built would be the check this probe used to have.
 FAILING_DOCKERFILE = ('FROM alpine:3.20\n'
                       'RUN echo "$((6*7))-BUILD-RAN-ROOTLESS" > /out.txt && exit 1\n')
+# The build's own code, trying every namespace call the WORKER is allowed (98c00fb-F2).
+HOSTILE_DOCKERFILE = 'FROM alpine:3.20\nCOPY hostile.sh /h.sh\nRUN sh /h.sh > /out.txt\n'
+# The negative control for it: the same RUN with BuildKit's inner profile dropped, which is
+# what the security.insecure entitlement does. Self-test only, and forbidden on every
+# ordinary launch below. Needs the labs frontend, fetched from Docker Hub like the base.
+# The other half of the success check: the RUN succeeds but writes the wrong thing. The
+# failing control above cannot tell "rc == 0" from "the content matches", because a failed
+# build exports nothing; this one can.
+WRONG_DOCKERFILE = 'FROM alpine:3.20\nRUN echo "$((6*6))-BUILD-RAN-ROOTLESS" > /out.txt\n'
+INSECURE_DOCKERFILE = ('# syntax=docker/dockerfile:1-labs\nFROM alpine:3.20\n'
+                       'COPY hostile.sh /h.sh\nRUN --security=insecure sh /h.sh > /out.txt\n')
+INSECURE_WORKER = ("--allow-insecure-entitlement", "security.insecure")
+INSECURE_CLIENT = ("--allow", "security.insecure")
 
 # Removed in the main run's minimality check: the last call runc makes, so the daemon
 # starts, reports a worker, and only the RUN fails -- the case a startup check misses.
@@ -73,7 +86,10 @@ RUN_STAGE_SYSCALL = "sethostname"
 
 # Decision 6 rejects each of these by name; none may appear in the launch arguments.
 FORBIDDEN = ["--privileged", "seccomp=unconfined", "apparmor=unconfined",
-             "--oci-worker-no-process-sandbox", "/var/run/docker.sock"]
+             "--oci-worker-no-process-sandbox", "/var/run/docker.sock",
+             # Lets a build drop BuildKit's own RUN profile, which is what keeps build code
+             # from the worker's wider one (98c00fb-F2).
+             "--allow-insecure-entitlement"]
 
 results = []
 # Every `docker run` argv this probe actually issued. Check 4 scans THESE rather than a
@@ -100,22 +116,27 @@ def make_context(tmp, name, dockerfile):
     ctx = pathlib.Path(tmp) / name
     ctx.mkdir()
     (ctx / "Dockerfile").write_text(dockerfile)
+    (ctx / "hostile.sh").write_text(worker_profile.HOSTILE_SCRIPT)
     assert EVIDENCE not in dockerfile, "the evidence must not be spelled in the Dockerfile"
     return str(ctx)
 
 
-def try_build(profile_path, context, extra=()):
+def try_build(profile_path, context, extra=(), client_extra=(), produced_out=None,
+              daemon_extra=()):
     """Start rootless buildkitd under `profile_path` and run one real build.
 
     Returns (started, process_mode, built, detail). `built` means the RUN step's own file
-    came back out of the build with the computed content, and nothing less.
+    came back out of the build with the computed content, and nothing less. If
+    `produced_out` is a list, what the RUN wrote is appended to it, for a caller judging
+    something other than the evidence string.
     """
     docker(["rm", "-f", CONTAINER])
     args = ["run", "-d", "--name", CONTAINER]
     if profile_path:
         args += ["--security-opt", "seccomp=" + profile_path]
+    # `extra` is docker's (before the image); `daemon_extra` is buildkitd's (after it).
     args += list(extra) + ["-v", "%s:/ctx:ro" % context, BUILDKIT_IMAGE,
-                           "--oci-worker-snapshotter=native"]
+                           "--oci-worker-snapshotter=native"] + list(daemon_extra)
     launches.append(list(args))
     docker(args, timeout=300)
     # buildkitd needs a moment; a probe that races it measures the race.
@@ -139,10 +160,14 @@ def try_build(profile_path, context, extra=()):
         out = docker(["exec", CONTAINER, "buildctl", "--addr", SOCKET, "build",
                       "--frontend", "dockerfile.v0", "--local", "context=/ctx",
                       "--local", "dockerfile=/ctx",
-                      "--output", "type=local,dest=" + OUT], timeout=600)
+                      "--output", "type=local,dest=" + OUT] + list(client_extra),
+                     timeout=1200)
         blob = out.stdout + out.stderr
         produced = docker(["exec", CONTAINER, "cat", OUT + "/out.txt"]).stdout.strip()
         built = out.returncode == 0 and produced == EVIDENCE
+        if produced_out is not None and out.returncode == 0:
+            produced_out.append(docker(["exec", CONTAINER, "cat",
+                                        OUT + "/out.txt"]).stdout)
         detail = next((l for l in blob.splitlines()
                        if "not permitted" in l or "ERROR" in l), "")
     else:
@@ -189,18 +214,7 @@ def main(argv):
                                             "it for weakening process separation and "
                                             "cleanup")
 
-        # 4. Nothing forbidden was used to get here -- checked against the argv actually
-        #    issued, every launch of it, not against a string this function writes.
-        offenders = forbidden_in_launches()
-        record("no forbidden argument used",
-               "none of decision 6's rejected flags appear in any launch",
-               "clean across %d launch(es)" % len(launches) if not offenders
-               else "USED: %s" % ", ".join(offenders),
-               not offenders and bool(launches),
-               "" if launches else "no launch was recorded, so this check examined "
-                                   "nothing")
-
-        # 5. Minimality at the stage that matters: without the last call runc makes, the
+        # 4. Minimality at the stage that matters: without the last call runc makes, the
         #    daemon still starts and reports a worker, and the RUN must fail. The whole
         #    set is checked one member at a time by --self-test.
         reduced = [s for s in worker_profile.ALLOWED if s != RUN_STAGE_SYSCALL]
@@ -212,6 +226,31 @@ def main(argv):
                else ("the daemon did not start, so this measured startup instead"
                      if not started else "STILL RAN without %s" % RUN_STAGE_SYSCALL),
                started and not still)
+
+        # 5. The build's own code gets none of what check 2 gave the worker. BuildKit puts
+        #    each RUN under its own profile as well, and that second filter is what makes
+        #    the wider worker profile acceptable -- so it is demonstrated, not assumed.
+        produced = []
+        try_build(worker_profile.write(tmp, base), make_context(tmp, "hostile",
+                                                                 HOSTILE_DOCKERFILE),
+                  produced_out=produced)
+        denied, detail = (worker_profile.judge_hostile(produced[0]) if produced
+                          else (False, "the hostile RUN produced nothing"))
+        record("build code gets none of it",
+               "a RUN trying unshare/mount/setns/pivot_root/sethostname is denied each, "
+               "under two seccomp filters", detail, denied)
+
+        # 6. Nothing forbidden was used to get here -- checked against the argv actually
+        #    issued, every launch of it, not against a string this function writes. Last,
+        #    so it covers every launch above (it used to run before the two checks above).
+        offenders = forbidden_in_launches()
+        record("no forbidden argument used",
+               "none of decision 6's rejected flags appear in any launch",
+               "clean across %d launch(es)" % len(launches) if not offenders
+               else "USED: %s" % ", ".join(offenders),
+               not offenders and bool(launches),
+               "" if launches else "no launch was recorded, so this check examined "
+                                   "nothing")
     finally:
         docker(["rm", "-f", CONTAINER])
         shutil.rmtree(tmp, ignore_errors=True)
@@ -247,6 +286,26 @@ def self_test(tmp, base, ctx):
     else:
         print("  FAIL a failing RUN was counted as built (or the daemon did not start)")
         missed.append("failing RUN")
+    started, _, built, _ = try_build(full, make_context(tmp, "wrong", WRONG_DOCKERFILE))
+    if started and not built:
+        print("  ok   a RUN that succeeds with the wrong content is not counted as built")
+    else:
+        print("  FAIL a RUN that wrote the wrong content was counted as built")
+        missed.append("wrong content")
+
+    # The build-code check next, for the same reason: it has to be able to fail. With
+    # BuildKit's inner profile dropped, the same hostile RUN must be judged NOT contained.
+    produced = []
+    try_build(full, make_context(tmp, "insecure", INSECURE_DOCKERFILE),
+              daemon_extra=INSECURE_WORKER, client_extra=INSECURE_CLIENT,
+              produced_out=produced)
+    if produced and not worker_profile.judge_hostile(produced[0])[0]:
+        print("  ok   build code without BuildKit's inner profile is caught: %s"
+              % worker_profile.judge_hostile(produced[0])[1][:100])
+    else:
+        print("  FAIL build code without the inner profile was %s" % (
+            "judged contained" if produced else "never run, so nothing was shown"))
+        missed.append("inner profile dropped")
 
     # The forbidden-argument check. Each flag must be SEEN when it is actually passed to
     # docker.
@@ -256,9 +315,14 @@ def self_test(tmp, base, ctx):
             ("--privileged is used", ("--privileged",), "--privileged"),
             ("apparmor is unconfined",
              ("--security-opt", "apparmor=unconfined"), "apparmor=unconfined"),
+            ("the insecure entitlement is allowed", INSECURE_WORKER,
+             "--allow-insecure-entitlement"),
     ):
         launches.clear()
-        try_build(full, ctx, extra=extra)
+        if extra == INSECURE_WORKER:   # buildkitd's flag, so where the daemon takes it
+            try_build(full, ctx, daemon_extra=extra)
+        else:
+            try_build(full, ctx, extra=extra)
         seen = forbidden_in_launches()
         if expect in seen:
             print("  ok   forbidden flag detected: %s" % label)

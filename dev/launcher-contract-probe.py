@@ -192,7 +192,7 @@ def main(argv):
                   timeout=600).returncode != 0:
             raise SystemExit("could not seed the base image; nothing below would build")
 
-        workers, worker_ids, built = [], [], []
+        workers, worker_ids, built, contained = [], [], [], []
         survivors_at_start, offenders, inspected = [], [], []
         for attempt in range(1, ATTEMPTS + 1):
             # Before this attempt starts, no PREVIOUS attempt's worker may still be
@@ -206,9 +206,14 @@ def main(argv):
             ctx.mkdir()
             # The shell computes the 42, so the evidence is in no step name.
             evidence = "42-ATTEMPT-%d-RAN" % attempt
+            # The same RUN also tries every namespace call the WORKER may make, and
+            # records the result: build code must get none of them (98c00fb-F2).
+            (ctx / "hostile.sh").write_text(worker_profile.HOSTILE_SCRIPT)
             (ctx / "Dockerfile").write_text(
                 "FROM %s:5000/base/alpine:3.20\n"
-                'RUN echo "$((6*7))-ATTEMPT-%d-RAN" > /o.txt\n' % (REGISTRY, attempt))
+                "COPY hostile.sh /h.sh\n"
+                'RUN echo "$((6*7))-ATTEMPT-%d-RAN" > /o.txt && sh /h.sh > /hostile.txt\n'
+                % (REGISTRY, attempt))
             worker = start_worker(tmp, profile, attempt)
             workers.append(worker)
             if not worker:
@@ -235,7 +240,12 @@ def main(argv):
                 produced = docker(["run", "--rm", "--network", "none", "--entrypoint",
                                    "cat", local, "/o.txt"],
                                   timeout=300).stdout.strip() if pulled else ""
+                hostile = docker(["run", "--rm", "--network", "none", "--entrypoint",
+                                  "cat", local, "/hostile.txt"],
+                                 timeout=300).stdout if pulled else ""
                 docker(["rmi", "-f", local])
+                contained.append(worker_profile.judge_hostile(hostile) if hostile
+                                 else (False, "%s: no hostile result" % pushed_as))
                 if produced == evidence:
                     reached += 1
                 else:
@@ -251,6 +261,11 @@ def main(argv):
                                         worker]).stdout or "[]")
             env = json.loads(docker(["inspect", "-f", "{{json .Config.Env}}",
                                      worker]).stdout or "[]")
+            args = json.loads(docker(["inspect", "-f", "{{json .Args}}",
+                                      worker]).stdout or "[]")
+            if any("insecure-entitlement" in a for a in args):
+                # It would let a build drop BuildKit's own RUN profile (98c00fb-F2).
+                offenders.append("%s: an insecure entitlement is allowed" % worker)
             for m in mounts:
                 src, dst = m.get("Source", ""), m.get("Destination", "")
                 if "docker.sock" in src or "docker.sock" in dst:
@@ -286,8 +301,18 @@ def main(argv):
                "" if built and all(built) else "the context, the base pull, the RUN or "
                                                 "the push failed; the lines above say which")
 
+        failed = [d for ok, d in contained if not ok]
+        record("build code gets none of it",
+               "in every build, a RUN trying unshare/mount/setns/pivot_root/sethostname "
+               "is denied each, under two seccomp filters",
+               contained[0][1] if contained and not failed
+               else ("; ".join(failed)[:160] if failed else "no build was judged"),
+               bool(contained) and not failed
+               and len(contained) == ATTEMPTS * BUILD_REPEATS)
+
         record("nothing forbidden reaches the worker",
-               "no docker socket, no context mount, no credentials",
+               "no docker socket, no context mount, no credentials, no insecure "
+               "entitlement",
                "clean across %d inspected worker(s)" % len(inspected)
                if not offenders else "; ".join(offenders),
                not offenders and len(inspected) == ATTEMPTS,
@@ -306,6 +331,23 @@ def main(argv):
                "the registry holds the base the build resolved",
                tags.strip()[:80] if tags.strip() else "catalog unreadable",
                "base/alpine" in tags)
+
+        # The gateway's rule, asserted here too: dev/egress-probe.py proves allow/deny on
+        # tinyproxy, and this probe now uses squid, so without a check of its own the two
+        # could drift apart (98c00fb review, nonblocking). From the worker's network, via
+        # the proxy: the registry is allowed (the control), anything else is refused.
+        def via_gateway(url):
+            got = docker(["run", "--rm", "--network", INNER, "-e",
+                          "http_proxy=http://%s:8888" % GATEWAY, "alpine:3.20", "sh", "-c",
+                          "wget -S -q -O /dev/null -T 20 %s 2>&1 | head -1" % url],
+                         timeout=120).stdout.strip()
+            return got or "no response"
+        allowed = via_gateway("http://%s:5000/v2/" % REGISTRY)
+        refused = via_gateway("http://example.com/")
+        record("the gateway allows the registry only",
+               "registry via the gateway 200; example.com via the gateway 403",
+               "registry: %s; example.com: %s" % (allowed[-24:], refused[-24:]),
+               " 200" in allowed and " 403" in refused)
 
         # Disposability, observed rather than arranged: at the start of every attempt
         # after the first, no earlier worker was still running.
