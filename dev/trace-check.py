@@ -15,9 +15,23 @@ does not record reads reliably (the oracle says so when it runs). A trace can.
 that a descriptor it used refers to, that is one of the corpus's traversal targets:
 
     <world>/escape.txt  <world>/pax-escape.txt  <world>/neighbour[/...]
-    <world>/via-symlink-target[/...]  /etc/skald-escape.txt
+    <world>/via-symlink-target[/...]
+    /etc/skald-escape.txt  /etc/passwd  /tmp/escape.txt
 
--- the places the traversal fixtures aim at, beside the root rather than in it. An
+-- every destination the corpus's traversal and link fixtures aim at. The list is read from
+dev/bundle_sentinels.py (WORLD_ESCAPE_TARGETS, ABSOLUTE_ESCAPE_TARGETS), the table the
+oracle documents them in; this file used to keep its own shorter copy and missed the last
+two (finding f352115-F1: a mutation that stat'ed /tmp/escape.txt in every extraction
+passed both the oracle and this check).
+
+**One exception, and exactly one.** The JVM reads /etc/passwd at startup to look up its
+user: `openat(AT_FDCWD</ws>, "/etc/passwd", O_RDONLY|O_CLOEXEC)`, once, in every trace.
+That exact line is allowed ONCE per trace. Any other appearance of /etc/passwd is a
+touch: as a link or rename argument, reached through a descriptor, opened any other way,
+or a second read in the same form. What this cannot tell apart is an extractor that reads
+/etc/passwd once in precisely the JVM's form INSTEAD of the JVM doing so -- the traces
+are identical. It is stated rather than papered over; the link fixtures, which are what
+aim at /etc/passwd, are refused on their headers and name it nowhere. An
 attempt counts even if the kernel refused it: a traversal the extractor tried and the
 filesystem happened to stop is still a traversal. Paths are resolved lexically, which is
 deliberately conservative -- "../escape.txt" relative to a directory in the root is
@@ -32,7 +46,10 @@ refused rather than resolved by guesswork.
 
 **What it does not cover, stated rather than implied.** Listing a directory (getdents)
 takes no path and is not a %file call, so it is not seen; listing the world directory
-would reveal the targets' NAMES without touching them. Reads through a descriptor are
+would reveal the targets' NAMES without touching them. Nor are open_by_handle_at (opens
+by handle, no path) or io_uring submissions; the JVM uses neither. /tmp itself is not a
+target -- the JVM probes /tmp/.java_pid<N> -- only /tmp/escape.txt is; the oracle's
+sentinel over /tmp covers anything that changes there. Reads through a descriptor are
 covered only in that the descriptor had to be opened by a path first, which is seen.
 
 **Positive controls, because a check that sees nothing passes everything.** Every trace
@@ -58,8 +75,12 @@ import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-TARGET_NAMES = ("escape.txt", "pax-escape.txt", "neighbour", "via-symlink-target")
-ABSOLUTE_TARGETS = ("/etc/skald-escape.txt",)
+sys.path.insert(0, str(HERE))
+from bundle_sentinels import ABSOLUTE_ESCAPE_TARGETS, WORLD_ESCAPE_TARGETS  # noqa: E402
+
+# The JVM's own startup read of /etc/passwd, allowed once per trace; see the docstring.
+STARTUP_PASSWD = re.compile(r'^\d+ +openat\(AT_FDCWD(?:<[^>]*>)?, "/etc/passwd", '
+                            r'O_RDONLY\|O_CLOEXEC\) = (?:\d+</etc/passwd>|-1 .*)$')
 
 # A descriptor with its path, then a string argument: the descriptor-relative form.
 DIRFD_NAME = re.compile(r'(\d+)<(/[^>]*)>, "((?:[^"\\]|\\.)*)"')
@@ -85,9 +106,9 @@ def unescape(s):
 
 def targets_for(base):
     world = re.escape(base.rstrip("/")) + r"/w\d+/"
-    names = "|".join(re.escape(n) for n in TARGET_NAMES)
+    names = "|".join(re.escape(n) for n in WORLD_ESCAPE_TARGETS)
     return re.compile(r"^(?:%s(?:%s)(?:/.*)?|%s)$" % (
-        world, names, "|".join(re.escape(p) for p in ABSOLUTE_TARGETS)))
+        world, names, "|".join(re.escape(p) for p in ABSOLUTE_ESCAPE_TARGETS)))
 
 
 def check_trace(path, base):
@@ -104,7 +125,11 @@ def check_trace(path, base):
     if not text.strip():
         return ["the trace is empty"], False, False
     resolved_in_world = named_world = False
+    startup_passwd_seen = False
     for line in text.splitlines():
+        if STARTUP_PASSWD.match(line) and not startup_passwd_seen:
+            startup_passwd_seen = True
+            continue
         if CHDIR.match(line):
             problems.append("the working directory changed, so relative paths are not "
                             "resolvable: " + line[:160])
@@ -127,7 +152,9 @@ def check_trace(path, base):
         else:
             paths += [posixpath.normpath(unescape(p))
                       for p in ABSOLUTE_STRING.findall(line)]
-        for p in paths:
+        # Two patterns can name the same string (AT_FDCWD's, and any absolute string);
+        # one touch is one problem.
+        for p in dict.fromkeys(paths):
             if world_dir.match(p):
                 named_world = True
             if target.match(p):
@@ -199,14 +226,23 @@ TOUCHES = {
         "import os,sys; d=os.open(os.path.join(sys.argv[1], 'root'), "
         "os.O_RDONLY|os.O_DIRECTORY)\ntry: os.open('../escape.txt', os.O_RDONLY, dir_fd=d)\n"
         "except OSError: pass",
+    "/tmp/escape.txt by absolute path":
+        "import os\ntry: os.stat('/tmp/escape.txt')\nexcept OSError: pass",
+    "/etc/passwd as a symlink's target, created in the root":
+        "import os,sys; d=os.open(os.path.join(sys.argv[1], 'root'), "
+        "os.O_RDONLY|os.O_DIRECTORY); os.symlink('/etc/passwd', 'x', dir_fd=d)",
+    "/etc/passwd read a second time, in the JVM's own form":
+        "open('/etc/passwd').close(); open('/etc/passwd').close()",
     "a chdir, after which relative paths cannot be judged":
         "import os,sys; os.chdir(sys.argv[1]); open('root/x', 'w').close()",
 }
 # The control: what the extractor does -- the parent's descriptor, then the root, then a
-# file in it. Must be clean, and must satisfy the positive control.
+# file in it -- plus one read of /etc/passwd in the JVM's startup form, the one exception.
+# Must be clean, and must satisfy the positive control.
 CONTROL = ("import os,sys; d=os.open(sys.argv[1], os.O_RDONLY|os.O_DIRECTORY);"
            "r=os.open('root', os.O_RDONLY|os.O_DIRECTORY, dir_fd=d);"
-           "os.close(os.open('app.R', os.O_WRONLY|os.O_CREAT, 0o600, dir_fd=r))")
+           "os.close(os.open('app.R', os.O_WRONLY|os.O_CREAT, 0o600, dir_fd=r));"
+           "open('/etc/passwd').close()")
 
 
 def self_test():

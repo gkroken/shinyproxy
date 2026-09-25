@@ -1731,7 +1731,13 @@ below are marked passed by this planning document.
       under `strace -f -y` and `dev/trace-check.py` reads every trace: no path the
       extractor named, and no descriptor it used, may be a traversal target —
       `escape.txt`, `pax-escape.txt`, `neighbour/`, `via-symlink-target/` beside the
-      root, and `/etc/skald-escape.txt`. `-y` is what makes this meaningful: the extractor
+      root, and `/etc/skald-escape.txt`, `/etc/passwd`, `/tmp/escape.txt`: every
+      destination the corpus aims at, read from the one table in `dev/bundle_sentinels.py`.
+      The first version kept its own list of five and missed the last two
+      (`f352115-F1`: a mutation stat'ing `/tmp/escape.txt` in every extraction passed both
+      the oracle and the trace). The JVM's own startup read of `/etc/passwd` is allowed in
+      its exact form, once per trace; anything else naming it is a touch. A single read in
+      precisely that form is indistinguishable from the JVM's, which the checker states. `-y` is what makes this meaningful: the extractor
       works through descriptors, including one on the root's *parent*, which is the
       directory the targets live in, and `-y` resolves each descriptor-relative call to a
       real path. Result in the reduced, `--full` and `--symlinked-root` modes: 91 of 91

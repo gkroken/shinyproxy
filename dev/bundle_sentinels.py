@@ -52,6 +52,14 @@ import time
 #   trav-absolute                     /etc/skald-escape.txt
 #   link-symlink-file, link-hardlink-outside, link-chained   /etc/passwd
 #   link-symlink-dir-then-child       /tmp/escape.txt via a symlink to /tmp
+#
+# The same table as data, so a second checker cannot keep its own shorter copy
+# (dev/trace-check.py did, and missed /etc/passwd and /tmp/escape.txt: f352115-F1).
+# WORLD_ESCAPE_TARGETS are names inside <world>, beside the root: the two relative escape
+# destinations, plus the sibling a sideways walk would reach and the directory the
+# symlinked-root fixture points at. ABSOLUTE_ESCAPE_TARGETS are the table's absolute ones.
+WORLD_ESCAPE_TARGETS = ("escape.txt", "pax-escape.txt", "neighbour", "via-symlink-target")
+ABSOLUTE_ESCAPE_TARGETS = ("/etc/skald-escape.txt", "/etc/passwd", "/tmp/escape.txt")
 SENTINEL_DIRS = ("/etc", "/tmp")
 SENTINEL_FILES = ("/etc/passwd",)
 
