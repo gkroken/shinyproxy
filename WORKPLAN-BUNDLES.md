@@ -1737,7 +1737,10 @@ below are marked passed by this planning document.
       (`f352115-F1`: a mutation stat'ing `/tmp/escape.txt` in every extraction passed both
       the oracle and the trace). The JVM's own startup read of `/etc/passwd` is allowed in
       its exact form, once per trace; anything else naming it is a touch. A single read in
-      precisely that form is indistinguishable from the JVM's, which the checker states. `-y` is what makes this meaningful: the extractor
+      precisely that form is indistinguishable from the JVM's, which the checker states.
+      Any link or rename reaching outside the root is a touch too (the extractor makes
+      neither), so creating `link-symlink-dir-then-child`'s link to `/tmp` is caught.
+      `-y` is what makes this meaningful: the extractor
       works through descriptors, including one on the root's *parent*, which is the
       directory the targets live in, and `-y` resolves each descriptor-relative call to a
       real path. Result in the reduced, `--full` and `--symlinked-root` modes: 91 of 91

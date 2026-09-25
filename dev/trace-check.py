@@ -97,6 +97,13 @@ ABSOLUTE_STRING = re.compile(r'"(/(?:[^"\\]|\\.)*)"')
 # execve's argument vector is strings, not accesses: the JVM is started with
 # "--root /work/w003/root" and naming that is not touching it. Only its program path counts.
 EXECVE = re.compile(r'^\d+ +execve(?:at)?\(')
+# Link and rename calls. The extractor creates neither links nor renames anything, so any
+# such call reaching outside the root is a touch -- including the link's own creation and
+# a refused attempt, which a return annotation alone would not show (f6fef0e review:
+# symlinkat("/tmp", <root fd>, "d"), the first step of link-symlink-dir-then-child, was
+# not flagged, because /tmp itself is not a target).
+LINK_CALL = re.compile(r'^\d+ +(?:symlinkat|symlink|linkat|link|renameat2|renameat|rename)\(')
+SYMLINK_TARGET = re.compile(r'^\d+ +symlink(?:at)?\("((?:[^"\\]|\\.)*)"')
 CHDIR = re.compile(r'^\d+ +f?chdir\(')
 
 
@@ -116,6 +123,7 @@ def check_trace(path, base):
     problems = []
     target = targets_for(base)
     world_dir = re.compile(r"^%s/w\d+(?:/.*)?$" % re.escape(base.rstrip("/")))
+    root_dir = re.compile(r"^%s/w\d+/root(?:/.*)?$" % re.escape(base.rstrip("/")))
     cwd_file = pathlib.Path(str(path) + ".cwd")
     if not cwd_file.is_file():
         return (["no recorded working directory; relative paths cannot be resolved"],
@@ -152,6 +160,8 @@ def check_trace(path, base):
         else:
             paths += [posixpath.normpath(unescape(p))
                       for p in ABSOLUTE_STRING.findall(line)]
+        if LINK_CALL.match(line):
+            problems += link_problems(line, cwd, root_dir)
         # Two patterns can name the same string (AT_FDCWD's, and any absolute string);
         # one touch is one problem.
         for p in dict.fromkeys(paths):
@@ -160,6 +170,33 @@ def check_trace(path, base):
             if target.match(p):
                 problems.append("%s <- %s" % (p, line.strip()[:200]))
     return problems, resolved_in_world, named_world
+
+
+def link_problems(line, cwd, root_dir):
+    """Every path a link or rename call involves must lie inside the root: both names, and
+    a symlink's target resolved from the directory the link is made in."""
+    names = []
+    for _fd, directory, name in DIRFD_NAME.findall(line):
+        name = unescape(name)
+        names.append(posixpath.normpath(name if name.startswith("/")
+                                        else posixpath.join(directory, name)))
+    for annotated_cwd, name in re.findall(r'AT_FDCWD(?:<([^>]*)>)?, "((?:[^"\\]|\\.)*)"',
+                                          line):
+        name = unescape(name)
+        names.append(posixpath.normpath(name if name.startswith("/") else
+                                        posixpath.join(annotated_cwd or cwd, name)))
+    target = SYMLINK_TARGET.match(line)
+    if target:
+        t = unescape(target.group(1))
+        if not names:   # plain symlink(target, linkpath): the link path is the second string
+            rest = re.findall(r'"((?:[^"\\]|\\.)*)"', line)[1:2]
+            names += [posixpath.normpath(posixpath.join(cwd, unescape(n))) for n in rest]
+        link_dir = posixpath.dirname(names[-1]) if names else cwd
+        names.append(posixpath.normpath(t if t.startswith("/") else
+                                        posixpath.join(link_dir, t)))
+    outside = [n for n in dict.fromkeys(names) if not root_dir.match(n)]
+    return ["a link or rename reaching outside the root (%s) <- %s"
+            % (", ".join(outside), line.strip()[:200])] if outside else []
 
 
 def check_directory(directory, expect, base):
@@ -233,6 +270,12 @@ TOUCHES = {
         "os.O_RDONLY|os.O_DIRECTORY); os.symlink('/etc/passwd', 'x', dir_fd=d)",
     "/etc/passwd read a second time, in the JVM's own form":
         "open('/etc/passwd').close(); open('/etc/passwd').close()",
+    "a symlink to /tmp created in the root (link-symlink-dir-then-child's first step)":
+        "import os,sys; d=os.open(os.path.join(sys.argv[1], 'root'), "
+        "os.O_RDONLY|os.O_DIRECTORY); os.symlink('/tmp', 'd', dir_fd=d)",
+    "a relative symlink out of the root, ../neighbour":
+        "import os,sys; d=os.open(os.path.join(sys.argv[1], 'root'), "
+        "os.O_RDONLY|os.O_DIRECTORY); os.symlink('../neighbour', 'n', dir_fd=d)",
     "a chdir, after which relative paths cannot be judged":
         "import os,sys; os.chdir(sys.argv[1]); open('root/x', 'w').close()",
 }
