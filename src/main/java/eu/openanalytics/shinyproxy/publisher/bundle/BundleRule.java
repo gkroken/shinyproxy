@@ -46,6 +46,12 @@ public enum BundleRule {
     PATH_NUL,
     /** A control character, which corrupts any log or terminal that echoes the name. */
     PATH_CONTROL_CHARACTER,
+    /**
+     * A character with no glyph of its own that changes how the rest of the name reads: a
+     * format character (bidi override, BOM, zero-width joiner) or a line or paragraph
+     * separator. Two names that differ only by one look identical in a listing.
+     */
+    PATH_INVISIBLE_CHARACTER,
     /** Not valid UTF-8, so the name has no defined normalisation and readers disagree. */
     PATH_NOT_UTF8,
     /** Valid UTF-8 but not in NFC. Rejected rather than normalised: see {@link MemberPath}. */

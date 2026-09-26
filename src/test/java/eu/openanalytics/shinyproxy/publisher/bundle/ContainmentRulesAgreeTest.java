@@ -112,6 +112,35 @@ public class ContainmentRulesAgreeTest {
     }
 
     @Test
+    public void bothRefuseEveryInvisibleCharacter() {
+        // t5-e5e3071-F3. The listed code points, then every code point the JDK classes as
+        // Cf, Zl or Zp: each rule holds its own copy of the definition, and this is where
+        // a difference between the copies shows.
+        java.util.stream.IntStream listed = java.util.Arrays.stream(MemberPathTest.INVISIBLE);
+        java.util.stream.IntStream classed = java.util.stream.IntStream.rangeClosed(0, 0x10FFFF)
+                .filter(cp -> {
+                    int type = Character.getType(cp);
+                    return type == Character.FORMAT || type == Character.LINE_SEPARATOR
+                            || type == Character.PARAGRAPH_SEPARATOR;
+                });
+        int[] all = java.util.stream.IntStream.concat(listed, classed).distinct().toArray();
+        assertTrue(all.length > 150, "the JDK's tables list fewer format characters than"
+                + " Unicode 15 does; this test would be examining almost nothing");
+        for (int cp : all) {
+            String c = new String(Character.toChars(cp));
+            String where = String.format("U+%04X", cp);
+            IllegalArgumentException key = assertThrows(IllegalArgumentException.class,
+                    () -> ObjectKeys.validatedRenditionPath("a" + c + "b.txt"),
+                    "ObjectKeys accepted " + where);
+            assertTrue(key.getMessage().chars().allMatch(ch -> ch >= 0x20 && ch < 0x7F),
+                    "ObjectKeys quoted " + where + " raw in its message");
+            BundleRejection member = assertThrows(BundleRejection.class,
+                    () -> parseMember("app/a" + c + "b.txt"), "MemberPath accepted " + where);
+            assertEquals(BundleRule.PATH_INVISIBLE_CHARACTER, member.rule(), where);
+        }
+    }
+
+    @Test
     public void bothAcceptAnOrdinaryPath() {
         for (Case c : ACCEPTED_BY_BOTH) {
             try {

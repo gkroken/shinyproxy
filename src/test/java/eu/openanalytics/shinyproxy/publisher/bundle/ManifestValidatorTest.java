@@ -183,6 +183,21 @@ public class ManifestValidatorTest {
     }
 
     @Test
+    public void everyInvisibleCharacterIsRefusedInAManifestPath() {
+        // t5-e5e3071-F3, the manifest side (the gate's manifest-utf8-bom is a BOM before the
+        // document, a different thing, refused by the JSON parser).
+        for (int cp : MemberPathTest.INVISIBLE) {
+            byte[] manifest = withFile("a" + new String(Character.toChars(cp)) + "b.txt");
+            BundleRejection ex = assertThrows(BundleRejection.class,
+                    () -> ManifestValidator.validate(manifest, LIMITS),
+                    String.format("U+%04X was accepted in a manifest path", cp));
+            assertEquals(BundleRule.MANIFEST_PATH_NOT_CANONICAL, ex.rule(), ex.getMessage());
+            assertTrue(ex.getMessage().contains(
+                    BundleRule.PATH_INVISIBLE_CHARACTER.ruleName()), ex.getMessage());
+        }
+    }
+
+    @Test
     public void theTargetTypeIsCheckedOnlyWhenThereIsOne() {
         byte[] shiny = read("valid", "r-root-single-file");
         assertRule(BundleRule.MANIFEST_TYPE_MISMATCH, "S9", shiny, Optional.of("plumber"));

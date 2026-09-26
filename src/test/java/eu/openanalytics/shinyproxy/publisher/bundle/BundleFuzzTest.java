@@ -134,8 +134,14 @@ public class BundleFuzzTest {
         // Every Cc code point. This said `c < 0x20`, the same range short as the rule it
         // checks, so the fuzzer could never have reported t5-e5e3071-F1.
         if (text.startsWith("/") || text.contains("\\")
-                || text.chars().anyMatch(Character::isISOControl)) {
-            throw new AssertionError("accepted an absolute, backslashed or control name: " + text);
+                || text.chars().anyMatch(Character::isISOControl)
+                || text.codePoints().anyMatch(cp -> {
+                    int type = Character.getType(cp);
+                    return type == Character.FORMAT || type == Character.LINE_SEPARATOR
+                            || type == Character.PARAGRAPH_SEPARATOR;
+                })) {
+            throw new AssertionError("accepted an absolute, backslashed, control or invisible name: "
+                    + BundleRejection.quote(text));
         }
         for (String segment : path.payloadSegments()) {
             if (segment.isEmpty() || segment.equals(".") || segment.equals("..")

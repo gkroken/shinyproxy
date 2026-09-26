@@ -94,7 +94,10 @@ def main():
     # Every Cc code point in a member name, each its own seed, so the regression run
     # exercises the control rule at every point and the fuzzer starts from both sides of
     # each range edge (t5-e5e3071-F1). Plus the neighbours, which must be accepted.
-    for cp in list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)) + [0x20, 0x7E, 0xA0]:
+    # And a sample of the invisible characters (format, line/paragraph separators), which
+    # the same invariant refuses (t5-e5e3071-F3), including one outside the BMP.
+    for cp in (list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)) + [0x20, 0x7E, 0xA0]
+               + [0x00AD, 0x200B, 0x200D, 0x202E, 0x2028, 0xFEFF, 0xE0001]):
         (dirs["memberPath"] / ("codepoint-%04X" % cp)).write_bytes(
             b"\x00" + ("app/a%sb.txt" % chr(cp)).encode("utf-8"))
     for fixture in sorted((REPO / "dev/fixtures/manifests").glob("*/*.json")):

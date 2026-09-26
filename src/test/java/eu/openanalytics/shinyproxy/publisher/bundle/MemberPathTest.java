@@ -145,6 +145,39 @@ public class MemberPathTest {
         assertEquals("a b~\u00a0.txt", parse("app/a b~\u00a0.txt").payloadPath());
     }
 
+    /**
+     * Invisible code points, listed by hand from the Unicode charts rather than computed
+     * with the predicate under test (a test derived from the fix inherits its blind spot):
+     * soft hyphen, Arabic letter mark, the zero-width and directional marks, the bidi
+     * embeddings, overrides and isolates, word joiner and invisible operators, BOM,
+     * interlinear annotation, a Kaithi number sign, the musical format controls, the
+     * language tag, a tag character, and the line and paragraph separators.
+     */
+    static final int[] INVISIBLE = {0x00AD, 0x061C, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F,
+            0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064,
+            0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF, 0xFFF9, 0xFFFA, 0xFFFB, 0x110BD, 0x1D173,
+            0x1D17A, 0xE0001, 0xE0041, 0x2028, 0x2029};
+
+    @Test
+    public void everyInvisibleCharacterIsRefused() {
+        // t5-e5e3071-F3: BOM and a bidi override were accepted by accident. Now refused, one
+        // listed code point at a time, and every other Cf/Zl/Zp the JDK knows as well.
+        for (int cp : INVISIBLE) {
+            String name = "app/a" + new String(Character.toChars(cp)) + "b.txt";
+            BundleRejection ex = assertThrows(BundleRejection.class, () -> parse(name),
+                    String.format("U+%04X was accepted in a member name", cp));
+            assertEquals(BundleRule.PATH_INVISIBLE_CHARACTER, ex.rule(),
+                    String.format("U+%04X: %s", cp, ex.getMessage()));
+        }
+        // Visible neighbours: NBSP (a space separator, Zs), a combining mark in NFC, an
+        // emoji built with no joiner, Arabic and Devanagari letters.
+        for (String visible : new String[] {"a\u00a0b", "\u1e0b\u0323", "\ud83d\ude00",
+                "\u0645\u0631\u062d\u0628\u0627", "\u0928\u092e\u0938\u094d\u0924\u0947"}) {
+            String nfc = java.text.Normalizer.normalize(visible, java.text.Normalizer.Form.NFC);
+            assertEquals(nfc + ".txt", parse("app/" + nfc + ".txt").payloadPath());
+        }
+    }
+
     @Test
     public void aNulEndsTheNameAndAnythingAfterItIsAnAttack() {
         byte[] field = new byte[32];

@@ -262,6 +262,17 @@ public final class ObjectKeys {
                                 + quoted(relativePath));
             }
         }
+        // Format characters (bidi controls, BOM, zero-width) and line/paragraph separators
+        // render as nothing or reorder what is around them, so two keys that differ only by
+        // one read the same in a log. The same definition as MemberPath's, kept separate on
+        // purpose like the rest of this rule and compared code point by code point in
+        // ContainmentRulesAgreeTest (t5-e5e3071-F3). By code point, so the supplementary
+        // format characters (U+E0001 and the tag block) are seen, not their surrogates.
+        if (relativePath.codePoints().anyMatch(ObjectKeys::isInvisible)) {
+            throw new IllegalArgumentException(
+                    "rendition path must not contain an invisible character: "
+                            + quoted(relativePath));
+        }
         // -1 keeps trailing empty segments, so "a/" is rejected rather than silently trimmed.
         String[] segments = relativePath.split("/", -1);
         for (String segment : segments) {
@@ -304,7 +315,30 @@ public final class ObjectKeys {
         return id.toString().toLowerCase(Locale.ROOT);
     }
 
+    static boolean isInvisible(int codePoint) {
+        int type = Character.getType(codePoint);
+        return type == Character.FORMAT || type == Character.LINE_SEPARATOR
+                || type == Character.PARAGRAPH_SEPARATOR;
+    }
+
+    /**
+     * A path in a message, as printable ASCII: anything else becomes \xNN per UTF-8 byte,
+     * and a backslash is doubled, the spelling BundleRejection.render uses. It quoted the
+     * path raw, so a refused bidi override reached the log line that refused it (review
+     * note N2 on 18368a9).
+     */
     private static String quoted(String value) {
-        return "'" + value + "'";
+        StringBuilder out = new StringBuilder("'");
+        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
+            int c = b & 0xFF;
+            if (c == '\\') {
+                out.append("\\\\");
+            } else if (c >= 0x20 && c < 0x7F) {
+                out.append((char) c);
+            } else {
+                out.append(String.format("\\x%02x", c));
+            }
+        }
+        return out.append("'").toString();
     }
 }
