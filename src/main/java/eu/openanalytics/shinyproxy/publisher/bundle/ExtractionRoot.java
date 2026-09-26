@@ -581,6 +581,15 @@ public final class ExtractionRoot implements AutoCloseable {
      * the contract's precondition, so this is defence in depth. The cost is one more read of
      * the tree, measured in the commit that added it.
      *
+     * <p><b>What it does not cover once it returns.</b> The checks describe the tree at the
+     * moment of the freeze. A same-uid process that made a hard link to a validated file
+     * from outside the root, or held a writable descriptor opened before the chmod, can
+     * still change the frozen bytes afterwards: the same inode, so nothing here differs, and
+     * a mode never stopped its owner. A link count of 1 would flag the first, but the
+     * descriptor-relative view this class uses does not expose it, and a path-based lookup
+     * is what this class exists to avoid. Both are covered by the contract's "no other
+     * writer" precondition, not by freeze() (e425718 review N1).
+     *
      * <p>Every change goes through a descriptor, with links refused, like every other
      * operation in this class. The walk opens a fresh listing of the root rather than
      * iterating {@code rootStream}, because a directory stream can be iterated once and

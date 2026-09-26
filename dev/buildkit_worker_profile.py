@@ -129,9 +129,14 @@ def write(directory, base, allowed=None, enosys=None, name="profile.json"):
 #
 # Measured 2026-09-24 against the rootless worker: under BuildKit's normal RUN profile all
 # six are denied with EPERM and /proc/self/status shows Seccomp_filters: 2; with the
-# security.insecure entitlement (BuildKit's inner profile dropped) five succeed, pivot_root
-# reaches the kernel's own argument check (EINVAL), and Seccomp_filters is 1. So a
-# denial here is the filter, not a malformed call.
+# security.insecure entitlement five succeed, pivot_root reaches the kernel's own argument
+# check (EINVAL), and Seccomp_filters is 1. That shows the calls are well-formed, and that
+# build code gets none of them under the normal profile, which is the property asserted.
+# It does NOT show which layer denies each one: security.insecure restores capabilities
+# AND drops the inner filter, so it moves both at once. Only unshare -U is denied by
+# seccomp alone, since creating a user namespace needs no capability; the other five would
+# also be refused for lack of CAP_SYS_ADMIN. So "under two filters" is what is measured,
+# and "the filter is what denies it" is not claimed (t5-e5e3071-F8 corrected this).
 HOSTILE_SCRIPT = r"""t() { n=$1; shift; if out=$("$@" 2>&1); then echo "$n=ok"; else echo "$n=$(echo "$out" | tr '\n' ' ')"; fi; }
 t unshare_user unshare -U true
 t unshare_mount unshare -m true

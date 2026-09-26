@@ -61,23 +61,19 @@ import java.util.Set;
  * it, the same carve-out {@code spec/extraction-limits-v1.json} gives the manifest. Parsing
  * records by length is what the bound buys.
  *
- * <p><b>REQUIRED OF THE CALLER, and not yet implemented anywhere:</b> the DECLARED size in
- * the extended header's tar header must be checked against the same bound BEFORE its content
- * is read. {@code bomb-huge-pax-field} is a header four times the cap, and the corpus says
- * what it is for — "a parser that buffers the whole record reads into memory before deciding
- * anything". The bound below applies to bytes already in hand, so it cannot be the only
- * check; by the time it fires the memory has been spent. The walk that will read these
- * headers does not exist yet (finding aa461cf-F1), so this is a requirement on its author
- * rather than a description of what happens today.
+ * <p><b>The caller checks the DECLARED size first, and does:</b> the extended header's
+ * tar header claims a size, and {@code TarStream.readPax} refuses a claim over the same
+ * bound before it reads a byte of the content. {@code bomb-huge-pax-field} is a header four
+ * times the cap, and the corpus says what it is for: "a parser that buffers the whole
+ * record reads into memory before deciding anything". The bound below applies to bytes
+ * already in hand, so on its own it would fire after the memory had been spent.
  *
- * <p><b>And it cannot be tested by a verdict.</b> Against {@code bomb-huge-pax-field} a walk
- * that pre-checks and a walk that reads first both end in PAX_HEADER_TOO_LARGE, so the
- * corpus — which compares decisions — cannot tell them apart, and a guard whose absence no
- * test can detect is a guard nothing holds (finding 3b37820-F2). The test that closes this
- * has to measure the ORDER: a reader that counts what it was asked for, asserted to have
- * been asked for no more than the declared bound before the rejection, or a stream that
- * refuses to yield past the cap. Recorded here so the requirement and the only way to
- * discharge it arrive together.
+ * <p>A verdict cannot show the order: against {@code bomb-huge-pax-field} a walk that
+ * pre-checks and one that reads first both end in PAX_HEADER_TOO_LARGE (finding
+ * 3b37820-F2). {@code TarStreamTest.anExtendedHeaderIsRefusedOnItsClaimBeforeItsBytes}
+ * measures the order instead: the archive carries only the header block, and a counting
+ * stream shows nothing past it was asked for. This paragraph said "not yet implemented
+ * anywhere" until t5-e5e3071-F8, long after the check and its test had landed.
  */
 public final class PaxRecords {
 

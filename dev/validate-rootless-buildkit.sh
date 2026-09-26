@@ -7,8 +7,11 @@
 # seccomp=unconfined is in the isolation profile's forbidden_arguments. So this does not
 # ask whether rootless BuildKit runs; it asks whether it runs without them.
 #
-# It does: Docker's deny-by-default profile plus clone and mount, with the process sandbox
-# intact, proved by a real build rather than by a daemon that started.
+# It does: Docker's deny-by-default profile plus seven namespace-management syscalls, with
+# keyctl answered ENOSYS and the process sandbox intact, proved by a real build rather than
+# by a daemon that started. The profile and the reason for each member are in
+# dev/buildkit_worker_profile.py. (This said "plus clone and mount" until t5-e5e3071-F8;
+# that was false from 98c00fb on, and the two-call claim never had a RUN behind it.)
 #
 # Fetches Docker's default profile over the network and refuses to run without it, rather
 # than substituting something weaker. Runs on the HOST and drives docker directly; creates

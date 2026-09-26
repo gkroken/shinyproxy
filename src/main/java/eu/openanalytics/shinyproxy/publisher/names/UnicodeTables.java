@@ -27,8 +27,8 @@ package eu.openanalytics.shinyproxy.publisher.names;
  * 15.0.0. Do not edit; change the generator and rerun it (--check verifies).
  *
  * <p>Derived from Unicode data files. Copyright (C) 1991-2022 Unicode, Inc. Distributed under
- * the Unicode License v3, https://www.unicode.org/license.txt; the data files carry the full
- * notice.
+ * the Unicode License v3, whose full text is licenses/UNICODE-LICENSE-V3.txt in this
+ * repository (https://www.unicode.org/license.txt).
  *
  * <p>Each table is sorted, non-overlapping, inclusive {@code first, last} pairs.
  */

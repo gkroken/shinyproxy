@@ -16,8 +16,9 @@ Pinned to Unicode 15.0.0, the version JDK 21 (the build image) implements, so th
 Character.getType agree about which code points exist. Each file is checked against its
 SHA-256 and the run stops on a mismatch.
 
-Unicode data is under the Unicode License v3 (permissive, OSI-approved). Its notice is
-reproduced in the generated file, which is what the license asks of derived data.
+Unicode data is under the Unicode License v3 (permissive, OSI-approved). The generated
+file names it and points at licenses/UNICODE-LICENSE-V3.txt, the full copyright and
+permission notice, which is what the license asks for with copies of derived data.
 
 Usage: python3 dev/unicode/generate_invisible_tables.py [--check] [--cache DIR]
   --check   regenerate into memory and fail if the committed file differs
@@ -162,8 +163,8 @@ package eu.openanalytics.shinyproxy.publisher.names;
  * %(version)s. Do not edit; change the generator and rerun it (--check verifies).
  *
  * <p>Derived from Unicode data files. Copyright (C) 1991-2022 Unicode, Inc. Distributed under
- * the Unicode License v3, https://www.unicode.org/license.txt; the data files carry the full
- * notice.
+ * the Unicode License v3, whose full text is licenses/UNICODE-LICENSE-V3.txt in this
+ * repository (https://www.unicode.org/license.txt).
  *
  * <p>Each table is sorted, non-overlapping, inclusive {@code first, last} pairs.
  */

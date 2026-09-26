@@ -627,7 +627,12 @@ when the JDK is upgraded. Moving to a newer Unicode is a deliberate regeneration
 
 **Not covered, and not claimed:** homoglyphs. A Cyrillic `a`, a different space character
 or U+2800 BRAILLE PATTERN BLANK are visible characters that look like others. That class is
-open, and the tests pin all three as accepted, so the gap stays visible.
+open, and the tests pin all three as accepted, so the gap stays visible. Nor is IDNA's
+script-mixing policy part of "the domain-name rule" here: ContextJ looks only at the code
+point before a joiner. So `a<U+094D><ZWNJ>b` (a stray Devanagari virama on a Latin letter,
+then a ZWNJ) is accepted, and it looks like `a<U+094D>b`. Narrow, since the stray virama is
+itself visible, and recorded here so it is decided rather than accidental (804fae5 review
+note N1).
 
 Validate the **effective** path after any approved PAX `path` override. Reject global PAX,
 linkpath, sparse/xattr/ACL overrides and unknown interpretation-changing extensions;
@@ -1827,6 +1832,14 @@ below are marked passed by this planning document.
       tests paired with successful authorized uploads. Break MinIO mid-log, disconnect
       clients and resume by cursor. **Pass:** durable in-progress and failed logs are
       readable, no slow client stalls a build, no new CSRF or source/log disclosure path.
+      **Carried from T5's reviews, for this track:** (1) a rejection's getMessage() is
+      printable ASCII by construction (`t5-e5e3071-F2`), but a cleanup failure is attached
+      with addSuppressed, and an IOException from deleting the tree can name a hostile
+      path raw. Log the rule and getMessage(), not the throwable with its chain, or escape
+      the chain (18368a9 review N1). (2) GzipMember treats a source read of 0 bytes as end
+      of upload. A blocking InputStream never returns 0, but if this track hands the
+      extractor a non-blocking or adapter stream, make a 0 fail closed first (b991250
+      review note).
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.
