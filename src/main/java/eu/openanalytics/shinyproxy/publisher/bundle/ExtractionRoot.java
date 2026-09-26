@@ -38,10 +38,13 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -93,9 +96,21 @@ public final class ExtractionRoot implements AutoCloseable {
     private boolean frozen;
     /**
      * Every file and directory this root created, relative to it ({@code www},
-     * {@code www/style.css}). freeze() refuses anything else it finds (t5-e5e3071-F5).
+     * {@code www/style.css}), with what it was when created. freeze() refuses any entry not
+     * here (t5-e5e3071-F5) and any entry that is no longer what is recorded (c76cd70-F1).
      */
-    private final Set<String> created = new HashSet<>();
+    private final Map<String, Created> created = new HashMap<>();
+
+    /**
+     * What an entry was when this root made it: its file key (device and inode), and for
+     * a file the size and SHA-256 of the bytes written. A directory has no size or digest;
+     * what is in it is checked entry by entry.
+     */
+    record Created(Object fileKey, long size, byte[] sha256) {
+        static Created directory(Object fileKey) {
+            return new Created(fileKey, -1, null);
+        }
+    }
 
     private ExtractionRoot(Path root, SecureDirectoryStream<Path> rootStream,
                            DirectoryStream<Path> parentStream) {
@@ -281,16 +296,26 @@ public final class ExtractionRoot implements AutoCloseable {
             // this is the one call that turns an archive into bytes on a disk.
             Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            MessageDigest digest = sha256();
+            long written;
             try (SeekableByteChannel channel = directory.newByteChannel(name, options,
                     PosixFilePermissions.asFileAttribute(
                             executable ? PRIVATE_EXECUTABLE : PRIVATE_FILE))) {
-                created.add(String.join("/", segments));
-                return copy(content, channel);
+                written = copy(content, channel, digest);
             } catch (java.nio.file.FileAlreadyExistsException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + BundleRejection.quote(member.memberPath()) + "' already exists in an extraction root"
-                                + " this extractor created and is the only writer for");
+                        "'" + BundleRejection.quote(member.memberPath()) + "' already exists"
+                                + " in an extraction root this extractor created and is the"
+                                + " only writer for");
             }
+            // The key is read after the write, by name through the parent's descriptor, so
+            // a swap in between would record the swapped file's key. The digest is what
+            // this object wrote, whatever is there now, and freeze() compares both.
+            created.put(String.join("/", segments), new Created(directory
+                    .getFileAttributeView(name, PosixFileAttributeView.class,
+                            LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey(),
+                    written, digest.digest()));
+            return written;
         } finally {
             closeAll(opened);
         }
@@ -368,7 +393,9 @@ public final class ExtractionRoot implements AutoCloseable {
             relative.append(relative.length() == 0 ? "" : "/").append(segment);
             if (create && !presentIn(current, name, segment)) {
                 createThrough(current, name, segment);
-                created.add(relative.toString());
+                created.put(relative.toString(), Created.directory(current
+                        .getFileAttributeView(name, PosixFileAttributeView.class,
+                                LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey()));
             }
             SecureDirectoryStream<Path> next;
             try {
@@ -450,11 +477,13 @@ public final class ExtractionRoot implements AutoCloseable {
         }
     }
 
-    private static long copy(InputStream from, SeekableByteChannel to) throws IOException {
+    private static long copy(InputStream from, SeekableByteChannel to, MessageDigest digest)
+            throws IOException {
         byte[] buffer = new byte[64 * 1024];
         long written = 0;
         int read;
         while ((read = from.read(buffer, 0, buffer.length)) >= 0) {
+            digest.update(buffer, 0, read);
             java.nio.ByteBuffer slice = java.nio.ByteBuffer.wrap(buffer, 0, read);
             while (slice.hasRemaining()) {
                 to.write(slice);
@@ -462,6 +491,33 @@ public final class ExtractionRoot implements AutoCloseable {
             written += read;
         }
         return written;
+    }
+
+    private static MessageDigest sha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 is required of every JDK", ex);
+        }
+    }
+
+    /**
+     * The SHA-256 of a file as it is now, read through its parent's descriptor with links
+     * refused: the bytes freeze() is about to call validated.
+     */
+    private static byte[] digestOf(SecureDirectoryStream<Path> directory, Path name)
+            throws IOException {
+        MessageDigest digest = sha256();
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(64 * 1024);
+        try (SeekableByteChannel channel = directory.newByteChannel(name,
+                Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
+            while (channel.read(buffer) >= 0) {
+                buffer.flip();
+                digest.update(buffer);
+                buffer.clear();
+            }
+        }
+        return digest.digest();
     }
 
     private static void closeAll(Deque<SecureDirectoryStream<Path>> opened) throws IOException {
@@ -512,14 +568,18 @@ public final class ExtractionRoot implements AutoCloseable {
      * sent the context as a stream and never sees this directory (the launcher contract,
      * T3).
      *
-     * <p><b>It freezes only what this root wrote.</b> Every entry the walk meets must be a
-     * file or directory this object created; anything else is refused before its mode is
-     * touched, and the extractor then deletes the tree like any refused one. It used to
-     * freeze whatever it found: the gate's same-uid "foreign writer" put 752 files into a
-     * root during extraction, and the bundle was accepted with 734 of them frozen beside
-     * the payload as if validated (t5-e5e3071-F5). A second writer breaks the contract's
-     * precondition, so this is defence in depth, but the walk visits every entry anyway and
-     * "freeze the validated tree" should mean that tree.
+     * <p><b>It freezes only what this root wrote, as it wrote it.</b> Every entry the walk
+     * meets must be one this object created, and still the same entry: the same file key
+     * (a file renamed over it has another), and for a file the same size and the same
+     * SHA-256 as the bytes written, re-read through the descriptor after the file is made
+     * read-only (an in-place write whose mtime was put back still changes the digest).
+     * Anything else is refused, and the extractor then deletes the tree like any refused
+     * one. It used to freeze whatever it found: the gate's same-uid "foreign writer" put 752
+     * files into a root during extraction, and the bundle was accepted with 734 of them
+     * frozen beside the payload as if validated (t5-e5e3071-F5); a check by name alone still
+     * accepted a validated file replaced or appended to (c76cd70-F1). A second writer breaks
+     * the contract's precondition, so this is defence in depth. The cost is one more read of
+     * the tree, measured in the commit that added it.
      *
      * <p>Every change goes through a descriptor, with links refused, like every other
      * operation in this class. The walk opens a fresh listing of the root rather than
@@ -531,8 +591,16 @@ public final class ExtractionRoot implements AutoCloseable {
             return;
         }
         frozen = true;     // first: no write may begin while the walk runs
+        Set<String> visited = new java.util.HashSet<>();
         try (SecureDirectoryStream<Path> top = reopenRoot()) {
-            freezeContents(top, "", created);
+            freezeContents(top, "", created, visited);
+        }
+        // And nothing it wrote may be gone: a validated file deleted or moved out is a tree
+        // that is not the one validated either.
+        List<String> missing = created.keySet().stream()
+                .filter(entry -> !visited.contains(entry)).sorted().toList();
+        if (!missing.isEmpty()) {
+            requireSame(missing.get(0), false, "removed");
         }
         rootStream.getFileAttributeView(PosixFileAttributeView.class)
                 .setPermissions(FROZEN_DIRECTORY);
@@ -544,12 +612,14 @@ public final class ExtractionRoot implements AutoCloseable {
     }
 
     private static void freezeContents(SecureDirectoryStream<Path> directory, String prefix,
-                                       Set<String> created) throws IOException {
+                                       Map<String, Created> created, Set<String> visited)
+            throws IOException {
         try {
             for (Path entry : directory) {
                 Path name = entry.getFileName();
                 freezeEntry(directory, name,
-                        prefix.isEmpty() ? name.toString() : prefix + "/" + name, created);
+                        prefix.isEmpty() ? name.toString() : prefix + "/" + name, created,
+                        visited);
             }
         } catch (java.nio.file.DirectoryIteratorException ex) {
             throw changedUnderUs("(listing)", ex.getCause());
@@ -571,31 +641,46 @@ public final class ExtractionRoot implements AutoCloseable {
      * time it is read), where from outside it can only be raced.
      */
     static void freezeEntry(SecureDirectoryStream<Path> directory, Path name, String relative,
-                            Set<String> created) {
+                            Map<String, Created> created, Set<String> visited) {
         try {
             PosixFileAttributeView view = directory.getFileAttributeView(name,
                     PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
             PosixFileAttributes attributes = view.readAttributes();
             // The type first, so a link or a device keeps its own, more specific refusal
-            // below; then whether this root made it, before anything about it changes.
-            if ((attributes.isDirectory() || attributes.isRegularFile())
-                    && !created.contains(relative)) {
+            // below; then whether this root made it and whether it still is what was made,
+            // before anything about it changes.
+            Created made = created.get(relative);
+            if ((attributes.isDirectory() || attributes.isRegularFile()) && made == null) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
                         "'" + BundleRejection.quote(relative) + "' is in the extraction root,"
                                 + " and this extractor did not write it; something else is"
                                 + " writing to the root, so the tree is not the one that was"
                                 + " validated");
             }
+            if (made != null) {
+                visited.add(relative);
+            }
             if (attributes.isDirectory()) {
+                requireSame(relative, made.fileKey().equals(attributes.fileKey())
+                        && made.sha256() == null, "replaced");
                 try (SecureDirectoryStream<Path> child =
                              directory.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
-                    freezeContents(child, relative, created);
+                    freezeContents(child, relative, created, visited);
                 }
                 view.setPermissions(FROZEN_DIRECTORY);
             } else if (attributes.isRegularFile()) {
+                requireSame(relative, made.sha256() != null, "replaced");
+                requireSame(relative, attributes.size() == made.size(), "resized");
                 view.setPermissions(attributes.permissions()
                         .contains(PosixFilePermission.OWNER_EXECUTE)
                         ? FROZEN_EXECUTABLE : FROZEN_FILE);
+                // Read-only first, then the digest, then the key: read last, so a file
+                // swapped in before the walk reached it and one swapped in during the read
+                // are both seen, by the one comparison.
+                requireSame(relative, MessageDigest.isEqual(made.sha256(),
+                        digestOf(directory, name)), "rewritten");
+                requireSame(relative, made.fileKey().equals(view.readAttributes().fileKey()),
+                        "replaced");
             } else {
                 // This class creates nothing else, so something else put it there. Refused
                 // rather than frozen around: the tree is not the one that was validated.
@@ -605,6 +690,15 @@ public final class ExtractionRoot implements AutoCloseable {
             }
         } catch (IOException ex) {
             throw changedUnderUs(name.toString(), ex);
+        }
+    }
+
+    private static void requireSame(String relative, boolean same, String how) {
+        if (!same) {
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + BundleRejection.quote(relative) + "' was " + how + " after this"
+                            + " extractor wrote it; something else is writing to the root, so"
+                            + " the tree is not the one that was validated");
         }
     }
 

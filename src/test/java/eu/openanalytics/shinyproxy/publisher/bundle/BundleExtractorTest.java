@@ -367,6 +367,51 @@ public class BundleExtractorTest {
     }
 
     @Test
+    public void aValidatedFileChangedBeforeTheFreezeIsRefused(@TempDir Path workspace)
+            throws Exception {
+        // c76cd70-F1 through the production entry point, with the same planting stream: at
+        // the upload's end, renv.lock (written and hash-checked by then) is replaced by a
+        // rename, or appended to. Both were accepted with the tampered bytes frozen.
+        byte[] upload = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
+        for (String how : new String[] {"replaced", "resized"}) {
+            InputStream tampering = new ByteArrayInputStream(upload) {
+                private boolean done;
+
+                @Override
+                public synchronized int read(byte[] b, int off, int len) {
+                    int n = super.read(b, off, len);
+                    if (n < 0 && !done) {
+                        done = true;
+                        try (java.util.stream.Stream<Path> roots = Files.list(workspace)) {
+                            Path lock = roots.filter(Files::isDirectory).findFirst()
+                                    .orElseThrow().resolve("renv.lock");
+                            if (how.equals("replaced")) {
+                                Path other = Files.writeString(
+                                        workspace.resolve("other-" + System.nanoTime()), "{}\n");
+                                Files.move(other, lock,
+                                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            } else {
+                                Files.writeString(lock, "  ",
+                                        java.nio.file.StandardOpenOption.APPEND);
+                            }
+                        } catch (IOException ex) {
+                            throw new java.io.UncheckedIOException(ex);
+                        }
+                    }
+                    return n;
+                }
+            };
+            BundleRejection ex = assertThrows(BundleRejection.class,
+                    () -> BundleExtractor.extract(tampering, upload.length, workspace, LIMITS),
+                    how + " was accepted");
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+            assertTrue(ex.getMessage().contains("'renv.lock' was " + how), ex.getMessage());
+            assertEmpty(workspace);
+        }
+    }
+
+    @Test
     public void aSecondMemberInALaterReadIsRefused(@TempDir Path workspace) throws Exception {
         // t5-e5e3071-F4 through the production entry point, with the size unknown as for a
         // streamed upload: a valid bundle, then a second gzip member that arrives in a

@@ -220,7 +220,7 @@ public class ExtractionRootTest {
                      (SecureDirectoryStream<Path>) Files.newDirectoryStream(tmp)) {
             BundleRejection gone = assertThrows(BundleRejection.class,
                     () -> ExtractionRoot.freezeEntry(directory, Path.of("renamed-away"),
-                            "renamed-away", java.util.Set.of("renamed-away")));
+                            "renamed-away", java.util.Map.of(), new java.util.HashSet<>()));
             assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, gone.rule());
             assertTrue(gone.getMessage().contains("changed while it was being frozen")
                     && gone.getMessage().contains("NoSuchFileException"), gone.getMessage());
@@ -265,6 +265,73 @@ public class ExtractionRootTest {
         clean.freeze();
         assertTrue(clean.isFrozen());
         clean.deleteTree();
+    }
+
+    /** A root holding www/, www/style.css and app.R, all written by the root itself. */
+    private static ExtractionRoot writtenTree(Path tmp) throws IOException {
+        ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work");
+        root.createDirectory(member("app/www/"));
+        root.writeFile(member("app/www/style.css"),
+                new ByteArrayInputStream("body {}".getBytes(StandardCharsets.UTF_8)), false);
+        root.writeFile(member("app/app.R"),
+                new ByteArrayInputStream("library(shiny)".getBytes(StandardCharsets.UTF_8)));
+        return root;
+    }
+
+    @Test
+    public void whatTheRootWroteMustStillBeWhatItWrote(@TempDir Path tmp) throws Exception {
+        // c76cd70-F1: the name check alone accepted a validated file replaced or appended to.
+        // Each tampering shape in its own tree, each refused naming how the entry changed.
+        record Tamper(String how, String entry, Tampering act) { }
+        Path outside = Files.createDirectory(tmp.resolve("outside"));
+        List<Tamper> cases = List.of(
+                new Tamper("replaced", "www/style.css", root -> {
+                    Path other = Files.writeString(outside.resolve("other.css"), "body {}");
+                    Files.move(other, root.resolve("www/style.css"),
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }),
+                new Tamper("resized", "www/style.css", root -> Files.writeString(
+                        root.resolve("www/style.css"), " x",
+                        java.nio.file.StandardOpenOption.APPEND)),
+                // Same size, and the modification time put back: only the bytes say so.
+                new Tamper("rewritten", "app.R", root -> {
+                    Path file = root.resolve("app.R");
+                    java.nio.file.attribute.FileTime before = Files.getLastModifiedTime(file);
+                    String hostile = "system(\"id\")#!";
+                    assertEquals("library(shiny)".length(), hostile.length(),
+                            "the rewrite must keep the size, or the size check catches it");
+                    Files.writeString(file, hostile,
+                            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+                    Files.setLastModifiedTime(file, before);
+                }),
+                // A directory swapped for another of the same name: its contents moved out
+                // with it (so its inode stays in use and cannot be reused for the new one).
+                new Tamper("replaced", "www", root -> {
+                    Files.move(root.resolve("www"), outside.resolve("www-" + System.nanoTime()));
+                    Files.createDirectory(root.resolve("www"));
+                }),
+                new Tamper("removed", "app.R", root -> Files.delete(root.resolve("app.R"))));
+        for (Tamper tamper : cases) {
+            ExtractionRoot root = writtenTree(tmp);
+            tamper.act().apply(root.path());
+            BundleRejection ex = assertThrows(BundleRejection.class, root::freeze,
+                    tamper.how() + " " + tamper.entry());
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+            assertTrue(ex.getMessage().contains("'" + tamper.entry() + "' was " + tamper.how()),
+                    tamper.how() + " " + tamper.entry() + ": " + ex.getMessage());
+            root.deleteTree();
+        }
+        // The control: an untouched tree freezes.
+        ExtractionRoot clean = writtenTree(tmp);
+        clean.freeze();
+        assertTrue(clean.isFrozen());
+        clean.deleteTree();
+    }
+
+    @FunctionalInterface
+    private interface Tampering {
+        void apply(Path root) throws IOException;
     }
 
     @Test
