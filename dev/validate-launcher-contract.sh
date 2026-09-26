@@ -12,11 +12,17 @@
 # dev/buildkit_worker_profile.py; the probe's docstring records why the RUN used to fail.
 #
 # Creates two networks, a registry, a gateway and one worker per attempt, and removes all
-# of them including on failure.
+# of them including on failure -- with their volumes, and a check that the workers' state
+# volumes are gone after disposal (t5-e5e3071-F7).
 #
 # Usage: bash dev/validate-launcher-contract.sh [--json]
+#        bash dev/validate-launcher-contract.sh --self-test   (a disposal that leaves the
+#                                                             worker's state is caught)
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+if [ "${1:-}" = "--self-test" ]; then
+    exec python3 dev/worker_disposal.py --self-test
+fi
 exec python3 dev/launcher-contract-probe.py "$@"

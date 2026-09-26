@@ -52,6 +52,7 @@ import sys
 import tempfile
 
 import buildkit_worker_profile as worker_profile
+import worker_disposal
 
 BUILDKIT_IMAGE = os.environ.get("BUILDKIT_IMAGE", "moby/buildkit:rootless")
 SOCKET = "unix:///run/user/1000/buildkit/buildkitd.sock"
@@ -98,6 +99,14 @@ results = []
 # through try_build's `extra`, so mounting the Docker socket into the worker passed as
 # "clean" (finding d3d68e4-F1).
 launches = []
+held_volumes, leaked_volumes = [], []   # every volume a disposed worker held / left behind
+
+
+def dispose():
+    """Tear the worker down with its state volume (t5-e5e3071-F7), and keep the evidence."""
+    held, left = worker_disposal.dispose(CONTAINER)
+    held_volumes.extend(held)
+    leaked_volumes.extend(left)
 
 
 def record(name, expectation, observed, ok, note=""):
@@ -130,7 +139,7 @@ def try_build(profile_path, context, extra=(), client_extra=(), produced_out=Non
     `produced_out` is a list, what the RUN wrote is appended to it, for a caller judging
     something other than the evidence string.
     """
-    docker(["rm", "-f", CONTAINER])
+    dispose()
     args = ["run", "-d", "--name", CONTAINER]
     if profile_path:
         args += ["--security-opt", "seccomp=" + profile_path]
@@ -172,7 +181,7 @@ def try_build(profile_path, context, extra=(), client_extra=(), produced_out=Non
                        if "not permitted" in l or "ERROR" in l), "")
     else:
         detail = next((l for l in logs.splitlines() if "not permitted" in l), "")
-    docker(["rm", "-f", CONTAINER])
+    dispose()
     return started, mode, built, detail.strip()[:140]
 
 
@@ -240,7 +249,19 @@ def main(argv):
                "a RUN trying unshare/mount/setns/pivot_root/sethostname is denied each, "
                "under two seccomp filters", detail, denied)
 
-        # 6. Nothing forbidden was used to get here -- checked against the argv actually
+        # 6. No worker's state outlives it. Each launch above is a worker, and the image
+        #    declares a VOLUME for BuildKit's state; `docker rm -f` alone left it, and its
+        #    build cache, on the host after every case (t5-e5e3071-F7). Judged by the host's
+        #    volume list after disposal, and it must have examined one volume per launch.
+        record("no worker's state outlives it",
+               "every volume a worker held is gone once it is disposed of",
+               "%d volume(s) held, none left" % len(held_volumes) if not leaked_volumes
+               else "%d of %d volume(s) survived: %s"
+                    % (len(leaked_volumes), len(held_volumes),
+                       ", ".join(v[:12] for v in leaked_volumes)),
+               not leaked_volumes and len(held_volumes) >= len(launches) > 0)
+
+        # 7. Nothing forbidden was used to get here -- checked against the argv actually
         #    issued, every launch of it, not against a string this function writes. Last,
         #    so it covers every launch above (it used to run before the two checks above).
         offenders = forbidden_in_launches()
@@ -252,7 +273,7 @@ def main(argv):
                "" if launches else "no launch was recorded, so this check examined "
                                    "nothing")
     finally:
-        docker(["rm", "-f", CONTAINER])
+        dispose()
         shutil.rmtree(tmp, ignore_errors=True)
 
     bad = [r for r in results if not r["ok"]]
@@ -371,12 +392,16 @@ def self_test(tmp, base, ctx):
         else:
             print("  ok   %s -> ENOSYS is required: with EPERM the RUN fails" % syscall)
 
+    # The disposal check's own premise: a teardown without -v must be caught.
+    if worker_disposal.self_test() != 0:
+        missed.append("worker state outliving disposal")
+
     # There was a case here that reported the worker's process-mode and printed "ok"
     # whatever it read -- including "unknown". It is removed rather than reworded: a
     # self-test case that cannot fail is the defect this whole suite exists to refuse, and
     # the main run already asserts process-mode == sandbox against a real worker.
 
-    docker(["rm", "-f", CONTAINER])
+    dispose()
     print()
     if missed:
         print("RESULT: self-test FAILED: %s" % ", ".join(missed))

@@ -66,6 +66,7 @@ import sys
 import tempfile
 
 import buildkit_worker_profile as worker_profile
+import worker_disposal
 
 INNER, OUTER = "skald-lc-inner", "skald-lc-outer"
 GATEWAY, REGISTRY = "skald-lc-gateway", "skald-lc-registry"
@@ -76,6 +77,7 @@ ATTEMPTS = 2          # two attempts, so "one worker per attempt" is observable
 BUILD_REPEATS = 2     # each build run twice, so an intermittent failure is a failure
 
 results = []
+held_volumes, leaked_volumes = [], []   # every volume a disposed worker held / left behind
 
 
 def record(name, expectation, observed, ok, note=""):
@@ -90,17 +92,26 @@ def docker(args, **kw):
     return subprocess.run(["docker"] + args, capture_output=True, text=True, **kw)
 
 
+def dispose(container):
+    """The launcher's teardown of a worker: the container AND its state volume. What it
+    held and what survived are both kept, for the disposability check (t5-e5e3071-F7)."""
+    held, left = worker_disposal.dispose(container)
+    held_volumes.extend(held)
+    leaked_volumes.extend(left)
+
+
 def cleanup():
-    docker(["ps", "-aq", "--filter", "name=" + WORKER_PREFIX]).stdout.split()
+    # -v everywhere: the worker image and registry:2 both declare a VOLUME, and without it
+    # every run of this probe left the build cache and the registry's blobs on the host.
     for cid in docker(["ps", "-aq", "--filter",
                        "name=" + WORKER_PREFIX]).stdout.split():
-        docker(["rm", "-f", cid])
+        dispose(cid)
     for name in (GATEWAY, REGISTRY):
-        docker(["rm", "-f", name])
+        docker(["rm", "-f", "-v", name])
     for net in (INNER, OUTER):
         for name in docker(["network", "inspect", net, "-f",
                             "{{range .Containers}}{{.Name}} {{end}}"]).stdout.split():
-            docker(["rm", "-f", name])
+            docker(["rm", "-f", "-v", name])
         docker(["network", "rm", net])
 
 
@@ -131,7 +142,7 @@ def build_gateway(tmp):
 def start_worker(tmp, profile, index):
     """One disposable worker. No socket, no context, no credentials."""
     name = WORKER_PREFIX + str(index)
-    docker(["rm", "-f", name])
+    dispose(name)
     docker(["run", "-d", "--name", name, "--network", INNER, "--network-alias", name,
             "--security-opt", "seccomp=" + profile,
             "-e", "http_proxy=http://%s:8888" % GATEWAY,
@@ -147,6 +158,7 @@ def start_worker(tmp, profile, index):
                    name]).stdout.strip() != "running":
             break
         subprocess.run(["sleep", "1"])
+    dispose(name)    # a worker that never became ready is still one to tear down
     return None
 
 
@@ -194,6 +206,10 @@ def main(argv):
 
         workers, worker_ids, built, contained = [], [], [], []
         survivors_at_start, offenders, inspected = [], [], []
+        # Reset here, not only at import: cleanup() above disposes of whatever an earlier,
+        # interrupted run left, and that is not this run's disposal to judge.
+        held_volumes.clear()
+        leaked_volumes.clear()
         for attempt in range(1, ATTEMPTS + 1):
             # Before this attempt starts, no PREVIOUS attempt's worker may still be
             # running. This is the disposability property: the launcher tears a worker
@@ -281,7 +297,7 @@ def main(argv):
 
             # The launcher disposes of the worker as part of the attempt, which is what
             # the next iteration's survivors check then observes.
-            docker(["rm", "-f", worker])
+            dispose(worker)
 
         known = [i for i in worker_ids if i]
         record("one daemon per attempt, not reused",
@@ -358,6 +374,23 @@ def main(argv):
                else "attempt(s) %s began with a previous worker still up"
                     % ", ".join(map(str, lingered)),
                not lingered and len(survivors_at_start) == ATTEMPTS)
+
+        # ...and neither does its state. A container check alone passed while every
+        # attempt's build cache stayed on the host in an anonymous volume
+        # (t5-e5e3071-F7). What is judged is the host's volume list after disposal, not
+        # the command the launcher ran. It must have examined at least one volume per
+        # worker: the image declares one, and if it ever stops doing so this check has
+        # to be revisited on purpose rather than pass on an empty list.
+        record("no worker's state outlives it",
+               "every volume a worker held is gone once the launcher disposes of it",
+               "%d volume(s) held, none left" % len(held_volumes) if not leaked_volumes
+               else "%d of %d volume(s) survived disposal: %s"
+                    % (len(leaked_volumes), len(held_volumes),
+                       ", ".join(v[:12] for v in leaked_volumes)),
+               not leaked_volumes and len(held_volumes) >= ATTEMPTS,
+               "" if len(held_volumes) >= ATTEMPTS else "fewer volumes than workers were "
+                                                        "examined, so this proves less "
+                                                        "than it says")
     finally:
         cleanup()
         shutil.rmtree(tmp, ignore_errors=True)
