@@ -60,6 +60,22 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 REVIEWS = REPO / "code_review"
+# Since 2026-09-26 only the newest report stays at the top of code_review/; every earlier
+# one is filed under reviews/<track>/ (code_review/README.md "Layout"). history/ holds
+# superseded recheck rounds and gates keep t5-gate-* names, so neither is matched here.
+REPORT_NAME = re.compile(r"^[0-9a-f]{40}-done\.txt$")
+
+
+def all_reports():
+    """Every per-commit review report, full hash -> path, wherever the layout filed it.
+
+    One resolver for every lookup below. Four sites each globbing the flat directory is
+    how a reorganisation turned 24 good citations into 24 BAD ones (a14dfb7 review)."""
+    found = {}
+    for f in list(REVIEWS.glob("*-done.txt")) + list(REVIEWS.glob("reviews/*/*-done.txt")):
+        if REPORT_NAME.match(f.name):
+            found[f.name[:-len("-done.txt")]] = f
+    return found
 DEFAULT_DOCS = ["WORKPLAN-BUNDLES.md", "WORKPLAN.md", "WORKPLAN-REGISTRY.md",
                 "WORKPLAN-DEVSTACK.md"]
 
@@ -115,8 +131,7 @@ def git(*args):
 
 
 def report_for(full_hash):
-    p = REVIEWS / f"{full_hash}-done.txt"
-    return p if p.exists() else None
+    return all_reports().get(full_hash)
 
 
 def check_doc(path, failures):
@@ -240,8 +255,7 @@ def _reviewed_commit():
     that silently changes which branch it exercises depending on when it runs is
     how f1078e5-F1 happened.
     """
-    for f in sorted(REVIEWS.glob("*-done.txt")):
-        h = f.name[:-len("-done.txt")]
+    for h, f in sorted(all_reports().items()):
         rc, _, _ = git("merge-base", "--is-ancestor", h, "HEAD")
         if rc == 0 and re.search(r"^[0-9a-f]{7}-F\d+", f.read_text(errors="replace"), re.M):
             return h
@@ -252,7 +266,7 @@ def _unreviewed_ancestor():
     """A commit with no review report, for the missing-report branch."""
     rc, out, _ = git("log", "--format=%H", "-400", "HEAD")
     for h in out.split():
-        if not (REVIEWS / f"{h}-done.txt").exists():
+        if report_for(h) is None:
             return h
     return None
 
@@ -329,6 +343,31 @@ def self_test():
     ]
 
     bad = []
+    # The other direction: a CORRECT citation of a report that exists only in the archived
+    # layout must pass. Without it, a resolver that looked at the top level alone would
+    # still pass every case above, since they all expect a failure (a14dfb7 review).
+    archived = sorted(h for h, f in all_reports().items() if f.parent != REVIEWS
+                      and git("merge-base", "--is-ancestor", h, "HEAD")[0] == 0
+                      and re.search(r"^[0-9a-f]{7}-F1\b", f.read_text(errors="replace"), re.M))
+    if not archived:
+        print("  FAIL no archived report with an F1 was found, so the layout is not exercised")
+        bad.append("archived report")
+    else:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", dir=REPO,
+                                         delete=False, encoding="utf-8") as fh:
+            fh.write(f"see `{archived[0][:7]}-F1` for this\n")
+            tmp = Path(fh.name)
+        try:
+            f = []
+            check_doc(tmp, f)
+            if f:
+                print(f"  FAIL a correct citation of an archived report was refused: {f[0]}")
+                bad.append("archived report")
+            else:
+                print(f"  ok   a correct citation of a report under reviews/ passes")
+        finally:
+            tmp.unlink()
+
     for label, body, expect in cases:
         with tempfile.NamedTemporaryFile("w", suffix=".md", dir=REPO,
                                          delete=False, encoding="utf-8") as fh:
@@ -352,11 +391,12 @@ def self_test():
             tmp.unlink()
 
     if bad:
-        print(f"\nRESULT: self-test FAILED, {len(bad)} of {len(cases)} case(s) "
+        print(f"\nRESULT: self-test FAILED, {len(bad)} of {len(cases) + 1} case(s) "
               f"not caught for their stated reason")
         return 1
     print(f"\nRESULT: self-test passed -- all {len(cases)} cases fail for the "
-          f"reason claimed, so each branch is genuinely covered")
+          f"reason claimed, so each branch is genuinely covered, and a correct citation of an "
+          f"archived report passes")
     return 0
 
 
@@ -369,7 +409,7 @@ def main(argv):
               f"checks against;\n       without them every citation would be "
               f"'unverified' and this would pass vacuously.", file=sys.stderr)
         return 2
-    n_reports = len(list(REVIEWS.glob("*-done.txt")))
+    n_reports = len(all_reports())
     if n_reports == 0:
         print(f"ERROR: no *-done.txt review reports in {REVIEWS}. Refusing to "
               f"report success\n       with nothing to check against.", file=sys.stderr)
