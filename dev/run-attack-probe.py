@@ -60,6 +60,13 @@ REACH_DAEMON = r"""
 # shares the worker's network namespace, so it still tries the old TCP port on both the
 # loopback and the worker's own address -- there must be nothing listening -- and it looks
 # for the socket, which is not in its mounts. A connect or a present socket is an escape.
+# The allow control, in the same RUN with the same tool: the gateway's port must answer,
+# or a "refused" below proves only that nc could not connect to anything (7b1a2d1-F1).
+if nc -w 3 %(gate_ip)s 8888 </dev/null >/dev/null 2>&1; then
+  echo "control_gateway=CONNECTED"
+else
+  echo "control_gateway=refused"
+fi
 for addr in 127.0.0.1 %(worker)s; do
   if nc -w 3 "$addr" 1234 </dev/null >/dev/null 2>&1; then
     echo "daemon_tcp_$addr=CONNECTED"
@@ -68,6 +75,14 @@ for addr in 127.0.0.1 %(worker)s; do
   fi
 done
 echo "socket_present=$([ -S /skald-sock/bk.sock ] && echo yes || echo no)"
+# Abstract unix sockets are scoped to the network namespace, which the RUN shares with the
+# worker, so they are the way past a filesystem boundary. There must be none; the RUN reads
+# the list itself so an empty answer is distinguishable from an unreadable one.
+if [ -r /proc/net/unix ]; then
+  echo "abstract_sockets=$(awk 'NR>1 && $8 ~ /^@/' /proc/net/unix | wc -l)"
+else
+  echo "abstract_sockets=unreadable"
+fi
 """
 
 WRITE_REGISTRY = r"""
@@ -83,6 +98,11 @@ wget -S -O /dev/null --post-data='x' \
   "http://%(registry)s:5000/v2/attacker-forged/blobs/uploads/" > /tmp/w 2>&1 || true
 echo "registry_write_status=$(awk '/HTTP\//{print $2; exit}' /tmp/w)"
 echo "registry_write_raw=$(tr -d '\r' < /tmp/w | grep -iE 'HTTP/|refused|resolve|denied|error' | head -1)"
+# Reading other builds' images is refused too: the catalog and a known repository's tags.
+wget -S -O /dev/null "http://%(registry)s:5000/v2/_catalog" > /tmp/r 2>&1 || true
+echo "registry_catalog_status=$(awk '/HTTP\//{print $2; exit}' /tmp/r)"
+wget -S -O /dev/null "http://%(registry)s:5000/v2/base/alpine/tags/list" > /tmp/r 2>&1 || true
+echo "registry_tags_status=$(awk '/HTTP\//{print $2; exit}' /tmp/r)"
 """
 
 SEE_PROCESSES = r"""
@@ -100,6 +120,13 @@ LEAVE_ORPHAN = r"""
 # A process backgrounded in a RUN must not outlive the step. It writes a marker the harness
 # looks for on the worker side afterwards; from in here we only start it.
 ( sleep 600 & echo "orphan_pid=$!" )
+# The variant the gate named: detached into its own session, ignoring TERM and HUP, and
+# double-forked so its parent is gone before the step ends.
+setsid sh -c 'trap "" TERM HUP; ( sleep 777 & ) ; exit 0' </dev/null >/dev/null 2>&1 &
+sleep 1
+# The allow control: both were running when the step's script ended, so "gone afterwards"
+# is the sandbox's doing and not a child that never started.
+echo "orphans_started=$(ps -o args 2>/dev/null | grep -cE '^sleep (600|777)')"
 """
 
 READ_SECRETS = r"""
@@ -113,6 +140,10 @@ for p in /run/secrets /var/run/secrets /root/.aws /root/.docker/config.json \
   [ -e "$p" ] && found="$found $p"
 done
 echo "cred_paths=${found:-none}"
+# Allow controls, through the same two tests (7b1a2d1-F1): a file the RUN certainly has,
+# and a secret-shaped variable set here, must both be found.
+[ -e /probe.sh ] && echo "control_path=found" || echo "control_path=missing"
+echo "control_env=$(SKALD_CONTROL_TOKEN=1 env | grep -iE 'secret|token|password|aws_|_key=' | wc -l)"
 echo "docker_sock=$([ -S /var/run/docker.sock ] && echo present || echo absent)"
 """
 
@@ -120,25 +151,39 @@ echo "docker_sock=$([ -S /var/run/docker.sock ] && echo present || echo absent)"
 # ------------------------------------------------------------------ judges (pure)
 
 def judge_reach_daemon(report):
-    reached = [line for line in report if line.endswith("=CONNECTED")]
+    reached = [line for line in report if line.startswith("daemon_tcp_")
+               and line.endswith("=CONNECTED")]
     socket_here = _value(report, "socket_present") == "yes"
-    ok = not reached and not socket_here and bool(report)
+    abstract = _value(report, "abstract_sockets")
+    # The same nc must reach the gateway, or "refused" means nothing (7b1a2d1-F1); an
+    # absent or failed control is inconclusive, which is not containment.
+    control = _value(report, "control_gateway") == "CONNECTED"
+    ok = (control and not reached and not socket_here and abstract == "0"
+          and bool(report))
     note = ""
-    if reached:
+    if not control:
+        note = "  <- inconclusive: the in-RUN control could not reach the gateway either"
+    elif reached:
         note = "  <- build code reached a daemon TCP port"
     elif socket_here:
         note = "  <- the daemon socket is in the RUN's mounts"
+    elif abstract != "0":
+        note = "  <- abstract unix sockets in the shared netns: %s" % (abstract or "none read")
     return ok, ("; ".join(report) if report else "no report") + note
 
 
 def judge_write_registry(report):
     status = _value(report, "registry_write_status")
+    reads = [_value(report, k) for k in ("registry_catalog_status", "registry_tags_status")]
     # Containment is a DEFINITE refusal by the registry: 401 (no credential) or 403. An
     # accepted write (2xx) is an escape; an empty/absent status is inconclusive -- the
     # attempt did not reach the registry -- and is not counted as containment, so the probe
-    # cannot pass by the write silently going nowhere.
-    contained = status in ("401", "403")
-    detail = "registry answered %s to a build-code write" % (status or "nothing")
+    # cannot pass by the write silently going nowhere. Reads of other builds' images are
+    # held to the same rule.
+    refused = ("401", "403")
+    contained = status in refused and all(r in refused for r in reads)
+    detail = ("registry answered %s to a build-code write, %s to reads"
+              % (status or "nothing", "/".join(r or "nothing" for r in reads)))
     if not contained:
         raw = _value(report, "registry_write_raw")
         if raw:
@@ -165,8 +210,22 @@ def judge_secrets(report):
     env = _value(report, "secret_env")
     paths = _value(report, "cred_paths")
     sock = _value(report, "docker_sock")
-    ok = env in ("0", "") and paths == "none" and sock == "absent"
-    return ok, "secret-shaped env: %s; cred paths: %s; docker.sock: %s" % (env, paths, sock)
+    # The tests must be able to find something (7b1a2d1-F1): a present file and a planted
+    # secret-shaped variable, through the same two tests.
+    controls = (_value(report, "control_path") == "found"
+                and _value(report, "control_env") not in ("0", ""))
+    ok = controls and env == "0" and paths == "none" and sock == "absent"
+    return ok, "secret-shaped env: %s; cred paths: %s; docker.sock: %s%s" % (
+        env, paths, sock, "" if controls else "  <- inconclusive: a control was not found")
+
+
+def judge_orphans(report, survivors):
+    started = _value(report, "orphans_started")
+    # Both children must have been running inside the RUN (the control), and neither on the
+    # worker afterwards.
+    ok = started == "2" and not survivors
+    return ok, "started in the RUN: %s; survivors: %s" % (
+        started or "no report", "; ".join(survivors) if survivors else "none")
 
 
 def _value(report, key):
@@ -190,7 +249,7 @@ def attempt(tmp, name, script):
 def orphan_survivors():
     """Processes on the worker that a RUN's backgrounded child left behind, if any."""
     out = docker(["exec", h.WORKER, "sh", "-c",
-                  "ps -o pid,args 2>/dev/null | grep '[s]leep 600' || true"])
+                  "ps -o pid,args 2>/dev/null | grep -E '[s]leep (600|777)' || true"])
     return [l for l in out.stdout.splitlines() if l.strip()]
 
 
@@ -229,12 +288,11 @@ def main(argv):
                "the launcher's own pushes reached the registry",
                "%d attempt image(s) in the catalog" % len(pushed), bool(pushed))
 
-        attempt(tmp, "leave-orphan", LEAVE_ORPHAN)
-        survivors = orphan_survivors()
+        report, _ = attempt(tmp, "leave-orphan", LEAVE_ORPHAN)
+        ok, detail = judge_orphans(report, orphan_survivors())
         record("no process outlives the RUN",
-               "a backgrounded child is gone once the step ends",
-               "none" if not survivors else "survivor(s): %s" % "; ".join(survivors),
-               not survivors)
+               "a backgrounded child, and a detached TERM-ignoring one, are gone once the "
+               "step ends", detail, ok)
 
         report, _ = attempt(tmp, "read-secrets", READ_SECRETS)
         ok, detail = judge_secrets(report)
@@ -272,23 +330,47 @@ def self_test(tmp):
         else:
             print("  ok   %s" % label)
 
+    good = ["control_gateway=CONNECTED", "daemon_tcp_127.0.0.1=refused",
+            "daemon_tcp_10.0.0.2=refused", "socket_present=no", "abstract_sockets=0"]
+
+    def swap(lines, key, value):
+        return [l for l in lines if not l.startswith(key + "=")] + ["%s=%s" % (key, value)]
+
     case("a reached daemon TCP port is not contained",
-         judge_reach_daemon(["daemon_tcp_127.0.0.1=CONNECTED", "daemon_tcp_10.0.0.2=refused",
-                            "socket_present=no"]), False)
+         judge_reach_daemon(swap(good, "daemon_tcp_127.0.0.1", "CONNECTED")), False)
     case("a socket in the RUN's mounts is not contained",
-         judge_reach_daemon(["daemon_tcp_127.0.0.1=refused", "daemon_tcp_10.0.0.2=refused",
-                            "socket_present=yes"]), False)
-    case("no port and no socket is contained",
-         judge_reach_daemon(["daemon_tcp_127.0.0.1=refused", "daemon_tcp_10.0.0.2=refused",
-                            "socket_present=no"]), True)
+         judge_reach_daemon(swap(good, "socket_present", "yes")), False)
+    case("an abstract unix socket in the shared netns is not contained",
+         judge_reach_daemon(swap(good, "abstract_sockets", "1")), False)
+    case("an unreadable socket list is not contained",
+         judge_reach_daemon(swap(good, "abstract_sockets", "unreadable")), False)
+    case("refused everywhere with a failed control is inconclusive, not contained",
+         judge_reach_daemon(swap(good, "control_gateway", "refused")), False)
+    case("refused with no control line at all is not contained",
+         judge_reach_daemon([l for l in good if not l.startswith("control_")]), False)
+    case("no port and no socket, control connected, is contained",
+         judge_reach_daemon(good), True)
+    reads = ["registry_catalog_status=401", "registry_tags_status=401"]
     case("a 202 registry write is not contained",
-         judge_write_registry(["registry_write_status=202"]), False)
+         judge_write_registry(["registry_write_status=202"] + reads), False)
     case("a 401 registry write is contained",
-         judge_write_registry(["registry_write_status=401"]), True)
+         judge_write_registry(["registry_write_status=401"] + reads), True)
     case("an inconclusive (empty) registry answer is not contained",
-         judge_write_registry(["registry_write_status="]), False)
+         judge_write_registry(["registry_write_status="] + reads), False)
     case("a 403 registry write is contained",
-         judge_write_registry(["registry_write_status=403"]), True)
+         judge_write_registry(["registry_write_status=403"] + reads), True)
+    case("a readable catalog is not contained",
+         judge_write_registry(["registry_write_status=401", "registry_catalog_status=200",
+                               "registry_tags_status=401"]), False)
+    case("an unanswered tags read is not contained",
+         judge_write_registry(["registry_write_status=401", "registry_catalog_status=401"]),
+         False)
+    case("a surviving orphan is not contained",
+         judge_orphans(["orphans_started=2"], ["123 sleep 777"]), False)
+    case("orphans that never started are inconclusive, not contained",
+         judge_orphans(["orphans_started=0"], []), False)
+    case("both started and none survived is contained",
+         judge_orphans(["orphans_started=2"], []), True)
     case("a visible daemon is not contained",
          judge_see_processes(["buildkitd_visible=1", "process_count=3",
                               "pid1_comm=sh"]), False)
@@ -298,15 +380,25 @@ def self_test(tmp):
     case("alone in the namespace is contained",
          judge_see_processes(["buildkitd_visible=0", "process_count=3",
                               "pid1_comm=sh"]), True)
+    ctl = ["control_path=found", "control_env=1"]
     case("a found secret env is not contained",
-         judge_secrets(["secret_env=2", "cred_paths=none", "docker_sock=absent"]), False)
-    case("a credential path is not contained",
-         judge_secrets(["secret_env=0", "cred_paths= /root/.aws", "docker_sock=absent"]),
+         judge_secrets(["secret_env=2", "cred_paths=none", "docker_sock=absent"] + ctl),
          False)
+    case("a credential path is not contained",
+         judge_secrets(["secret_env=0", "cred_paths= /root/.aws", "docker_sock=absent"]
+                       + ctl), False)
     case("a docker socket is not contained",
-         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=present"]), False)
-    case("a clean environment is contained",
-         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=absent"]), True)
+         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=present"] + ctl),
+         False)
+    case("a clean environment whose path control failed is inconclusive",
+         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=absent",
+                        "control_path=missing", "control_env=1"]), False)
+    case("a clean environment whose env control failed is inconclusive",
+         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=absent",
+                        "control_path=found", "control_env=0"]), False)
+    case("a clean environment with both controls found is contained",
+         judge_secrets(["secret_env=0", "cred_paths=none", "docker_sock=absent"] + ctl),
+         True)
 
     # One live case, so the judges are not only exercised on hand-written strings: the
     # process check against a real RUN must report the RUN alone in its namespace.

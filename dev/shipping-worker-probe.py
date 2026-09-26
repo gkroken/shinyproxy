@@ -85,8 +85,19 @@ def judge_hostconfig(inspected, expected):
     want("CapAdd", host.get("CapAdd") or [], [])
     want("User", (inspected.get("Config") or {}).get("User"), expected["user"])
     opts = host.get("SecurityOpt") or []
-    if not any(o.startswith("seccomp=") and "unconfined" not in o for o in opts):
+    # THE shipped profile, not merely some seccomp= option (7fa81f9 N3). The CLI reads the
+    # file and the daemon keeps its content, so SecurityOpt carries the JSON itself; it must
+    # equal the profile the launch was given, compared as parsed JSON.
+    applied = [o[len("seccomp="):] for o in opts if o.startswith("seccomp=")]
+    if not applied:
         problems.append("no seccomp profile in SecurityOpt")
+    else:
+        try:
+            same = json.loads(applied[0]) == expected["seccomp"]
+        except ValueError:
+            same = False
+        if len(applied) != 1 or not same:
+            problems.append("the seccomp profile in SecurityOpt is not the shipped one")
     if any("unconfined" in o for o in opts):
         problems.append("an unconfined security option")
     mounts = inspected.get("Mounts") or []
@@ -236,8 +247,9 @@ def read(path):
         return ""
 
 
-def expected_config():
-    return {"nano_cpus": int(float(sw.PLACEHOLDER_VALUES["cpu_quota"]) * 1e9),
+def expected_config(profile):
+    return {"seccomp": json.loads(pathlib.Path(profile).read_text()),
+            "nano_cpus": int(float(sw.PLACEHOLDER_VALUES["cpu_quota"]) * 1e9),
             "memory": 2 * 1024 ** 3, "pids": int(sw.PLACEHOLDER_VALUES["pid_limit"]),
             "tmpfs": "rw,noexec,nosuid,nodev,size=%s" % sw.PLACEHOLDER_VALUES["tmpfs_size"],
             "network": NET, "volume": VOLUME,
@@ -282,7 +294,7 @@ def main(argv):
         launch(tmp, profile)
         ready = sw.wait_ready(WORKER)
         inspected = json.loads(docker(["inspect", WORKER]).stdout or "[{}]")[0]
-        ok, detail = judge_hostconfig(inspected, expected_config())
+        ok, detail = judge_hostconfig(inspected, expected_config(profile))
         record("the worker runs under the profile",
                "it starts, and docker inspect shows every bound of the profile",
                detail if ready else "did not start: %s" % sw.logs(WORKER).strip()[-160:],
@@ -411,6 +423,31 @@ def self_test(tmp, profile):
         sw.PRIVILEGED_HELPERS))
     expect_fail("a scan that saw nothing", judge_privilege_files([], sw.PRIVILEGED_HELPERS))
 
+    # The configuration check against THE shipped seccomp profile (7fa81f9 N3): a container
+    # carrying every bound, then the same with a profile missing its added entries, and with
+    # the profile's path instead of its content.
+    exp = expected_config(profile)
+    shipped = json.dumps(exp["seccomp"])
+    def conforming(seccomp_opt):
+        return {"HostConfig": {"ReadonlyRootfs": True, "NanoCpus": exp["nano_cpus"],
+                               "Memory": exp["memory"], "PidsLimit": exp["pids"],
+                               "Tmpfs": {"/tmp": exp["tmpfs"]}, "NetworkMode": exp["network"],
+                               "Privileged": False, "CapAdd": None,
+                               "SecurityOpt": [seccomp_opt]},
+                "Config": {"User": exp["user"]},
+                "Mounts": [{"Destination": "/workspace", "Type": "volume",
+                            "Name": exp["volume"]}]}
+    ok, detail = judge_hostconfig(conforming("seccomp=" + shipped), exp)
+    if not ok:
+        print("  FAIL the shipped configuration is refused (%s)" % detail)
+        missed.append("hostconfig control")
+    weaker = json.loads(shipped)
+    weaker["syscalls"] = weaker["syscalls"][:-2]
+    expect_fail("a different seccomp profile",
+                judge_hostconfig(conforming("seccomp=" + json.dumps(weaker)), exp))
+    expect_fail("a seccomp option that is a path, not the profile",
+                judge_hostconfig(conforming("seccomp=/elsewhere/profile.json"), exp))
+
     # Live: the upstream image, which carries setuid-root fusermount3 and setgid
     # unix_chkpwd. The scan must see both on the real image, not only on a fixture.
     expect_fail("the upstream image's extra privileged binaries",
@@ -422,7 +459,7 @@ def self_test(tmp, profile):
     if sw.wait_ready(WORKER):
         inspected = json.loads(docker(["inspect", WORKER]).stdout or "[{}]")[0]
         expect_fail("the launch without --read-only",
-                    judge_hostconfig(inspected, expected_config()))
+                    judge_hostconfig(inspected, expected_config(profile)))
         # The write check keys on EROFS, not on any refusal: the dedicated uid does not
         # own /home, so without --read-only the write is still refused, for permissions.
         # What must disappear is the read-only refusal itself.

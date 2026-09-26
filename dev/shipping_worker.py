@@ -18,7 +18,8 @@ What running it under the profile took, measured 2026-09-26 (logs in ~/.cache/sk
     ~/.local/share. HOME, TMPDIR and XDG_RUNTIME_DIR point into the /tmp tmpfs the profile
     already mounts, and buildkitd's --root is /workspace/buildkit, the profile's volume.
     No new mount, no widened bound.
-  - /workspace must be owned by the worker's uid (1000). The launcher prepares the volume.
+  - /workspace must be owned by the worker's uid (WORKER_UID below; it was
+    upstream's 1000 when this was first measured). The launcher prepares the volume.
   - --security-opt=no-new-privileges cannot be met: rootlesskit's newuidmap needs its file
     capability to write the uid map, and no-new-privileges disables file capabilities
     ("newuidmap: Could not set caps"). The user signed off on 2026-09-26 on waiving it for
