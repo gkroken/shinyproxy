@@ -1697,8 +1697,20 @@ below are marked passed by this planning document.
       visible), nothing it backgrounds outlives it, and it sees no credential, no other
       workspace and no Docker socket. **Owed:** the launcher-contract probe
       (`dev/launcher-contract-probe.py`) and T7's driver must adopt the socket transport;
-      it still starts buildkitd on TCP. Parts 3-4 (RUN-side resource bounds, the squid
-      egress matrix) follow.
+      it still starts buildkitd on TCP.
+
+      Part 3, resource bounds from inside a RUN step (`dev/validate-run-bounds.sh`): under
+      the shipping worker, on the loop-backed quota volume (`dev/quota_volume.py`, mounted
+      `nosuid,nodev`), build code tries to exceed memory, fork, CPU, disk and log volume,
+      each beside an allow control in the same RUN, and `--self-test` restarts the worker
+      without each defence and requires every check to go red. The first measurement
+      found the memory bound was twice what it read: `--memory` alone lets Docker add the
+      same amount in swap, and a RUN reached 3968 MiB under a 2g worker. The profile now
+      carries `--memory-swap` equal to the limit (`fba1089`). Logs were bounded only by
+      BuildKit's defaults, which nobody had set; they are now pinned as the profile's
+      `daemon_bounds` and proved by this probe. Still owed from part 3: moving
+      `runc-rootless` from unmeasured to measured in the spec, citing these runs. Part 4
+      (the squid egress matrix) follows.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in
@@ -1854,6 +1866,15 @@ below are marked passed by this planning document.
       and worker death. **Pass:** actual built image with recorded digest/provenance, useful
       failed-build log, bounded teardown, and cold runtime pull from the chosen registry
       authority. No mocked “build succeeded” counts toward this task.
+      **Carried from T5's gate finding F6 (part 3), for this track:** (1) when a RUN step is
+      OOM-killed inside the worker, `docker inspect` reports the WORKER as
+      `State.OOMKilled=true` though it keeps running and building; the driver must not read
+      that flag as worker death. (2) BuildKit's log bounds (`daemon_bounds` in
+      `spec/isolation-profile-v1.json`) clip a step's log and keep its HEAD, while a failed
+      build's error is usually at its tail; what is kept and shown to a publisher, and the
+      production values, are this track's. (3) The workspace is the loop-backed quota volume
+      `dev/quota_volume.py` makes, mounted `nosuid,nodev`; its attach step is the launcher's
+      privilege, and the production size is this track's.
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
@@ -1879,6 +1900,12 @@ below are marked passed by this planning document.
       every push/log/DB/response boundary; replay callbacks and late cancellation. **Pass:**
       success produces one staged digest-pinned version, failed/interrupted work never
       becomes active, and old direct-image tests still pass without a second override.
+      **Carried from T5 (fba1089 review note):** published app containers get the memory
+      gap the build worker had: ContainerProxy 1.2.4's `DockerEngineBackend` sets the
+      memory limit and never a memory-swap limit, so Docker allows as much again in swap.
+      Owed here: memory-swap equal to the limit, or a documented host-level swap policy. It
+      is an engine (upstream-class) change, so it goes through `docs/UPSTREAM_CHANGES.md`
+      and asks first.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and

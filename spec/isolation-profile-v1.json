@@ -162,6 +162,25 @@
         }
       },
 
+      "daemon_bounds_note": "Bounds buildkitd enforces inside the worker, whatever the runtime, so they are not part of any runtime's enforces list. Passed as launch arguments like the bounds above, and each is proved by a probe in dev/run-bounds-probe.py that floods a real RUN step's output; dev/schema-fixture-check.py requires that correspondence in both directions, with the same argument comparison.",
+      "daemon_bounds": {
+        "step_log_size": {
+          "argument": "--env=BUILDKIT_STEP_LOG_MAX_SIZE=<step_log_max_bytes>",
+          "probe": "step log size",
+          "placeholders": ["step_log_max_bytes"],
+          "configurable": true,
+          "enforced_by": "buildkitd clips a step's log once it has streamed this many bytes to the client",
+          "why": "Decision 6 bounds logs. Build output crosses to the trusted client and on to storage and an admin's browser; a RUN that prints without end must not be able to fill any of them. BuildKit's own default is 2 MiB; pinned here so an upstream default change cannot lift it unnoticed. Clipping keeps the HEAD of the log, while a failed build's error is usually at its TAIL -- what T7/T8 keep and show a publisher is theirs to decide, and this bound is only the ceiling."
+        },
+        "step_log_speed": {
+          "argument": "--env=BUILDKIT_STEP_LOG_MAX_SPEED=<step_log_max_bytes_per_second>",
+          "probe": "step log speed",
+          "placeholders": ["step_log_max_bytes_per_second"],
+          "configurable": true,
+          "enforced_by": "buildkitd clips a step's log once its output exceeds this rate",
+          "why": "The size bound alone lets a RUN deliver its whole allowance in one burst; the rate bound is what actually stopped a 16 MiB flood (measured: 235 KB of it reached the client). BuildKit's default, 200 KiB/s, pinned for the same reason as the size."
+        }
+      },
       "forbidden_arguments": [
         "--privileged",
         "--cap-add",
@@ -201,7 +220,8 @@
     "Every placeholder a bound uses must be DECLARED in that bound's placeholders list, and every declared one must be used. A bare <token> matches any measured token wherever it stands, so an undeclared one can occupy the position a fixed security option held -- replacing noexec with <exec_policy> once read as 'the SAME literal argument' while the probe measured noexec. Declaring them makes widening the configurable surface a visible edit rather than a silent one; the list is required even when empty.",
     "A bound is proved by observing the WORKER, never by reading what the daemon or the host supports. A capability read does not change when the worker runs unconfined, so it cannot distinguish an enforced bound from an absent one.",
     "A name the probe records as kind='fact' may never be a bound's proof.",
-    "No forbidden argument may appear in any bound's argument.",
+    "Every daemon bound names a probe that dev/run-bounds-probe.py records with kind='bound' and the same literal argument, and every such probe is claimed by exactly one daemon bound -- the rules above, against the RUN-step probe. Daemon bounds are enforced by buildkitd whatever the runtime, so no runtime lists them.",
+    "No forbidden argument may appear in any bound's or daemon bound's argument.",
     "A runtime is selectable only if it is measured and enforces every bound. The default is not exempt.",
     "The measured runtime is rootful; the default is rootless and unmeasured. Until that changes, this file records an intention and one measurement, and says which is which."
   ]

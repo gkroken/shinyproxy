@@ -67,7 +67,11 @@ WORKER_UID = 2401
 SUBID_START, SUBID_COUNT = 3000000, 65536
 RUNTIME = "runc-rootless"
 PLACEHOLDER_VALUES = {"cpu_quota": "2", "memory_limit": "2g", "pid_limit": "512",
-                      "tmpfs_size": "256m"}
+                      "tmpfs_size": "256m",
+                      # BuildKit's own defaults, pinned so an upstream change cannot lift
+                      # them unnoticed (dev/run-bounds-probe.py measures both).
+                      "step_log_max_bytes": "2097152",
+                      "step_log_max_bytes_per_second": "204800"}
 
 
 def docker(args, **kw):
@@ -108,7 +112,11 @@ def profile_arguments(values, runtime=RUNTIME, include_waived=False):
     fill = dict(PLACEHOLDER_VALUES, **values)
     skip = set() if include_waived else set(waived(runtime))
     args = []
-    for name, bound in sorted(spec()["profiles"]["build-worker"]["bounds"].items()):
+    profile = spec()["profiles"]["build-worker"]
+    # daemon_bounds are enforced by buildkitd whatever the runtime, and are passed to it
+    # as launch arguments like the rest.
+    every = dict(profile["bounds"], **profile.get("daemon_bounds", {}))
+    for name, bound in sorted(every.items()):
         if name in skip:
             continue
         arg = bound["argument"]

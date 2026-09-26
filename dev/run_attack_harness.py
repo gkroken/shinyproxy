@@ -21,9 +21,12 @@ attempt silently not happening.
 """
 
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 
+import quota_volume
 import shipping_worker as sw
 
 INNER, OUTER = "skald-atk-inner", "skald-atk-outer"
@@ -37,7 +40,13 @@ GATEWAY_IMAGE = "skald-atk-gateway:local"
 # artifacts"). The registry here stands in for the operator's; T7 chooses that.
 REG_USER, REG_PASS = "skald-launcher", "s3cr3t-launcher"
 
+# The workspace is the loop-backed quota volume the profile ships (dev/quota_volume.py),
+# nosuid,nodev. Its size is this probe's choice; T7 owns the production number.
+QUOTA_MB = 768
 docker = sw.docker
+# What the current worker was started with, so a probe can restart it weakened for a
+# self-test and teardown can release the loop device.
+state = {"loop": None, "tmp": None, "profile": None, "toml": None}
 
 
 def _htpasswd(directory):
@@ -116,8 +125,8 @@ def setup(tmp):
               timeout=600).returncode != 0:
         raise SystemExit("could not seed the base image")
     setup.client_config = cfg   # host stays logged in for the run; teardown logs out
-    if not sw.prepare_volume(VOLUME) or not sw.prepare_volume(SOCK):
-        raise SystemExit("could not prepare the workspace or socket volume")
+    if not sw.prepare_volume(SOCK):
+        raise SystemExit("could not prepare the socket volume")
     # The registry speaks plain HTTP and is reachable only through the gateway, so the
     # worker must be told not to try HTTPS and to send registry traffic to the proxy --
     # the same buildkitd.toml + http_proxy the launcher-contract probe uses. Without it
@@ -125,18 +134,81 @@ def setup(tmp):
     toml = pathlib.Path(tmp) / "buildkitd.toml"
     toml.write_text('[registry."%s:5000"]\n  http = true\n' % REGISTRY)
     toml.chmod(0o644)
-    # Mounted at /buildkitd.toml (parent / always exists, so the bind mount overlays the
-    # read-only rootfs) and named with --config, because the rootless image reads its
-    # config from $HOME/.config/buildkit and $HOME is on the tmpfs here.
-    sw.start(WORKER, INNER, VOLUME, profile, SOCK,
+    state.update(tmp=tmp, profile=profile, toml=str(toml))
+    start_worker()
+    return profile
+
+
+def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTIONS):
+    """(Re)starts the worker on a fresh workspace. The defaults are the shipping launch.
+
+    The parameters exist for self-tests, which must see a check fail when its defence is
+    removed: `omit` drops profile arguments by prefix, `extra` adds docker run arguments
+    (placed after the profile's, so a later --env overrides an earlier one), `quota=False`
+    gives a plain Docker volume instead of the loop-backed one, and `volume_options`
+    changes the quota volume's mount options."""
+    stop_worker()
+    if quota:
+        state["loop"] = quota_volume.create(VOLUME, state["tmp"], QUOTA_MB,
+                                            owner=sw.WORKER_UID, options=volume_options)
+    elif not sw.prepare_volume(VOLUME):
+        raise SystemExit("could not prepare the workspace volume")
+    # buildkitd.toml is mounted at /buildkitd.toml (parent / always exists, so the bind
+    # mount overlays the read-only rootfs) and named with --config, because the rootless
+    # image reads its config from $HOME/.config/buildkit and $HOME is on the tmpfs here.
+    sw.start(WORKER, INNER, VOLUME, state["profile"], SOCK,
              extra=["--env=http_proxy=http://%s:8888" % GATEWAY,
                     "--env=HTTP_PROXY=http://%s:8888" % GATEWAY,
-                    "--volume=%s:/buildkitd.toml:ro" % str(toml)],
-             daemon_extra=["--config", "/buildkitd.toml"])
+                    "--volume=%s:/buildkitd.toml:ro" % state["toml"]] + list(extra),
+             omit=omit, daemon_extra=["--config", "/buildkitd.toml"])
     if not sw.wait_ready(WORKER):
         raise SystemExit("the worker did not become ready: %s"
                          % sw.logs(WORKER).strip()[-200:])
-    return profile
+
+
+def stop_worker():
+    """Removes the worker and its workspace, and releases the loop device."""
+    docker(["rm", "-f", "-v", WORKER])
+    quota_volume.destroy(VOLUME, state.get("loop"), state.get("tmp"))
+    state["loop"] = None
+
+
+def run_local_step(tmp, name, probe_script, stream=False):
+    """Like run_probe_step, but the report comes back through the client's local export
+    rather than a push and a pull: a second stage copies only /report, so nothing large
+    crosses the registry and the step is much faster. Returns (report, client output).
+
+    With stream=True the script's stdout goes to the build log instead of /report, and the
+    script must write /report itself -- for an attempt whose subject IS the log."""
+    ctx = pathlib.Path(tmp) / ("step-" + name)
+    out = pathlib.Path(tmp) / ("out-" + name)
+    shutil.rmtree(out, ignore_errors=True)
+    ctx.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True)
+    os.chmod(out, 0o777)
+    (ctx / "probe.sh").write_text(probe_script)
+    run = ("RUN sh /probe.sh" if stream
+           else "RUN sh /probe.sh > /report 2>&1 || true")
+    (ctx / "Dockerfile").write_text(
+        "FROM %s:5000/base/alpine:3.20 AS run\n"
+        "COPY probe.sh /probe.sh\n"
+        "%s\n"
+        "FROM scratch\n"
+        "COPY --from=run /report /report\n" % (REGISTRY, run))
+    build = docker(["run", "--rm", "--network", "none", "-v", "%s:/ctx:ro" % str(ctx),
+                    "-v", "%s:/out" % str(out),
+                    "-v", "%s:/cfg:ro" % setup.client_config, "-e", "DOCKER_CONFIG=/cfg"]
+                   + sw.client_args(SOCK) + ["--entrypoint", "buildctl", sw.UPSTREAM_IMAGE,
+                    "--addr", sw.SOCKET_ADDR, "build", "--progress", "plain",
+                    "--frontend", "dockerfile.v0", "--local", "context=/ctx",
+                    "--local", "dockerfile=/ctx", "--output", "type=local,dest=/out"],
+                   timeout=900)
+    blob = build.stdout + build.stderr
+    try:
+        report = (out / "report").read_text(errors="replace")
+    except OSError:
+        report = ""
+    return (report if build.returncode == 0 else ""), blob
 
 
 def run_probe_step(tmp, name, probe_script):
@@ -206,9 +278,10 @@ def registry_catalog_via_host():
 
 def teardown():
     docker(["logout", "localhost:%d" % REGISTRY_PORT])
-    for name in (WORKER, GATEWAY, REGISTRY):
+    stop_worker()
+    for name in (GATEWAY, REGISTRY):
         docker(["rm", "-f", "-v", name])
-    docker(["volume", "rm", VOLUME, SOCK])
+    docker(["volume", "rm", SOCK])
     for net in (INNER, OUTER):
         for name in docker(["network", "inspect", net, "-f",
                             "{{range .Containers}}{{.Name}} {{end}}"]).stdout.split():

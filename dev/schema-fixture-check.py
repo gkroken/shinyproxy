@@ -612,8 +612,10 @@ def _assign_map(body, scope):
     return out
 
 
-def _probe_records():
-    """What dev/sandbox-probe.py actually records, parsed rather than assumed.
+def _probe_records(path="dev/sandbox-probe.py", default_kind="bound"):
+    """What a probe file actually records, parsed rather than assumed. dev/sandbox-probe.py
+    by default; dev/run-bounds-probe.py for the daemon bounds, where a record() without an
+    explicit kind is a check, not a bound's proof (default_kind="check").
 
     Static, via ast, so this runs in the fixture container with no Docker and no host.
     Returns name -> (kind, literal argument). A record() whose name is not a literal (the
@@ -621,7 +623,9 @@ def _probe_records():
     bound anything can claim.
     """
     import ast
-    tree = ast.parse(pathlib.Path("dev/sandbox-probe.py").read_text(encoding="utf-8"))
+    if not pathlib.Path(path).exists():
+        return {}
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
     module_scope = _assign_map(tree.body, {})
     found = {}
 
@@ -632,7 +636,7 @@ def _probe_records():
                 if not n.args or not isinstance(n.args[0], ast.Constant) \
                         or not isinstance(n.args[0].value, str):
                     continue
-                kind, args = "bound", None
+                kind, args = default_kind, None
                 for kw in n.keywords:
                     if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
                         kind = kw.value.value
@@ -735,7 +739,61 @@ def _shipping_records():
     return names
 
 
-def _isolation_findings(spec, recorded, shipping=None):
+def _argument_agrees(name, b, recorded_args, fail):
+    """The per-bound argument checks, shared by bounds and daemon_bounds: the argument
+    exists, its placeholders are declared and used, and it agrees with what the probe
+    measured. Returns False after calling fail() for the first problem."""
+    probe = b.get("probe")
+    # The argument, not only the name. Until this existed a bound could specify
+    # --cpu-shares (a relative weight, bounding nothing on an idle host) and be
+    # reported as "proved by a distinct probe" (0164896-F1).
+    spec_arg = b.get("argument")
+    probe_arg = recorded_args.get(probe)
+    if not spec_arg:
+        fail("bound %s specifies no argument; the file's whole content is the "
+             "literal arguments" % name)
+        return False
+    if probe_arg is None:
+        fail("probe %r records no literal argument, so nothing can confirm that %s's "
+             "%r is what was measured" % (probe, name, spec_arg))
+        return False
+    # Placeholders are DECLARED, not inferred. A bare <token> matches any measured
+    # token wherever it stands, including where a fixed security option was: replacing
+    # noexec with <exec_policy> in the tmpfs argument left the runner printing "the
+    # SAME literal argument" while the probe measured noexec. That path is not
+    # fanciful -- some toolchains want exec in TMPDIR -- so widening the configurable
+    # surface has to be a visible edit rather than a silent one. Declaring them costs
+    # a list and turns it into one.
+    declared = b.get("placeholders")
+    if declared is None:
+        fail("bound %s declares no placeholders list; an undeclared <placeholder> "
+             "silently widens what may vary, so the list is required even when empty"
+             % name)
+        return False
+    used = _placeholders_in(spec_arg)
+    undeclared = sorted(used - set(declared))
+    unused = sorted(set(declared) - used)
+    if undeclared:
+        fail("bound %s uses undeclared placeholder(s) %s; each one lets a value the "
+             "probe never measured stand where a fixed option was"
+             % (name, ", ".join("<%s>" % u for u in undeclared)))
+        return False
+    if unused:
+        fail("bound %s declares placeholder(s) %s that its argument does not use"
+             % (name, ", ".join("<%s>" % u for u in unused)))
+        return False
+    agree, why = _args_agree(spec_arg, probe_arg)
+    if not agree:
+        fail("bound %s specifies %r but probe %r measured %r -- %s"
+             % (name, spec_arg, probe, probe_arg, why))
+        return False
+    return True
+
+
+RUN_BOUNDS_PROBE = "dev/run-bounds-probe.py"
+
+
+def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
     """The literal launch arguments, bound to the probes that demonstrate them.
 
     spec/isolation-profile-v1.json is where T7's driver reads its arguments from. Nothing
@@ -800,48 +858,7 @@ def _isolation_findings(spec, recorded, shipping=None):
             fail("probe %r is claimed by both %s and %s; one probe cannot demonstrate "
                  "two different bounds" % (probe, claimed[probe], name))
             continue
-        # The argument, not only the name. Until this existed a bound could specify
-        # --cpu-shares (a relative weight, bounding nothing on an idle host) and be
-        # reported as "proved by a distinct probe" (0164896-F1).
-        spec_arg = b.get("argument")
-        probe_arg = recorded_args.get(probe)
-        if not spec_arg:
-            fail("bound %s specifies no argument; the file's whole content is the "
-                 "literal arguments" % name)
-            continue
-        if probe_arg is None:
-            fail("probe %r records no literal argument, so nothing can confirm that %s's "
-                 "%r is what was measured" % (probe, name, spec_arg))
-            continue
-        # Placeholders are DECLARED, not inferred. A bare <token> matches any measured
-        # token wherever it stands, including where a fixed security option was: replacing
-        # noexec with <exec_policy> in the tmpfs argument left the runner printing "the
-        # SAME literal argument" while the probe measured noexec. That path is not
-        # fanciful -- some toolchains want exec in TMPDIR -- so widening the configurable
-        # surface has to be a visible edit rather than a silent one. Declaring them costs
-        # a list and turns it into one.
-        declared = b.get("placeholders")
-        if declared is None:
-            fail("bound %s declares no placeholders list; an undeclared <placeholder> "
-                 "silently widens what may vary, so the list is required even when empty"
-                 % name)
-            continue
-        used = _placeholders_in(spec_arg)
-        undeclared = sorted(used - set(declared))
-        unused = sorted(set(declared) - used)
-        if undeclared:
-            fail("bound %s uses undeclared placeholder(s) %s; each one lets a value the "
-                 "probe never measured stand where a fixed option was"
-                 % (name, ", ".join("<%s>" % u for u in undeclared)))
-            continue
-        if unused:
-            fail("bound %s declares placeholder(s) %s that its argument does not use"
-                 % (name, ", ".join("<%s>" % u for u in unused)))
-            continue
-        agree, why = _args_agree(spec_arg, probe_arg)
-        if not agree:
-            fail("bound %s specifies %r but probe %r measured %r -- %s"
-                 % (name, spec_arg, probe, probe_arg, why))
+        if not _argument_agrees(name, b, recorded_args, fail):
             continue
         claimed[probe] = name
 
@@ -854,6 +871,40 @@ def _isolation_findings(spec, recorded, shipping=None):
              "profile lost a bound or the probe measures something nobody requires"
              % ", ".join(unclaimed))
 
+    # Daemon bounds: enforced by buildkitd whatever the runtime (decision 6's bounded
+    # logs), proved by dev/run-bounds-probe.py flooding a real RUN step. The same rules as
+    # the bounds above, in both directions, against that file's kind='bound' records.
+    if run_recorded is None:
+        run_recorded = _probe_records(RUN_BOUNDS_PROBE, default_kind="check")
+    daemon = profiles["build-worker"].get("daemon_bounds") or {}
+    if not daemon:
+        fail("build-worker declares no daemon_bounds; decision 6 bounds logs, and nothing "
+             "else in the profile does")
+    run_bounds = {n for n, (k, _) in run_recorded.items() if k == "bound"}
+    run_args = {n: a for n, (_, a) in run_recorded.items()}
+    daemon_claimed = {}
+    for name, b in sorted(daemon.items()):
+        probe = b.get("probe")
+        if not probe:
+            fail("daemon bound %s names no probe, so nothing demonstrates it" % name)
+            continue
+        if probe not in run_bounds:
+            fail("daemon bound %s cites probe %r, which %s does not record as a bound; "
+                 "the argument is written down and nothing measures it"
+                 % (name, probe, RUN_BOUNDS_PROBE))
+            continue
+        if probe in daemon_claimed:
+            fail("probe %r is claimed by both %s and %s; one probe cannot demonstrate "
+                 "two different bounds" % (probe, daemon_claimed[probe], name))
+            continue
+        if not _argument_agrees(name, b, run_args, fail):
+            continue
+        daemon_claimed[probe] = name
+    unclaimed = sorted(run_bounds - set(daemon_claimed))
+    if unclaimed:
+        fail("%s proves daemon bound(s) no profile claims: %s"
+             % (RUN_BOUNDS_PROBE, ", ".join(unclaimed)))
+
     # Literal forbidden arguments must not appear in a literal launch argument.
     forbidden = profiles["build-worker"].get("forbidden_arguments") or []
     if not forbidden:
@@ -865,7 +916,7 @@ def _isolation_findings(spec, recorded, shipping=None):
     # of this check failed five times against a correct profile. A bound violates an
     # entry when its argument IS that entry, or extends it with a value.
     for arg in forbidden:
-        for name, b in sorted(bounds.items()):
+        for name, b in sorted(list(bounds.items()) + list(daemon.items())):
             a = b.get("argument", "")
             if a == arg or a.startswith(arg + "="):
                 fail("bound %s launches with %r, which decision 6 forbids (%r)"
@@ -935,6 +986,9 @@ def _isolation_findings(spec, recorded, shipping=None):
     n_ph = sum(len(b.get("placeholders") or []) for b in bounds.values())
     good.append("  ok   %d bound(s), each proved by a distinct probe that measured the "
                 "SAME literal argument" % len(claimed))
+    good.append("  ok   %d daemon bound(s), each proved by a distinct RUN-step probe in %s "
+                "that ran the SAME literal argument" % (len(daemon_claimed), RUN_BOUNDS_PROBE))
+    n_ph += sum(len(b.get("placeholders") or []) for b in daemon.values())
     good.append("  ok   %d declared placeholder(s); every varying value is named, so "
                 "nothing fixed can become configurable unnoticed" % n_ph)
     good.append("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent "
@@ -1246,6 +1300,26 @@ ISOLATION_CASES = [
      lambda d: (_rt(d)["runc-rootful"].__setitem__("selectable", False),
                 _rt(d)["runc-rootful"].__setitem__("status", "unmeasured")),
      "constrains nothing"),
+    # Daemon bounds (t5-e5e3071-F6 part 3): the same correspondence, against
+    # dev/run-bounds-probe.py.
+    ("a daemon bound dropped from the profile",
+     lambda d: d["profiles"]["build-worker"]["daemon_bounds"].pop("step_log_size"),
+     "proves daemon bound(s) no profile claims"),
+    ("the daemon bounds emptied",
+     lambda d: d["profiles"]["build-worker"].__setitem__("daemon_bounds", {}),
+     "declares no daemon_bounds"),
+    ("a daemon bound citing a probe that does not exist",
+     lambda d: d["profiles"]["build-worker"]["daemon_bounds"]["step_log_speed"]
+     .__setitem__("probe", "no such probe"),
+     "does not record as a bound"),
+    ("a daemon bound naming a different variable than the probe ran",
+     lambda d: d["profiles"]["build-worker"]["daemon_bounds"]["step_log_size"]
+     .__setitem__("argument", "--env=BUILDKIT_STEP_LOG_MAX_SPEED=<step_log_max_bytes>"),
+     "vs measured 'BUILDKIT_STEP_LOG_MAX_SIZE="),
+    ("a forbidden argument used as a daemon bound",
+     lambda d: d["profiles"]["build-worker"]["daemon_bounds"]["step_log_size"]
+     .__setitem__("argument", "--privileged"),
+     "decision 6 forbids"),
     ("the build-worker profile deleted",
      lambda d: d.__setitem__("profiles", {}), "declares no build-worker"),
     ("the runtimes map emptied",
@@ -1333,10 +1407,17 @@ def self_test():
             missed.append(label)
         else:
             print("  ok   %s" % label)
+    found, _ = _isolation_findings(spec, recorded, run_recorded={})
+    label = "the RUN-bounds probe recording nothing"
+    if not any("does not record as a bound" in m for m in found):
+        print("  FAIL not caught for its reason: %s" % label)
+        missed.append(label)
+    else:
+        print("  ok   %s" % label)
 
     missed += _limits_self_test()
 
-    total = len(ISOLATION_CASES) + 2 + len(LIMIT_CASES)
+    total = len(ISOLATION_CASES) + 3 + len(LIMIT_CASES)
     if missed:
         print("\nRESULT: self-test FAILED, %d of %d case(s) not caught for their stated "
               "reason" % (len(missed), total))
