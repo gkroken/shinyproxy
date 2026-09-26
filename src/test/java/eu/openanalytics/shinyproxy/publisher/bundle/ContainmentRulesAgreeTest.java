@@ -64,6 +64,8 @@ public class ContainmentRulesAgreeTest {
             new Case("an absolute path", "/etc/passwd", "/etc/passwd"),
             new Case("a backslash", "a\\b.txt", "app/a\\b.txt"),
             new Case("a control character", "a\u0001b.txt", "app/a\u0001b.txt"),
+            new Case("DEL", "a\u007fb.txt", "app/a\u007fb.txt"),
+            new Case("a C1 control character", "a\u0085b.txt", "app/a\u0085b.txt"),
             new Case("a decomposed name", "café.txt", "app/café.txt"),
             // As a REGULAR member. A tar directory header may carry one, which is the
             // domain difference asserted separately below; a rendition path never may.

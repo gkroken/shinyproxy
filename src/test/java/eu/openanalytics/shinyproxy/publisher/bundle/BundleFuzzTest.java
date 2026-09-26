@@ -118,7 +118,10 @@ public class BundleFuzzTest {
         if (!Normalizer.isNormalized(text, Normalizer.Form.NFC)) {
             throw new AssertionError("accepted a name not in NFC: " + text);
         }
-        if (text.startsWith("/") || text.contains("\\") || text.chars().anyMatch(c -> c < 0x20)) {
+        // Every Cc code point. This said `c < 0x20`, the same range short as the rule it
+        // checks, so the fuzzer could never have reported t5-e5e3071-F1.
+        if (text.startsWith("/") || text.contains("\\")
+                || text.chars().anyMatch(Character::isISOControl)) {
             throw new AssertionError("accepted an absolute, backslashed or control name: " + text);
         }
         for (String segment : path.payloadSegments()) {

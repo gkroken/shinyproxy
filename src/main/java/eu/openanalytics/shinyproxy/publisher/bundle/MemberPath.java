@@ -38,10 +38,18 @@ import java.util.List;
  * and carrying the result rather than a promise that someone checked.
  *
  * <p><b>Bytes first, text second.</b> Every rule that can be decided on the raw bytes is
- * decided there — NUL, control characters, backslashes — because a name that is not valid
- * UTF-8 has no text form to check, and decoding with replacement characters would map two
- * different hostile names onto one harmless-looking string. The decode is strict and its
- * failure is a rejection, not a fallback.
+ * decided there — NUL, the C0 control characters and DEL, backslashes — because a name that
+ * is not valid UTF-8 has no text form to check, and decoding with replacement characters
+ * would map two different hostile names onto one harmless-looking string. The decode is
+ * strict and its failure is a rejection, not a fallback.
+ *
+ * <p><b>Control characters are every Cc code point</b>, U+0000–U+001F and U+007F–U+009F,
+ * which is what the contract's "control/NUL characters" means. The C1 half cannot be judged
+ * on bytes — U+0085 is {@code C2 85}, and a lone {@code 0x85} is a continuation byte — so
+ * it is judged after the decode. The two checks cover disjoint ranges on purpose: each can
+ * be removed only by someone its test then catches, where an overlapping second check would
+ * let the first rot unnoticed. Accepting C1 was finding t5-e5e3071-F1: NEL (U+0085) is a
+ * line break to many log readers, so a name carrying one forged a line in a build log.
  *
  * <p><b>Rejected, never repaired.</b> Nothing here strips a {@code ..}, collapses a double
  * separator, lower-cases a colliding name or normalises a decomposed one. The plan says why
@@ -231,6 +239,14 @@ public final class MemberPath {
         }
 
         String text = decodeStrictly(name);
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);     // no surrogate is in this range, so chars suffice
+            if (c >= 0x80 && c <= 0x9F) {
+                throw new BundleRejection(BundleRule.PATH_CONTROL_CHARACTER,
+                        "a C1 control character (U+" + String.format("%04X", (int) c)
+                                + ") in the name: '" + BundleRejection.render(name) + "'");
+            }
+        }
 
         if (!Normalizer.isNormalized(text, Normalizer.Form.NFC)) {
             throw new BundleRejection(BundleRule.PATH_NOT_NFC,

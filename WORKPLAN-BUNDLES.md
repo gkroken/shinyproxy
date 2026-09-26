@@ -595,6 +595,14 @@ on a directory header and removed for duplicate detection. Case is preserved and
 collisions are rejected for portability. `%2e%2e` in an archive filename is literal text,
 not URL-decoded; never apply a URL decoder during extraction or key creation.
 
+"Control characters" means every Unicode Cc code point: U+0000–U+001F, DEL (U+007F) and
+the C1 range U+0080–U+009F. C1 is the half a byte-level check misses, because in UTF-8 it
+is `C2 80`–`C2 9F`. NEL (U+0085) is a line break to many log readers, and U+009B is a
+terminal's CSI. The extractor, the manifest validator (the same parser) and the rendition
+key builder all apply this one definition (`t5-e5e3071-F1`). The manifest schema's own
+path pattern stops at U+001F. It is a frozen T1 contract and stays as it is: the semantic
+layer refuses the rest, and it already refuses more than the schema does.
+
 Validate the **effective** path after any approved PAX `path` override. Reject global PAX,
 linkpath, sparse/xattr/ACL overrides and unknown interpretation-changing extensions;
 allowlisted innocuous metadata may be ignored under bounds. Accept a single bounded gzip

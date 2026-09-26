@@ -129,6 +129,23 @@ public class MemberPathTest {
     }
 
     @Test
+    public void everyControlCodePointIsRefused() {
+        // t5-e5e3071-F1: the rule stopped at DEL, and C1 (U+0080-U+009F) passed. Every Cc
+        // code point, one at a time; removing the DEL clause or the C1 range fails here.
+        for (int cp = 0; cp <= 0x9F; cp = cp == 0x1F ? 0x7F : cp + 1) {
+            final int point = cp;
+            String name = "app/a" + (char) point + "b.txt";
+            BundleRejection ex = assertThrows(BundleRejection.class, () -> parse(name),
+                    String.format("U+%04X was accepted in a member name", point));
+            assertEquals(point == 0 ? BundleRule.PATH_NUL : BundleRule.PATH_CONTROL_CHARACTER,
+                    ex.rule(), String.format("U+%04X: %s", point, ex.getMessage()));
+        }
+        // The neighbours of both ranges are ordinary characters, so the rule is not a
+        // refusal of everything around it: space, '~' and U+00A0.
+        assertEquals("a b~\u00a0.txt", parse("app/a b~\u00a0.txt").payloadPath());
+    }
+
+    @Test
     public void aNulEndsTheNameAndAnythingAfterItIsAnAttack() {
         byte[] field = new byte[32];
         byte[] visible = "app/harmless.txt".getBytes(StandardCharsets.UTF_8);

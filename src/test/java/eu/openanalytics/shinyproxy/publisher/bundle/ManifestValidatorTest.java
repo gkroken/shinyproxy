@@ -163,6 +163,26 @@ public class ManifestValidatorTest {
     }
 
     @Test
+    public void everyControlCodePointIsRefusedInAManifestPath() {
+        // t5-e5e3071-F1, the manifest side. The schema's pattern stops at U+001F (a frozen
+        // T1 contract), so C0 is refused there; DEL and C1 pass it and must be refused by
+        // the same parser that judges archive members, under that parser's own rule.
+        for (int cp = 0; cp <= 0x9F; cp = cp == 0x1F ? 0x7F : cp + 1) {
+            final int point = cp;
+            byte[] manifest = withFile("a" + (char) point + "b.txt");
+            BundleRejection ex = assertThrows(BundleRejection.class,
+                    () -> ManifestValidator.validate(manifest, LIMITS),
+                    String.format("U+%04X was accepted in a manifest path", point));
+            if (point >= 0x7F) {
+                assertEquals(BundleRule.MANIFEST_PATH_NOT_CANONICAL, ex.rule(), ex.getMessage());
+                assertTrue(ex.getMessage().contains(
+                        BundleRule.PATH_CONTROL_CHARACTER.ruleName()), ex.getMessage());
+            }
+        }
+        ManifestValidator.validate(withFile("a b~\u00a0.txt"), LIMITS);
+    }
+
+    @Test
     public void theTargetTypeIsCheckedOnlyWhenThereIsOne() {
         byte[] shiny = read("valid", "r-root-single-file");
         assertRule(BundleRule.MANIFEST_TYPE_MISMATCH, "S9", shiny, Optional.of("plumber"));

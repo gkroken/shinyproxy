@@ -253,9 +253,10 @@ public final class ObjectKeys {
                 throw new IllegalArgumentException(
                         "rendition path must not contain a backslash: " + quoted(relativePath));
             }
-            // Includes NUL, newline and carriage return. A key carrying one of these is a
-            // key that reads differently in a log line than it does in the bucket.
-            if (c <= 0x1f || c == 0x7f) {
+            // Every Cc code point: C0 (NUL, newline, carriage return...), DEL and C1 (NEL
+            // among them). A key carrying one reads differently in a log line than it does
+            // in the bucket. It stopped at DEL until t5-e5e3071-F1, like the extractor's.
+            if (Character.isISOControl(c)) {
                 throw new IllegalArgumentException(
                         "rendition path must not contain control characters: "
                                 + quoted(relativePath));
