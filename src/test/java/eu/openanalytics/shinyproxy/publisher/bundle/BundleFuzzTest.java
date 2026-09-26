@@ -22,8 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.bundle;
 
-import com.code_intelligence.jazzer.api.FuzzedDataProvider;
 import com.code_intelligence.jazzer.junit.FuzzTest;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -33,6 +33,8 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.text.Normalizer;
+import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -102,13 +104,24 @@ public class BundleFuzzTest {
         }
     }
 
+    /**
+     * The memberPath input layout: byte 0's low bit is the directory flag, the rest is the
+     * name. Defined here, and dev/fuzz/seeds.py writes it, rather than leaving it to a
+     * FuzzedDataProvider. Jazzer's provider takes consumeBoolean from the END of the input,
+     * and the seeds put the flag FIRST, so until this changed every seed's name began with
+     * a NUL byte and all 275 were refused as PATH_NUL before any other rule ran.
+     */
+    static MemberPath parseMemberPathInput(byte[] data) {
+        boolean directory = data.length > 0 && (data[0] & 1) == 1;
+        byte[] name = Arrays.copyOfRange(data, Math.min(1, data.length), data.length);
+        return MemberPath.parse(name, directory, LIMITS);
+    }
+
     @FuzzTest
-    void memberPath(FuzzedDataProvider input) {
-        boolean directory = input.consumeBoolean();
-        byte[] name = input.consumeRemainingAsBytes();
+    void memberPath(byte[] data) {
         MemberPath path;
         try {
-            path = MemberPath.parse(name, directory, LIMITS);
+            path = parseMemberPathInput(data);
         } catch (BundleRejection refused) {
             return;
         }
@@ -133,6 +146,42 @@ public class BundleFuzzTest {
         }
         if (path.payloadSegments().size() > LIMITS.maxDepth()) {
             throw new AssertionError("accepted a path deeper than the limit: " + text);
+        }
+    }
+
+    /**
+     * The memberPath seeds must reach MemberPath's rules, not stop at its first byte.
+     *
+     * <p>A seed corpus that every input leaves at the same early branch still makes
+     * {@code make test} green and still gives the fuzzer somewhere to start, so nothing
+     * noticed that this one did (see {@link #parseMemberPathInput}). Replayed through the
+     * target's own layout, some seeds must be accepted and some must be refused by rules
+     * that run only after the byte loop and the decode.
+     */
+    @Test
+    void theMemberPathSeedsReachPastTheFirstByte() throws IOException {
+        Path seeds = Path.of("src/test/resources/eu/openanalytics/shinyproxy/publisher/bundle/"
+                + "BundleFuzzTestInputs/memberPath");
+        int accepted = 0;
+        Set<BundleRule> deep = EnumSet.noneOf(BundleRule.class);
+        Set<BundleRule> late = EnumSet.of(BundleRule.PATH_TRAVERSAL, BundleRule.PATH_DOT_SEGMENT,
+                BundleRule.PATH_EMPTY_SEGMENT, BundleRule.PATH_NOT_NFC,
+                BundleRule.LAYOUT_UNEXPECTED_MEMBER);
+        try (Stream<Path> files = Files.list(seeds)) {
+            for (Path seed : (Iterable<Path>) files::iterator) {
+                try {
+                    parseMemberPathInput(Files.readAllBytes(seed));
+                    accepted++;
+                } catch (BundleRejection refused) {
+                    if (late.contains(refused.rule())) {
+                        deep.add(refused.rule());
+                    }
+                }
+            }
+        }
+        if (accepted == 0 || deep.isEmpty()) {
+            throw new AssertionError("the memberPath seeds do not reach MemberPath's rules: "
+                    + accepted + " accepted, late rules reached " + deep);
         }
     }
 

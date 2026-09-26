@@ -73,6 +73,10 @@ def main():
                 if header[156:157] in (b"x", b"g"):
                     (dirs["paxRecords"] / ("%s-%d" % (name, offset))).write_bytes(body)
                 elif header[156:157] in (b"0", b"\0", b"5"):
+                    # The flag byte FIRST: BundleFuzzTest.parseMemberPathInput defines
+                    # the layout (byte 0's low bit, then the name). It used to be read
+                    # through a FuzzedDataProvider, which takes a boolean from the END,
+                    # so every name here began with this byte -- a NUL, or 0x01.
                     directory = b"\x01" if header[156:157] == b"5" else b"\x00"
                     (dirs["memberPath"] / ("%s-%d" % (name, offset))).write_bytes(
                         directory + header[:100].rstrip(b"\0"))
@@ -87,6 +91,12 @@ def main():
         while len(str(n).encode()) + 1 + len(body) != n:
             n += 1
         (dirs["paxRecords"] / ("record-%d" % i)).write_bytes(str(n).encode() + b" " + body)
+    # Every Cc code point in a member name, each its own seed, so the regression run
+    # exercises the control rule at every point and the fuzzer starts from both sides of
+    # each range edge (t5-e5e3071-F1). Plus the neighbours, which must be accepted.
+    for cp in list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)) + [0x20, 0x7E, 0xA0]:
+        (dirs["memberPath"] / ("codepoint-%04X" % cp)).write_bytes(
+            b"\x00" + ("app/a%sb.txt" % chr(cp)).encode("utf-8"))
     for fixture in sorted((REPO / "dev/fixtures/manifests").glob("*/*.json")):
         (dirs["manifest"] / (fixture.parent.name + "-" + fixture.stem)).write_bytes(
             fixture.read_bytes())
