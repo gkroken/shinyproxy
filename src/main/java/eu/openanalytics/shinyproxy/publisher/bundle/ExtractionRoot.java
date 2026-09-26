@@ -40,6 +40,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -90,6 +91,11 @@ public final class ExtractionRoot implements AutoCloseable {
     private final SecureDirectoryStream<Path> rootStream;
     private final DirectoryStream<Path> parentStream;
     private boolean frozen;
+    /**
+     * Every file and directory this root created, relative to it ({@code www},
+     * {@code www/style.css}). freeze() refuses anything else it finds (t5-e5e3071-F5).
+     */
+    private final Set<String> created = new HashSet<>();
 
     private ExtractionRoot(Path root, SecureDirectoryStream<Path> rootStream,
                            DirectoryStream<Path> parentStream) {
@@ -278,6 +284,7 @@ public final class ExtractionRoot implements AutoCloseable {
             try (SeekableByteChannel channel = directory.newByteChannel(name, options,
                     PosixFilePermissions.asFileAttribute(
                             executable ? PRIVATE_EXECUTABLE : PRIVATE_FILE))) {
+                created.add(String.join("/", segments));
                 return copy(content, channel);
             } catch (java.nio.file.FileAlreadyExistsException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
@@ -355,10 +362,13 @@ public final class ExtractionRoot implements AutoCloseable {
                                                 Deque<SecureDirectoryStream<Path>> opened)
             throws IOException {
         SecureDirectoryStream<Path> current = rootStream;
+        StringBuilder relative = new StringBuilder();
         for (String segment : segments) {
             Path name = Path.of(segment);
+            relative.append(relative.length() == 0 ? "" : "/").append(segment);
             if (create && !presentIn(current, name, segment)) {
                 createThrough(current, name, segment);
+                created.add(relative.toString());
             }
             SecureDirectoryStream<Path> next;
             try {
@@ -502,6 +512,15 @@ public final class ExtractionRoot implements AutoCloseable {
      * sent the context as a stream and never sees this directory (the launcher contract,
      * T3).
      *
+     * <p><b>It freezes only what this root wrote.</b> Every entry the walk meets must be a
+     * file or directory this object created; anything else is refused before its mode is
+     * touched, and the extractor then deletes the tree like any refused one. It used to
+     * freeze whatever it found: the gate's same-uid "foreign writer" put 752 files into a
+     * root during extraction, and the bundle was accepted with 734 of them frozen beside
+     * the payload as if validated (t5-e5e3071-F5). A second writer breaks the contract's
+     * precondition, so this is defence in depth, but the walk visits every entry anyway and
+     * "freeze the validated tree" should mean that tree.
+     *
      * <p>Every change goes through a descriptor, with links refused, like every other
      * operation in this class. The walk opens a fresh listing of the root rather than
      * iterating {@code rootStream}, because a directory stream can be iterated once and
@@ -513,7 +532,7 @@ public final class ExtractionRoot implements AutoCloseable {
         }
         frozen = true;     // first: no write may begin while the walk runs
         try (SecureDirectoryStream<Path> top = reopenRoot()) {
-            freezeContents(top);
+            freezeContents(top, "", created);
         }
         rootStream.getFileAttributeView(PosixFileAttributeView.class)
                 .setPermissions(FROZEN_DIRECTORY);
@@ -524,11 +543,13 @@ public final class ExtractionRoot implements AutoCloseable {
         return frozen;
     }
 
-    private static void freezeContents(SecureDirectoryStream<Path> directory)
-            throws IOException {
+    private static void freezeContents(SecureDirectoryStream<Path> directory, String prefix,
+                                       Set<String> created) throws IOException {
         try {
             for (Path entry : directory) {
-                freezeEntry(directory, entry.getFileName());
+                Path name = entry.getFileName();
+                freezeEntry(directory, name,
+                        prefix.isEmpty() ? name.toString() : prefix + "/" + name, created);
             }
         } catch (java.nio.file.DirectoryIteratorException ex) {
             throw changedUnderUs("(listing)", ex.getCause());
@@ -549,15 +570,26 @@ public final class ExtractionRoot implements AutoCloseable {
      * <p>Package-private so the conversion can be tested exactly (an entry that is gone by the
      * time it is read), where from outside it can only be raced.
      */
-    static void freezeEntry(SecureDirectoryStream<Path> directory, Path name) {
+    static void freezeEntry(SecureDirectoryStream<Path> directory, Path name, String relative,
+                            Set<String> created) {
         try {
             PosixFileAttributeView view = directory.getFileAttributeView(name,
                     PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
             PosixFileAttributes attributes = view.readAttributes();
+            // The type first, so a link or a device keeps its own, more specific refusal
+            // below; then whether this root made it, before anything about it changes.
+            if ((attributes.isDirectory() || attributes.isRegularFile())
+                    && !created.contains(relative)) {
+                throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                        "'" + BundleRejection.quote(relative) + "' is in the extraction root,"
+                                + " and this extractor did not write it; something else is"
+                                + " writing to the root, so the tree is not the one that was"
+                                + " validated");
+            }
             if (attributes.isDirectory()) {
                 try (SecureDirectoryStream<Path> child =
                              directory.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
-                    freezeContents(child);
+                    freezeContents(child, relative, created);
                 }
                 view.setPermissions(FROZEN_DIRECTORY);
             } else if (attributes.isRegularFile()) {

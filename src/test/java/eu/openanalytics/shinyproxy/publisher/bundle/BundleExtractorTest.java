@@ -327,6 +327,46 @@ public class BundleExtractorTest {
     }
 
     @Test
+    public void aFileSomethingElseWroteIntoTheRootIsRefusedNotFrozen(@TempDir Path workspace)
+            throws Exception {
+        // t5-e5e3071-F5 through the production entry point: the gate's foreign-writer mode,
+        // made deterministic. The upload stream itself plants a file into the extraction
+        // root when it is read to its end, which is after the root exists and before the
+        // tree is frozen. The bundle is valid, so only the freeze check can refuse it.
+        byte[] upload = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
+        InputStream planting = new ByteArrayInputStream(upload) {
+            private boolean planted;
+
+            @Override
+            public synchronized int read(byte[] b, int off, int len) {
+                int n = super.read(b, off, len);
+                if (n < 0 && !planted) {
+                    planted = true;
+                    try (java.util.stream.Stream<Path> roots = Files.list(workspace)) {
+                        Path root = roots.filter(Files::isDirectory).findFirst().orElseThrow();
+                        Files.writeString(root.resolve("foreign.txt"), "not from the bundle");
+                    } catch (IOException ex) {
+                        throw new java.io.UncheckedIOException(ex);
+                    }
+                }
+                return n;
+            }
+        };
+        BundleRejection ex = assertThrows(BundleRejection.class,
+                () -> BundleExtractor.extract(planting, upload.length, workspace, LIMITS));
+        assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+        assertTrue(ex.getMessage().contains("'foreign.txt'"), ex.getMessage());
+        assertEmpty(workspace);
+
+        // The control: the same upload with nothing planted is accepted.
+        BundleExtractor.Extracted ok = BundleExtractor.extract(
+                new ByteArrayInputStream(upload), upload.length, workspace, LIMITS);
+        try (ExtractionRoot root = ok.root()) {
+            assertTrue(root.isFrozen());
+        }
+    }
+
+    @Test
     public void aSecondMemberInALaterReadIsRefused(@TempDir Path workspace) throws Exception {
         // t5-e5e3071-F4 through the production entry point, with the size unknown as for a
         // streamed upload: a valid bundle, then a second gzip member that arrives in a

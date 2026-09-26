@@ -219,11 +219,52 @@ public class ExtractionRootTest {
         try (SecureDirectoryStream<Path> directory =
                      (SecureDirectoryStream<Path>) Files.newDirectoryStream(tmp)) {
             BundleRejection gone = assertThrows(BundleRejection.class,
-                    () -> ExtractionRoot.freezeEntry(directory, Path.of("renamed-away")));
+                    () -> ExtractionRoot.freezeEntry(directory, Path.of("renamed-away"),
+                            "renamed-away", java.util.Set.of("renamed-away")));
             assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, gone.rule());
             assertTrue(gone.getMessage().contains("changed while it was being frozen")
                     && gone.getMessage().contains("NoSuchFileException"), gone.getMessage());
         }
+    }
+
+    @Test
+    public void onlyWhatTheRootWroteIsFrozen(@TempDir Path tmp) throws Exception {
+        // t5-e5e3071-F5: freeze() froze whatever it found. Each shape of a foreign entry is
+        // planted in its own root, beside a payload the root did write: a file at the top,
+        // a file inside a directory the root created, and an empty directory. Each must be
+        // refused, and nothing in that root may have been frozen before the refusal.
+        String[] planted = {"planted.txt", "www/planted.txt", "empty-dir/"};
+        for (String plant : planted) {
+            ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work");
+            root.createDirectory(member("app/www/"));
+            root.writeFile(member("app/www/style.css"),
+                    new ByteArrayInputStream("body {}".getBytes(StandardCharsets.UTF_8)), false);
+            Path target = root.path().resolve(plant);
+            if (plant.endsWith("/")) {
+                Files.createDirectory(target);
+            } else {
+                Files.writeString(target, "not from the bundle");
+            }
+            BundleRejection ex = assertThrows(BundleRejection.class, root::freeze, plant);
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+            String relative = plant.endsWith("/") ? plant.substring(0, plant.length() - 1)
+                    : plant;
+            assertTrue(ex.getMessage().contains("'" + relative + "'")
+                    && ex.getMessage().contains("did not write it"), ex.getMessage());
+            root.deleteTree();
+            assertFalse(Files.exists(root.path()), "the refused tree was not removed");
+        }
+
+        // The control: the same tree with nothing planted freezes.
+        ExtractionRoot clean = ExtractionRoot.createUnder(tmp, "work");
+        clean.createDirectory(member("app/www/"));
+        clean.writeFile(member("app/www/style.css"),
+                new ByteArrayInputStream("body {}".getBytes(StandardCharsets.UTF_8)), false);
+        clean.writeFile(member("app/app.R"),
+                new ByteArrayInputStream("library(shiny)".getBytes(StandardCharsets.UTF_8)));
+        clean.freeze();
+        assertTrue(clean.isFrozen());
+        clean.deleteTree();
     }
 
     @Test
