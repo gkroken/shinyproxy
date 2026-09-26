@@ -95,10 +95,15 @@ public class GzipMemberTest {
         // and one byte per read. Each tail must be refused, and each delivery with no tail
         // must be accepted, so the stream shape alone is not what refuses.
         byte[] member = gzip(PAYLOAD);
+        // Zero-led tails as well: a NUL is the most ordinary trailing byte there is (block
+        // padding), and a guard written `next > 0` instead of `next >= 0` would let any tail
+        // that starts with one through, a second member included (b991250-F1).
         Map<String, byte[]> tails = Map.of(
                 "a second member", member,
                 "trailing data", "trailing, not padding\n".getBytes(StandardCharsets.UTF_8),
-                "a single byte", new byte[] {'x'});
+                "a single byte", new byte[] {'x'},
+                "a single NUL", new byte[] {0},
+                "a NUL, then a second member", concat(new byte[] {0}, member));
         for (boolean oneByteAtATime : new boolean[] {false, true}) {
             String delivery = oneByteAtATime ? "one byte per read" : "split at the member";
             assertArrayEquals(PAYLOAD, readFully(new SplitStream(oneByteAtATime, member),
