@@ -94,6 +94,24 @@ public class ContainmentRulesAgreeTest {
     }
 
     @Test
+    public void bothRefuseEveryControlCodePoint() {
+        // Every Cc code point through both rules, not a sample: a range one piece short is
+        // how t5-e5e3071-F1 shipped, and one C1 case left the key builder's upper half
+        // untested (80f5f4c-F1). The neighbours of both ranges pass both.
+        for (int cp = 0; cp <= 0x9F; cp = cp == 0x1F ? 0x7F : cp + 1) {
+            final String c = String.valueOf((char) cp);
+            final String where = String.format("U+%04X", cp);
+            assertThrows(IllegalArgumentException.class,
+                    () -> ObjectKeys.validatedRenditionPath("a" + c + "b.txt"),
+                    "ObjectKeys accepted " + where);
+            assertThrows(BundleRejection.class, () -> parseMember("app/a" + c + "b.txt"),
+                    "MemberPath accepted " + where);
+        }
+        assertEquals("a b~ .txt", ObjectKeys.validatedRenditionPath("a b~ .txt"));
+        assertEquals("a b~ .txt", parseMember("app/a b~ .txt").payloadPath());
+    }
+
+    @Test
     public void bothAcceptAnOrdinaryPath() {
         for (Case c : ACCEPTED_BY_BOTH) {
             try {
