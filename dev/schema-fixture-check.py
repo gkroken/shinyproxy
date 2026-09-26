@@ -719,7 +719,23 @@ def _args_agree(spec_arg, probe_arg):
     return True, ""
 
 
-def _isolation_findings(spec, recorded):
+def _shipping_records():
+    """The check names dev/shipping-worker-probe.py records, parsed statically like the
+    sandbox probe's: every record() call whose first argument is a literal string."""
+    import ast
+    path = pathlib.Path("dev/shipping-worker-probe.py")
+    if not path.exists():
+        return set()
+    names = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "record"
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            names.add(node.args[0].value)
+    return names
+
+
+def _isolation_findings(spec, recorded, shipping=None):
     """The literal launch arguments, bound to the probes that demonstrate them.
 
     spec/isolation-profile-v1.json is where T7's driver reads its arguments from. Nothing
@@ -855,11 +871,46 @@ def _isolation_findings(spec, recorded):
                 fail("bound %s launches with %r, which decision 6 forbids (%r)"
                      % (name, a, arg))
 
+    # Waivers. A runtime may waive a bound only with a date, a reason, and replacement
+    # checks a probe actually records -- the user's condition for waiving no-new-privileges
+    # for runc-rootless (2026-09-26, t5-e5e3071-F6). A waived bound with nothing in its
+    # place is a weaker profile that still reads as the full one.
+    if shipping is None:
+        shipping = _shipping_records()
+    waived_probes = {}
+    for rt, r in sorted(runtimes.items()):
+        enforces = set(r.get("enforces") or [])
+        waived_probes[rt] = set()
+        for name, w in sorted((r.get("waived") or {}).items()):
+            if name not in bounds:
+                fail("runtime %s waives %r, which is not a bound of the profile" % (rt, name))
+                continue
+            for field in ("decided", "why"):
+                if not w.get(field):
+                    fail("runtime %s's waiver of %s gives no %r; a waived bound needs a "
+                         "date and a reason" % (rt, name, field))
+            replaced = w.get("replaced_by") or []
+            if not replaced:
+                fail("runtime %s's waiver of %s names no replacement checks; a waived bound "
+                     "with nothing in its place is a silently weaker profile" % (rt, name))
+            for check in replaced:
+                if check not in shipping:
+                    fail("runtime %s's waiver of %s names replacement %r, which "
+                         "dev/shipping-worker-probe.py does not record" % (rt, name, check))
+            if not w.get("measured_by") or not pathlib.Path(w["measured_by"]).exists():
+                fail("runtime %s's waiver of %s names no existing measured_by script"
+                     % (rt, name))
+            probe = bounds[name].get("probe")
+            if probe in enforces:
+                fail("runtime %s both enforces and waives %s" % (rt, name))
+            waived_probes[rt].add(probe)
+
     # The seam's selectable rule, which is the refuse-to-start clause in machine form.
+    # A waived bound counts as covered only through a waiver that passed the checks above.
     required = set(bounds[n]["probe"] for n in bounds if bounds[n].get("probe"))
     selectable = []
     for rt, r in sorted(runtimes.items()):
-        enforces = set(r.get("enforces") or [])
+        enforces = set(r.get("enforces") or []) | waived_probes.get(rt, set())
         stray = sorted(enforces - probe_bounds)
         if stray:
             fail("runtime %s claims to enforce %s, which is not a measured bound"
@@ -1108,6 +1159,29 @@ LIMIT_CASES = [
 
 
 ISOLATION_CASES = [
+    # Waivers (t5-e5e3071-F6): each condition the user set must be enforced.
+    ("a waiver of a bound the profile does not have",
+     lambda d: _rt(d)["runc-rootless"]["waived"].__setitem__(
+         "no_such_bound", dict(_rt(d)["runc-rootless"]["waived"]["no_new_privileges"])),
+     "which is not a bound of the profile"),
+    ("a waiver with no reason",
+     lambda d: _rt(d)["runc-rootless"]["waived"]["no_new_privileges"].pop("why"),
+     "gives no 'why'"),
+    ("a waiver with nothing in its place",
+     lambda d: _rt(d)["runc-rootless"]["waived"]["no_new_privileges"].__setitem__(
+         "replaced_by", []),
+     "names no replacement checks"),
+    ("a waiver citing a check no probe records",
+     lambda d: _rt(d)["runc-rootless"]["waived"]["no_new_privileges"]["replaced_by"]
+     .append("a check nobody runs"),
+     "does not record"),
+    ("a waiver citing a script that does not exist",
+     lambda d: _rt(d)["runc-rootless"]["waived"]["no_new_privileges"].__setitem__(
+         "measured_by", "dev/no-such-script.sh"),
+     "names no existing measured_by script"),
+    ("a bound both enforced and waived",
+     lambda d: _rt(d)["runc-rootless"]["enforces"].append("no-new-privileges"),
+     "both enforces and waives"),
     ("a bound dropped from the profile",
      lambda d: _b(d).pop("seccomp"), "no profile claims"),
     ("a bound citing a probe that does not exist",

@@ -32,6 +32,18 @@
         "status": "unmeasured",
         "selectable": false,
         "enforces": [],
+        "waived": {
+          "no_new_privileges": {
+            "decided": "2026-09-26 by the user (gate finding t5-e5e3071-F6), after the shipping launch was measured",
+            "why": "rootlesskit's newuidmap needs its file capability to write the worker's uid map, and no-new-privileges disables file capabilities: the worker does not start ('newuidmap: Could not set caps'). The alternatives were measured or weighed and not taken: a single-uid user namespace keeps the flag but cannot unpack alpine (/etc/shadow is gid 42), and dockerd userns-remap is a host-wide daemon change. Build code inside a RUN step never had the flag: BuildKit does not set it on RUN containers (NoNewPrivs 0, measured).",
+            "replaced_by": [
+              "only newuidmap and newgidmap can gain privilege",
+              "a RUN's ids map to unprivileged host ids",
+              "the worker holds no capabilities"
+            ],
+            "measured_by": "dev/validate-shipping-worker.sh"
+          }
+        },
         "owes": [
           "repeat all nine probes in rootless mode; the rootful measurements do not transfer, because the enforcing agent changes",
           "a Delegate= drop-in for the user manager, or evidence that the root cgroup's existing delegation reaches a rootless worker",

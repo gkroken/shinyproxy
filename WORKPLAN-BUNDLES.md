@@ -1670,6 +1670,22 @@ below are marked passed by this planning document.
       review that profile (`dev/buildkit_worker_profile.py`) as part of the sandbox
       configuration.
 
+      **Gate Phase 2 finding F6 is T5's (user decision 2026-09-26): the shipping worker's
+      isolation probes run here, before T5 passes.** Part 1, the launch
+      (`dev/validate-shipping-worker.sh`): the rootless worker starts under every argument
+      of the build-worker profile, read from `spec/isolation-profile-v1.json`, except
+      `no-new-privileges`. rootlesskit's `newuidmap` needs its file capability, and the flag
+      disables file capabilities, so the worker cannot start with it. **The user signed off
+      on 2026-09-26 on waiving it for runc-rootless**, replaced by three probe-enforced
+      checks. The waiver and its replacements are in the spec, and
+      `dev/schema-fixture-check.py` refuses a waiver without them. Two more findings came
+      out of that launch, and the derived worker image now fixes both: the upstream image
+      carries a setuid-root `fusermount3` and a setgid `unix_chkpwd` (cleared), and it runs
+      as uid 1000 with subordinate ids 100000+, which on a rootful host are real host ids
+      (on this machine, the login user's own). It now runs as a dedicated uid 2401 with ids
+      from 3000000, checked against the host's own account files. Parts 2-4 (RUN-side
+      attacks, RUN-side resource bounds, the squid egress matrix) follow.
+
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in
       `code_review/` is the mechanism: the coding agent implements and commits, a separate
