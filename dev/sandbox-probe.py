@@ -124,6 +124,49 @@ def probe_memory():
            args="--memory=64m")
 
 
+# Allocates in 1 MiB steps and reports each, so the number printed last is how far the
+# allocation got before the kernel stopped it.
+GROW = ("python -u -c \"b=[]\n"
+        "for i in range(1, 513):\n"
+        "    b.append(bytearray(1<<20)); print(i)\n\"")
+
+
+def _reached(result):
+    lines = [l for l in result.stdout.split() if l.isdigit()]
+    return int(lines[-1]) if lines else 0
+
+
+def probe_memory_swap():
+    """--memory alone is NOT the memory bound: Docker then gives the container as much
+    again in swap (memory.swap.max = the limit), so a 2g worker's RUN reached 3968 MiB
+    before the OOM kill (measured from a RUN step, t5-e5e3071-F6 part 3). probe_memory
+    could not see it: 256 MiB exceeds 64 MiB of memory plus 64 MiB of swap either way.
+    --memory-swap equal to --memory sets swap to zero. The control is the same growth
+    without it, which must get past the limit -- on a host with swap. A host without swap
+    cannot show the difference, and the note says so rather than calling the control met.
+    """
+    bounded = run_in(["--memory=64m", "--memory-swap=64m"], GROW)
+    control = run_in(["--memory=64m"], GROW)
+    swap_kib = 0
+    try:
+        for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("SwapTotal:"):
+                swap_kib = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    got, ctl = _reached(bounded), _reached(control)
+    held = bounded.returncode == 137 and 0 < got <= 64
+    control_shows = ctl > 64 or swap_kib == 0
+    ok = held and control_shows
+    record("memory swap", "--memory-swap equal to --memory leaves no swap to grow into",
+           "with it: killed (rc %d) at %d MiB; without it: rc %d at %d MiB (host swap %d MiB)"
+           % (bounded.returncode, got, control.returncode, ctl, swap_kib // 1024), ok,
+           ("" if swap_kib else "this host has no swap, so the control cannot distinguish "
+                                "the bound from its absence")
+           if ok else "held=%s control-got-past-the-limit=%s" % (held, ctl > 64),
+           args="--memory-swap=64m")
+
+
 def probe_pids():
     r = run_in(["--pids-limit=32"], "python -c \"import os\nn=0\n"
                                     "try:\n"
@@ -358,7 +401,7 @@ def main(argv):
                                 subprocess.run(["uname", "-r"], capture_output=True,
                                                text=True).stdout.strip()))
     print()
-    for probe in (probe_cpu, probe_memory, probe_pids, probe_no_new_privs,
+    for probe in (probe_cpu, probe_memory, probe_memory_swap, probe_pids, probe_no_new_privs,
                   probe_read_only_rootfs, probe_tmpfs_size, probe_storage_opt,
                   probe_loop_volume, probe_confinement, probe_seccomp,
                   probe_network_none):

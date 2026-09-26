@@ -14,10 +14,11 @@
         "status": "measured",
         "selectable": true,
         "measured_by": "dev/validate-sandbox.sh",
-        "measured_on": "2026-09-18",
+        "measured_on": "2026-09-18; memory swap added and all ten re-run 2026-09-26",
         "enforces": [
           "cpu quota",
           "memory limit",
+          "memory swap",
           "pid limit",
           "no-new-privileges",
           "read-only rootfs",
@@ -26,7 +27,7 @@
           "network none",
           "seccomp"
         ],
-        "note": "What T3(a) actually measured, 9 of 9. It is NOT the shipping default: an escape from a rootful worker lands as host UID 0, and this host has no AppArmor behind that. Recorded as selectable because it is the one runtime whose bounds are demonstrated, and because a file that marks every runtime unselectable would be a file nobody can act on."
+        "note": "What T3(a) actually measured, 9 of 9, and 10 of 10 since the memory swap bound (2026-09-26). It is NOT the shipping default: an escape from a rootful worker lands as host UID 0, and this host has no AppArmor behind that. Recorded as selectable because it is the one runtime whose bounds are demonstrated, and because a file that marks every runtime unselectable would be a file nobody can act on."
       },
       "runc-rootless": {
         "status": "unmeasured",
@@ -45,7 +46,7 @@
           }
         },
         "owes": [
-          "repeat all nine probes in rootless mode; the rootful measurements do not transfer, because the enforcing agent changes",
+          "repeat all the probes (ten since memory swap) in rootless mode; the rootful measurements do not transfer, because the enforcing agent changes",
           "a Delegate= drop-in for the user manager, or evidence that the root cgroup's existing delegation reaches a rootless worker",
           "a replacement for the loop-backed ext4 quota, which today is attached by privileged setup containers a rootless worker will not have"
         ],
@@ -56,7 +57,7 @@
         "selectable": false,
         "enforces": [],
         "owes": [
-          "measure all nine probes under runsc",
+          "measure all the probes (ten since memory swap) under runsc",
           "resolve BuildKit's overlay-on-overlay: Linux refuses overlay atop overlay and gVisor wants a tmpfs upper layer"
         ],
         "note": "gVisor. The one stronger boundary that is PROVABLE on this host, because it needs no KVM. A candidate profile for deployments whose publisher population is wider than the account-issuance argument covers."
@@ -92,6 +93,14 @@
           "configurable": true,
           "enforced_by": "cgroup v2 memory.max; the kernel OOM-kills an overrun",
           "why": "A dependency resolver is the most memory-hungry thing in a build and the easiest to make hungry on purpose."
+        },
+        "memory_swap": {
+          "argument": "--memory-swap=<memory_limit>",
+          "probe": "memory swap",
+          "placeholders": ["memory_limit"],
+          "configurable": true,
+          "enforced_by": "cgroup v2 memory.swap.max = 0; memory-swap is RAM plus swap, so equal to --memory leaves none",
+          "why": "Without it --memory is half the bound it reads as: Docker then allows the same amount again in swap. Measured from a RUN step under the shipping worker (t5-e5e3071-F6 part 3): a 2g worker's build code reached 3968 MiB before the OOM kill. Same placeholder as memory, because the value that makes it zero swap is the memory limit itself."
         },
         "pids": {
           "argument": "--pids-limit=<pid_limit>",

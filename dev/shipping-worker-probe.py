@@ -78,6 +78,8 @@ def judge_hostconfig(inspected, expected):
     want("ReadonlyRootfs", host.get("ReadonlyRootfs"), True)
     want("NanoCpus", host.get("NanoCpus"), expected["nano_cpus"])
     want("Memory", host.get("Memory"), expected["memory"])
+    # RAM plus swap, so equal to Memory means no swap (the memory swap bound).
+    want("MemorySwap", host.get("MemorySwap"), expected["memory"])
     want("PidsLimit", host.get("PidsLimit"), expected["pids"])
     want("Tmpfs", host.get("Tmpfs"), {"/tmp": expected["tmpfs"]})
     want("NetworkMode", host.get("NetworkMode"), expected["network"])
@@ -430,7 +432,8 @@ def self_test(tmp, profile):
     shipped = json.dumps(exp["seccomp"])
     def conforming(seccomp_opt):
         return {"HostConfig": {"ReadonlyRootfs": True, "NanoCpus": exp["nano_cpus"],
-                               "Memory": exp["memory"], "PidsLimit": exp["pids"],
+                               "Memory": exp["memory"], "MemorySwap": exp["memory"],
+                               "PidsLimit": exp["pids"],
                                "Tmpfs": {"/tmp": exp["tmpfs"]}, "NetworkMode": exp["network"],
                                "Privileged": False, "CapAdd": None,
                                "SecurityOpt": [seccomp_opt]},
@@ -443,6 +446,10 @@ def self_test(tmp, profile):
         missed.append("hostconfig control")
     weaker = json.loads(shipped)
     weaker["syscalls"] = weaker["syscalls"][:-2]
+    no_swap_bound = conforming("seccomp=" + shipped)
+    no_swap_bound["HostConfig"]["MemorySwap"] = 2 * exp["memory"]
+    expect_fail("--memory without --memory-swap (Docker's default: as much again in swap)",
+                judge_hostconfig(no_swap_bound, exp))
     expect_fail("a different seccomp profile",
                 judge_hostconfig(conforming("seccomp=" + json.dumps(weaker)), exp))
     expect_fail("a seccomp option that is a path, not the profile",
