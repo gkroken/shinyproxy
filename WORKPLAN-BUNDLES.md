@@ -1683,8 +1683,22 @@ below are marked passed by this planning document.
       carries a setuid-root `fusermount3` and a setgid `unix_chkpwd` (cleared), and it runs
       as uid 1000 with subordinate ids 100000+, which on a rootful host are real host ids
       (on this machine, the login user's own). It now runs as a dedicated uid 2401 with ids
-      from 3000000, checked against the host's own account files. Parts 2-4 (RUN-side
-      attacks, RUN-side resource bounds, the squid egress matrix) follow.
+      from 3000000, checked against the host's own account files.
+
+      Part 2, attacks from inside a RUN step (`dev/validate-run-attacks.sh`): under the
+      worker part 1 launches, each attempt in decision 6's table is made from a real RUN and
+      refused, with an allow control beside it. Two were reachable and are now closed. Build
+      code reached buildkitd on `tcp://0.0.0.0:1234` (a RUN shares the worker's network); the
+      **user chose (2026-09-26) a unix socket on a volume shared only with the trusted
+      client** over mutual TLS, so there is no port and the RUN never gets the socket. And an
+      unauthenticated registry took writes from build code; the registry now requires a
+      credential the trusted client has and build code does not, so a build-code write gets
+      401. Contained without a change: the RUN is alone in its PID namespace (buildkitd not
+      visible), nothing it backgrounds outlives it, and it sees no credential, no other
+      workspace and no Docker socket. **Owed:** the launcher-contract probe
+      (`dev/launcher-contract-probe.py`) and T7's driver must adopt the socket transport;
+      it still starts buildkitd on TCP. Parts 3-4 (RUN-side resource bounds, the squid
+      egress matrix) follow.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in

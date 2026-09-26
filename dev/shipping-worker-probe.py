@@ -47,6 +47,7 @@ import worker_disposal
 NET = "skald-sw-net"
 WORKER = "skald-sw-worker"
 VOLUME = "skald-sw-ws"
+SOCK = "skald-sw-sock"
 EVIDENCE = "42-RAN"
 
 results = []
@@ -213,13 +214,15 @@ RUN_REPORT = ("B=/bin/busybox; echo $((6*7))-RAN > /o.txt; $B cat /proc/self/uid
 
 
 def run_build(ctx, out):
-    """The client holds the context and streams it; the output comes back to `out`."""
+    """The client holds the context and streams it over the shared socket; the output comes
+    back to `out`. It runs as the worker's uid to open the socket, so `out` must be writable
+    by that uid."""
     os.makedirs(out, exist_ok=True)
-    got = docker(["run", "--rm", "--network", NET, "--user", "%d:%d" % (os.getuid(),
-                                                                          os.getgid()),
-                  "-v", "%s:/ctx:ro" % ctx, "-v", "%s:/out" % out,
-                  "--entrypoint", "buildctl", sw.UPSTREAM_IMAGE,
-                  "--addr", "tcp://%s:1234" % WORKER, "build",
+    os.chmod(out, 0o777)
+    got = docker(["run", "--rm", "--network", "none",
+                  "-v", "%s:/ctx:ro" % ctx, "-v", "%s:/out" % out]
+                 + sw.client_args(SOCK) + ["--entrypoint", "buildctl", sw.UPSTREAM_IMAGE,
+                  "--addr", sw.SOCKET_ADDR, "build",
                   "--frontend", "dockerfile.v0", "--local", "context=/ctx",
                   "--local", "dockerfile=/ctx", "--output", "type=local,dest=/out"],
                  timeout=900)
@@ -242,14 +245,16 @@ def expected_config():
 
 
 def launch(tmp, profile, name=WORKER, **kw):
+    kw.setdefault("socket_volume", SOCK)
     sw.dispose(name)
-    return sw.start(name, NET, VOLUME, profile, **kw)
+    socket_volume = kw.pop("socket_volume")
+    return sw.start(name, NET, VOLUME, profile, socket_volume, **kw)
 
 
 def cleanup():
     for name in (WORKER, WORKER + "-nnp"):
         sw.dispose(name)
-    docker(["volume", "rm", VOLUME])
+    docker(["volume", "rm", VOLUME, SOCK])
     docker(["network", "rm", NET])
 
 
@@ -265,6 +270,8 @@ def main(argv):
         if not sw.build_worker_image(pathlib.Path(tmp) / "image"):
             raise SystemExit("could not build the derived worker image")
         docker(["network", "create", "--internal", NET])
+        if not sw.prepare_volume(SOCK):
+            raise SystemExit("could not prepare the socket volume")
         if not sw.prepare_volume(VOLUME):
             raise SystemExit("could not prepare the workspace volume")
 
@@ -350,10 +357,10 @@ def main(argv):
                caps_error and not started)
         sw.dispose(WORKER + "-nnp")
 
-        # 8. Disposal, the workspace volume included.
-        held, left = sw.dispose(WORKER, VOLUME)
+        # 8. Disposal, the workspace and socket volumes included.
+        held, left = sw.dispose(WORKER, VOLUME, SOCK)
         record("no worker's state outlives it",
-               "every volume the worker held, its workspace included, is gone",
+               "every volume the worker held, workspace and socket, is gone",
                "%d volume(s) held, none left" % len(held) if not left
                else "left: %s" % ", ".join(left),
                not left and VOLUME in held)

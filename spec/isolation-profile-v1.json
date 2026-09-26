@@ -170,6 +170,7 @@
       ],
       "forbidden_rationale": "Decision 6 rejects each of these by name or by kind. They are listed literally so that a driver can be checked against the list mechanically rather than read for intent. --device covers the loop device specifically: the worker gets the volume, never the block device backing it.",
 
+      "control_transport": "The daemon's control endpoint is a unix socket in a volume shared only with the trusted client, not a TCP port (user decision 2026-09-26, gate finding t5-e5e3071-F6, dev/validate-run-attacks.sh). A RUN shares the worker's network, so a TCP port was reachable by build code; a socket in a volume the RUN never mounts is not. T7's driver ships this transport.",
       "never_reaches_the_worker": [
         "the Docker socket, by mount or by a worker-callable API proxy",
         "a bind mount of the repository, platform temp directory or home",

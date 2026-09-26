@@ -120,28 +120,44 @@ def profile_arguments(values, runtime=RUNTIME, include_waived=False):
 # What the read-only root needs, and nothing the profile does not already mount.
 ENVIRONMENT = ["--env=HOME=/tmp/home", "--env=TMPDIR=/tmp",
                "--env=XDG_RUNTIME_DIR=/tmp/run"]
+# The daemon listens on a unix socket in a volume shared only with the trusted client, not
+# a TCP port (user decision 2026-09-26, gate finding t5-e5e3071-F6): a RUN shares the
+# worker's network and reached a TCP port, but never gets this volume, and there is no port.
+SOCKET_MOUNT = "/skald-sock"
+SOCKET_ADDR = "unix://" + SOCKET_MOUNT + "/bk.sock"
 DAEMON_ARGS = ["--oci-worker-snapshotter=native", "--root", "/workspace/buildkit",
-               "--addr", "tcp://0.0.0.0:1234"]
+               "--addr", SOCKET_ADDR]
 
 
 def prepare_volume(name):
-    """A per-attempt workspace volume owned by the worker's uid. (T7 replaces this with the
-    loop-backed quota volume; the ownership requirement is the same.)"""
+    """A per-attempt volume owned by the worker's uid. (T7 replaces the workspace one with
+    the loop-backed quota volume; the ownership requirement is the same.)"""
     docker(["volume", "create", name])
     return docker(["run", "--rm", "--network=none", "-v", "%s:/w" % name, BUSYBOX_IMAGE,
                    "chown", "%d:%d" % (WORKER_UID, WORKER_UID), "/w"]).returncode == 0
 
 
-def start(name, network, volume, seccomp_profile, extra=(), include_waived=False,
-          omit=()):
-    """Starts the worker; returns the argv used. `omit` drops profile arguments by prefix,
-    for self-tests that must see a check fail when a bound is missing."""
+def client_args(socket_volume):
+    """What a trusted buildctl client needs to reach the worker over the shared socket: the
+    socket volume, and the worker's uid so it may open a 0660 socket the worker owns. Build
+    code gets neither -- it has no such volume and runs in its own mounts."""
+    return ["-v", "%s:%s" % (socket_volume, SOCKET_MOUNT),
+            "--user", "%d:%d" % (WORKER_UID, WORKER_UID)]
+
+
+def start(name, network, volume, seccomp_profile, socket_volume, extra=(),
+          include_waived=False, omit=(), daemon_extra=()):
+    """Starts the worker; returns the argv used. `socket_volume` carries the daemon's unix
+    socket to the trusted client. `omit` drops profile arguments by prefix, for self-tests
+    that must see a check fail when a bound is missing. `daemon_extra` is passed to
+    buildkitd, after DAEMON_ARGS -- e.g. a --config for a probe's registry."""
     args = profile_arguments({"egress_network": network, "quota_volume": volume,
                               "seccomp_profile": seccomp_profile},
                              include_waived=include_waived)
     args = [a for a in args if not any(a.startswith(o) for o in omit)]
+    extra = list(extra) + ["-v", "%s:%s" % (socket_volume, SOCKET_MOUNT)]
     argv = (["run", "-d", "--name", name, "--network-alias", name] + args + ENVIRONMENT
-            + list(extra) + [BUILDKIT_IMAGE] + DAEMON_ARGS)
+            + list(extra) + [BUILDKIT_IMAGE] + DAEMON_ARGS + list(daemon_extra))
     docker(argv, timeout=300)
     return argv
 
@@ -163,13 +179,13 @@ def logs(name):
     return out.stdout + out.stderr
 
 
-def dispose(name, volume=None):
-    """The launcher's teardown: the worker, its anonymous volumes (t5-e5e3071-F7) and the
-    per-attempt workspace volume. `docker rm -v` never removes a NAMED volume, so the
-    workspace needs its own removal, measured the first time this probe ran: the container
-    went and the workspace stayed. Returns (volumes held, volumes still present), judged
-    on the host's volume list after both steps."""
+def dispose(name, *volumes):
+    """The launcher's teardown: the worker, its anonymous volumes (t5-e5e3071-F7) and every
+    named per-attempt volume it was given (the workspace, and the socket volume). `docker rm
+    -v` never removes a NAMED volume, so each needs its own removal -- measured the first
+    time this probe ran, when the container went and the workspace stayed. Returns (volumes
+    held, volumes still present), judged on the host's volume list after both steps."""
     held, _ = worker_disposal.dispose(name)
-    if volume:
+    for volume in volumes:
         docker(["volume", "rm", volume])
     return held, worker_disposal.surviving(held)
