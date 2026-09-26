@@ -97,9 +97,16 @@ def main():
     # And a sample of the invisible characters (format, line/paragraph separators), which
     # the same invariant refuses (t5-e5e3071-F3), including one outside the BMP.
     for cp in (list(range(0x00, 0x20)) + list(range(0x7F, 0xA0)) + [0x20, 0x7E, 0xA0]
-               + [0x00AD, 0x200B, 0x200D, 0x202E, 0x2028, 0xFEFF, 0xE0001]):
+               + [0x00AD, 0x200B, 0x200D, 0x202E, 0x2028, 0xFEFF, 0xE0001]
+               + [0x034F, 0xFE0F, 0x3164]):   # default ignorable, not Cf (5c5715b-F1)
         (dirs["memberPath"] / ("codepoint-%04X" % cp)).write_bytes(
             b"\x00" + ("app/a%sb.txt" % chr(cp)).encode("utf-8"))
+    # Words that carry a joiner legitimately (RFC 5892 ContextJ), which must be accepted:
+    # Persian ZWNJ between joining letters, Devanagari virama + ZWJ.
+    for label, word in (("persian-zwnj", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"),
+                        ("devanagari-zwj", "\u0915\u094d\u200d\u0937")):
+        (dirs["memberPath"] / ("joiner-" + label)).write_bytes(
+            b"\x00" + ("app/%s.R" % word).encode("utf-8"))
     for fixture in sorted((REPO / "dev/fixtures/manifests").glob("*/*.json")):
         (dirs["manifest"] / (fixture.parent.name + "-" + fixture.stem)).write_bytes(
             fixture.read_bytes())

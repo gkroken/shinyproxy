@@ -603,23 +603,31 @@ key builder all apply this one definition (`t5-e5e3071-F1`). The manifest schema
 path pattern stops at U+001F. It is a frozen T1 contract and stays as it is: the semantic
 layer refuses the rest, and it already refuses more than the schema does.
 
-**Invisible characters are refused too** (decided 2026-09-26, `t5-e5e3071-F3`). A name may
-not contain a Unicode format character (Cf: the bidi embeddings, overrides and isolates,
-LRM/RLM/ALM, BOM, the zero-width space, joiner and non-joiner, soft hyphen, the tag
-characters) or a line or paragraph separator (Zl, Zp, U+2028/U+2029). Each renders as
-nothing or reorders what is around it. `app/report<U+202E>ld.R` lists as `app/reportR.dl`,
-and two names that differ only by a zero-width space look identical to the operator
-reading an admin listing of code the platform is about to build and run. The corpus left
-this as "either", and the extractor accepted both of the gate's fixtures (BOM, RLO)
-without any record of a decision. The rejected alternative was to accept these characters
-and rely on escaping at display time. Escaping protects log lines, but not a publisher's
-own UI, a `tar -t`, or an operator's file manager, and the name persists into the image.
-**The cost is recorded, not hidden:** Persian and several Indic scripts use ZWNJ/ZWJ inside
-ordinary words, so such a file name is refused. The rejection names the code point, and
-renaming a file is a small price next to a spoofed name in a platform that executes what
-it lists. The extractor, the manifest validator (same parser) and the rendition key
-builder each hold this definition. `ContainmentRulesAgreeTest` checks both copies against
-every code point the JDK classes as Cf, Zl or Zp, plus a hand-made list.
+**Invisible characters are refused too** (`t5-e5e3071-F3`, widened by `5c5715b-F1`; the
+rule was decided by the user on 2026-09-26). A name may not contain a code point that
+renders as nothing: Unicode's Default_Ignorable_Code_Point set (zero-width characters,
+variation selectors, the combining grapheme joiner, Hangul fillers, tag characters) and the
+general categories Cf, Zl and Zp (bidi embeddings, overrides and isolates, BOM, interlinear
+annotation, line and paragraph separators). `app/report<U+202E>ld.R` lists as
+`app/reportR.dl`. Two names that differ only by a zero-width character look identical to
+the operator reading an admin listing of code the platform is about to build and run.
+Escaping at display time protects log lines, but not a publisher's own UI, a `tar -t` or an
+operator's file manager, and the name persists into the image.
+
+**The joiners follow the internet's domain-name rule** (RFC 5892 Appendix A, ContextJ).
+ZWNJ and ZWJ are allowed directly after a virama, and ZWNJ is also allowed between two
+Arabic-script letters that would otherwise join. So Persian and Indic file names keep
+working, and a joiner used anywhere else is refused, including in emoji sequences. The
+accepted cost: emoji built with joiners or with VS16 (a red heart) cannot appear in file
+names. The rule is `publisher.names.InvisibleCharacters`, shared by the extractor, the
+manifest validator (same parser) and the rendition key builder. Its tables are generated
+from the Unicode 15.0.0 data files (`dev/unicode/generate_invisible_tables.py`, pinned by
+SHA-256, `--check` verifies) and not taken from the JDK, so the refused set does not move
+when the JDK is upgraded. Moving to a newer Unicode is a deliberate regeneration.
+
+**Not covered, and not claimed:** homoglyphs. A Cyrillic `a`, a different space character
+or U+2800 BRAILLE PATTERN BLANK are visible characters that look like others. That class is
+open, and the tests pin all three as accepted, so the gap stays visible.
 
 Validate the **effective** path after any approved PAX `path` override. Reject global PAX,
 linkpath, sparse/xattr/ACL overrides and unknown interpretation-changing extensions;

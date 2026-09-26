@@ -156,7 +156,10 @@ public class MemberPathTest {
     static final int[] INVISIBLE = {0x00AD, 0x061C, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F,
             0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064,
             0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF, 0xFFF9, 0xFFFA, 0xFFFB, 0x110BD, 0x1D173,
-            0x1D17A, 0xE0001, 0xE0041, 0x2028, 0x2029};
+            0x1D17A, 0xE0001, 0xE0041, 0x2028, 0x2029,
+            // Default ignorable without being Cf (5c5715b-F1): combining grapheme joiner,
+            // variation selectors 16 and 17, a Hangul filler, a Mongolian variation selector.
+            0x034F, 0xFE0F, 0xE0100, 0x3164, 0x180B};
 
     @Test
     public void everyInvisibleCharacterIsRefused() {
@@ -168,6 +171,12 @@ public class MemberPathTest {
                     String.format("U+%04X was accepted in a member name", cp));
             assertEquals(BundleRule.PATH_INVISIBLE_CHARACTER, ex.rule(),
                     String.format("U+%04X: %s", cp, ex.getMessage()));
+        }
+        // The joiners where the domain-name rule allows them (RFC 5892 ContextJ): a Persian
+        // word with ZWNJ between two joining letters, and Devanagari virama + ZWJ.
+        for (String word : new String[] {"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+                "\u0915\u094d\u200d\u0937"}) {
+            assertEquals(word + ".R", parse("app/" + word + ".R").payloadPath());
         }
         // Visible neighbours: NBSP (a space separator, Zs), a combining mark in NFC, an
         // emoji built with no joiner, Arabic and Devanagari letters.

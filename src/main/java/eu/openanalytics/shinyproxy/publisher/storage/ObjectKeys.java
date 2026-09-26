@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.storage;
 
+import eu.openanalytics.shinyproxy.publisher.names.InvisibleCharacters;
+
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.Locale;
@@ -262,13 +264,12 @@ public final class ObjectKeys {
                                 + quoted(relativePath));
             }
         }
-        // Format characters (bidi controls, BOM, zero-width) and line/paragraph separators
-        // render as nothing or reorder what is around them, so two keys that differ only by
-        // one read the same in a log. The same definition as MemberPath's, kept separate on
-        // purpose like the rest of this rule and compared code point by code point in
-        // ContainmentRulesAgreeTest (t5-e5e3071-F3). By code point, so the supplementary
-        // format characters (U+E0001 and the tag block) are seen, not their surrogates.
-        if (relativePath.codePoints().anyMatch(ObjectKeys::isInvisible)) {
+        // Characters that render as nothing or reorder what is around them, so two keys that
+        // differ only by one read the same in a log. The one rule MemberPath uses too,
+        // InvisibleCharacters (t5-e5e3071-F3, 5c5715b-F1): it is data from the Unicode
+        // tables and a context rule, not containment logic, so it is shared rather than
+        // copied, and ContainmentRulesAgreeTest still checks both callers.
+        if (InvisibleCharacters.firstRefused(relativePath) >= 0) {
             throw new IllegalArgumentException(
                     "rendition path must not contain an invisible character: "
                             + quoted(relativePath));
@@ -313,12 +314,6 @@ public final class ObjectKeys {
             throw new IllegalArgumentException("identifier must not be null");
         }
         return id.toString().toLowerCase(Locale.ROOT);
-    }
-
-    static boolean isInvisible(int codePoint) {
-        int type = Character.getType(codePoint);
-        return type == Character.FORMAT || type == Character.LINE_SEPARATOR
-                || type == Character.PARAGRAPH_SEPARATOR;
     }
 
     /**

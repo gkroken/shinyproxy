@@ -135,11 +135,7 @@ public class BundleFuzzTest {
         // checks, so the fuzzer could never have reported t5-e5e3071-F1.
         if (text.startsWith("/") || text.contains("\\")
                 || text.chars().anyMatch(Character::isISOControl)
-                || text.codePoints().anyMatch(cp -> {
-                    int type = Character.getType(cp);
-                    return type == Character.FORMAT || type == Character.LINE_SEPARATOR
-                            || type == Character.PARAGRAPH_SEPARATOR;
-                })) {
+                || text.codePoints().anyMatch(BundleFuzzTest::renderedAsNothing)) {
             throw new AssertionError("accepted an absolute, backslashed, control or invisible name: "
                     + BundleRejection.quote(text));
         }
@@ -189,6 +185,24 @@ public class BundleFuzzTest {
             throw new AssertionError("the memberPath seeds do not reach MemberPath's rules: "
                     + accepted + " accepted, late rules reached " + deep);
         }
+    }
+
+    /**
+     * The invariant's own statement of the invisible-character rule, independent of the
+     * generated tables: Cf/Zl/Zp by the JDK, plus the default-ignorable kinds listed by
+     * hand. The two joiners are left to the rule's context check, since a Persian or
+     * Indic word may carry one legitimately.
+     */
+    private static boolean renderedAsNothing(int cp) {
+        if (cp == 0x200C || cp == 0x200D) {
+            return false;
+        }
+        int type = Character.getType(cp);
+        return type == Character.FORMAT || type == Character.LINE_SEPARATOR
+                || type == Character.PARAGRAPH_SEPARATOR || cp == 0x034F
+                || (cp >= 0xFE00 && cp <= 0xFE0F) || (cp >= 0xE0100 && cp <= 0xE01EF)
+                || (cp >= 0x180B && cp <= 0x180F) || cp == 0x17B4 || cp == 0x17B5
+                || cp == 0x115F || cp == 0x1160 || cp == 0x3164 || cp == 0xFFA0;
     }
 
     @FuzzTest

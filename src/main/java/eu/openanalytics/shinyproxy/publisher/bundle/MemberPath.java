@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.bundle;
 
+import eu.openanalytics.shinyproxy.publisher.names.InvisibleCharacters;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
@@ -51,17 +53,15 @@ import java.util.List;
  * let the first rot unnoticed. Accepting C1 was finding t5-e5e3071-F1: NEL (U+0085) is a
  * line break to many log readers, so a name carrying one forged a line in a build log.
  *
- * <p><b>Nor may a name carry an invisible character</b>: Unicode format characters (Cf:
- * bidi controls, BOM, zero-width space, joiner and non-joiner, soft hyphen...) and the
- * line and paragraph separators (Zl, Zp). Each renders as nothing or reorders what is
- * around it, so {@code app/report<U+202E>ld.R} is listed as {@code app/reportR.dl}, and two
- * names that differ only by a zero-width space look the same to the operator reading an
- * admin listing. The contract said "either" and the extractor accepted them by accident
- * (t5-e5e3071-F3); refusing them is the decision, recorded in the extraction contract. The
- * cost is real: Persian and some Indic text use ZWNJ/ZWJ inside ordinary words, and such a
- * file name is refused. It is refused with the code point named, and a publisher can rename
- * the file; a spoofed name in the listing of a platform that runs the code is not something
- * the operator can undo.
+ * <p><b>Nor may a name carry an invisible character</b>: anything Unicode says renders
+ * as nothing (Default_Ignorable_Code_Point), and the Cf, Zl and Zp categories (bidi
+ * controls, BOM, line and paragraph separators). {@code app/report<U+202E>ld.R} lists as
+ * {@code app/reportR.dl}, and two names that differ only by a zero-width character look
+ * the same to the operator reading an admin listing. The two joiners are allowed only
+ * where the domain-name rules allow them (RFC 5892 ContextJ), so Persian and Indic words
+ * keep working. The contract said "either", and the extractor accepted these by accident
+ * (t5-e5e3071-F3). The rule is {@link InvisibleCharacters}, which the rendition key builder
+ * shares; the user decided it on 2026-09-26 (5c5715b-F1).
  *
  * <p><b>Rejected, never repaired.</b> Nothing here strips a {@code ..}, collapses a double
  * separator, lower-cases a colliding name or normalises a decomposed one. The plan says why
@@ -79,7 +79,10 @@ import java.util.List;
  * tar conventions and no configured depth. The two agree on the containment core — no
  * {@code ..}, no {@code .}, no empty segment, no absolute path, no backslash, no control
  * character, NFC required — and {@code ContainmentRulesAgreeTest} runs both over the same
- * inputs so that a day when one stops refusing something is a day a test fails.
+ * inputs so that a day when one stops refusing something is a day a test fails. The
+ * invisible-character rule is the exception, and is shared: it is Unicode data and a
+ * context rule rather than containment logic, and two copies of a generated table would
+ * only be a chance for them to differ.
  *
  * <p>The archive layout is fixed by the manifest contract — {@code manifest.json} at the
  * root, payload under {@code app/} — so classification is part of parsing. The configured
@@ -259,12 +262,13 @@ public final class MemberPath {
                                 + ") in the name: '" + BundleRejection.render(name) + "'");
             }
         }
-        text.codePoints().filter(MemberPath::isInvisible).findFirst().ifPresent(cp -> {
+        int invisible = InvisibleCharacters.firstRefused(text);
+        if (invisible >= 0) {
             throw new BundleRejection(BundleRule.PATH_INVISIBLE_CHARACTER,
-                    "an invisible character (U+" + String.format("%04X", cp) + ") in the"
-                            + " name, which would make it read as something else wherever"
+                    "an invisible character (U+" + String.format("%04X", invisible) + ") in"
+                            + " the name, which would make it read as something else wherever"
                             + " it is listed: '" + BundleRejection.render(name) + "'");
-        });
+        }
 
         if (!Normalizer.isNormalized(text, Normalizer.Form.NFC)) {
             throw new BundleRejection(BundleRule.PATH_NOT_NFC,
@@ -367,17 +371,6 @@ public final class MemberPath {
                             + " readers would disagree about what it says: '"
                             + BundleRejection.render(name) + "'");
         }
-    }
-
-    /**
-     * Format characters and line/paragraph separators, by the JDK's Unicode tables.
-     * ObjectKeys holds its own copy, as it does of the rest of the containment rule, and
-     * ContainmentRulesAgreeTest compares the two over every code point.
-     */
-    public static boolean isInvisible(int codePoint) {
-        int type = Character.getType(codePoint);
-        return type == Character.FORMAT || type == Character.LINE_SEPARATOR
-                || type == Character.PARAGRAPH_SEPARATOR;
     }
 
     private static boolean isAsciiLetter(char c) {
