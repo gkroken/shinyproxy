@@ -86,6 +86,37 @@ public class GzipMemberTest {
     }
 
     @Test
+    public void bytesAfterTheMemberAreRefusedWhenTheyArriveInALaterRead() throws Exception {
+        // t5-e5e3071-F4. The tests above hand the whole upload over in one read, so the
+        // bytes after the trailer are always already in the buffer and the in-buffer check
+        // catches them. An upload is a stream, though: when the member ends exactly where a
+        // read ends, only the read AFTER the trailer can see what follows. Two deliveries
+        // make that the only way to see it: a read that stops at the member's last byte,
+        // and one byte per read. Each tail must be refused, and each delivery with no tail
+        // must be accepted, so the stream shape alone is not what refuses.
+        byte[] member = gzip(PAYLOAD);
+        Map<String, byte[]> tails = Map.of(
+                "a second member", member,
+                "trailing data", "trailing, not padding\n".getBytes(StandardCharsets.UTF_8),
+                "a single byte", new byte[] {'x'});
+        for (boolean oneByteAtATime : new boolean[] {false, true}) {
+            String delivery = oneByteAtATime ? "one byte per read" : "split at the member";
+            assertArrayEquals(PAYLOAD, readFully(new SplitStream(oneByteAtATime, member),
+                    LIMITS), delivery + " with nothing after it must be accepted");
+            for (Map.Entry<String, byte[]> tail : tails.entrySet()) {
+                BundleRejection ex = assertThrows(BundleRejection.class,
+                        () -> readFully(new SplitStream(oneByteAtATime, member, tail.getValue()),
+                                LIMITS),
+                        delivery + ": " + tail.getKey() + " was accepted");
+                assertEquals(tail.getKey().equals("a second member")
+                                ? BundleRule.ARCHIVE_MULTIPLE_MEMBERS
+                                : BundleRule.ARCHIVE_TRAILING_DATA,
+                        ex.rule(), delivery + ", " + tail.getKey() + ": " + ex.getMessage());
+            }
+        }
+    }
+
+    @Test
     public void aTruncatedMemberIsNotAShortOne() {
         byte[] whole = gzip(PAYLOAD);
         byte[] half = java.util.Arrays.copyOf(whole, whole.length / 2);
@@ -302,6 +333,54 @@ public class GzipMemberTest {
     private static byte[] readFully(byte[] archive, ExtractionLimits limits) throws IOException {
         try (GzipMember member = GzipMember.open(new ByteArrayInputStream(archive), limits)) {
             return drain(member);
+        }
+    }
+
+    private static byte[] readFully(InputStream upload, ExtractionLimits limits)
+            throws IOException {
+        try (GzipMember member = GzipMember.open(upload, limits)) {
+            return drain(member);
+        }
+    }
+
+    /**
+     * An upload arriving in pieces: no read crosses from one piece into the next, and with
+     * {@code oneByteAtATime} no read returns more than a byte. A network stream behaves like
+     * this whenever the sender pauses, which is what the gate reproduced with a FIFO.
+     */
+    static final class SplitStream extends InputStream {
+        private final byte[][] pieces;
+        private final boolean oneByteAtATime;
+        private int piece;
+        private int offset;
+
+        SplitStream(boolean oneByteAtATime, byte[]... pieces) {
+            this.pieces = pieces;
+            this.oneByteAtATime = oneByteAtATime;
+        }
+
+        @Override
+        public int read() {
+            byte[] one = new byte[1];
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] buffer, int at, int length) {
+            while (piece < pieces.length && offset == pieces[piece].length) {
+                piece++;
+                offset = 0;
+            }
+            if (piece == pieces.length) {
+                return -1;
+            }
+            int n = Math.min(length, pieces[piece].length - offset);
+            if (oneByteAtATime) {
+                n = Math.min(n, 1);
+            }
+            System.arraycopy(pieces[piece], offset, buffer, at, n);
+            offset += n;
+            return n;
         }
     }
 

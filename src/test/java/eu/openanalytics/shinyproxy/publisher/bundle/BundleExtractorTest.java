@@ -327,6 +327,24 @@ public class BundleExtractorTest {
     }
 
     @Test
+    public void aSecondMemberInALaterReadIsRefused(@TempDir Path workspace) throws Exception {
+        // t5-e5e3071-F4 through the production entry point, with the size unknown as for a
+        // streamed upload: a valid bundle, then a second gzip member that arrives in a
+        // later read. Without the post-trailer read this is accepted.
+        byte[] bundle = gzip(TarArchives.bundle(TarArchives.shinyPayload()).end());
+        byte[] smuggled = gzip(TarArchives.archive().file("app/x", new byte[] {1}).end());
+        BundleExtractor.Extracted ok = BundleExtractor.extract(
+                new GzipMemberTest.SplitStream(false, bundle), -1, workspace, LIMITS);
+        try (ExtractionRoot root = ok.root()) {
+            assertEquals(2, ok.files(), "the control: the same delivery with nothing after it");
+        }
+        BundleRejection ex = assertThrows(BundleRejection.class,
+                () -> BundleExtractor.extract(new GzipMemberTest.SplitStream(false, bundle,
+                        smuggled), -1, workspace, LIMITS));
+        assertEquals(BundleRule.ARCHIVE_MULTIPLE_MEMBERS, ex.rule(), ex.getMessage());
+    }
+
+    @Test
     public void aFileTheManifestDoesNotListIsRefusedBeforeItIsWritten(@TempDir Path workspace)
             throws Exception {
         // S11. The undeclared member's header claims 256 MiB, under the per-file limit, with
