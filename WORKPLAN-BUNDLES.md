@@ -1704,6 +1704,18 @@ below are marked passed by this planning document.
       long `make fuzz` run from the committed tree and report its duration and outcome, as
       it does for the corpus.
 
+      **The author's long run, 2026-09-25/26: seven targets, 30 minutes each, nothing
+      found.** `make fuzz FUZZ_SECONDS=1800`. The first run (from 18:40 UTC, tree `55cabe4`)
+      finished `gzipMember`, `tarHeader`, `paxRecords`, `memberPath` and `tarStream` clean,
+      each for its full 1800 s, and was then cut off partway through `manifest` when the
+      session crashed; its log was in the session's scratch directory and went with it, so
+      those five rest on the live observation, not a kept record. The rerun of the other
+      two, `FUZZ_TARGETS="manifest extractor"` on the same tree, kept its log: `manifest`
+      110,484,846 runs in 1801 s, `extractor` (the whole pipeline, writing to disk)
+      920,395 runs in 1801 s at about 510/s, exit 0, no finding and no new saved input.
+      The one saved finding, the first run's manifest crash, replays as a pass. This is
+      the author's run; Phase 2 still owes its own, from the committed tree.
+
       **"Freeze the validated tree", done 2026-09-24.** An accepted extraction ends with
       `ExtractionRoot.freeze()`: files `r--------` (`r-x------` where the manifest says
       executable), directories and the root `r-x------`, all through descriptors, and the
