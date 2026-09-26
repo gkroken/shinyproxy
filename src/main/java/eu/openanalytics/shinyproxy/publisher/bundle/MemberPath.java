@@ -146,11 +146,11 @@ public final class MemberPath {
                 }
             }
             String hidden = BundleRejection.renderBounded(window, EVIDENCE_BUDGET, false);
-            if (shown < hiddenCount && !hidden.endsWith("\u2026")) {
+            if (shown < hiddenCount && !hidden.endsWith(BundleRejection.ELLIPSIS)) {
                 // The window stopped early, or there is another run further along. Either
                 // way the count and the bytes in front of the reader no longer match, and
                 // saying so costs one character (525c504-F2).
-                hidden = hidden + "\u2026";
+                hidden = hidden + BundleRejection.ELLIPSIS;
             }
             throw new BundleRejection(BundleRule.PATH_NUL,
                     "the '" + fieldName + "' field hides " + hiddenCount + " byte(s) behind"
@@ -256,7 +256,7 @@ public final class MemberPath {
         }
         if (text.charAt(0) == '/') {
             throw new BundleRejection(BundleRule.PATH_ABSOLUTE,
-                    "an absolute path: '" + text + "'");
+                    "an absolute path: '" + BundleRejection.quote(text) + "'");
         }
 
         String canonical = text;
@@ -264,7 +264,7 @@ public final class MemberPath {
             if (!directoryHeader) {
                 throw new BundleRejection(BundleRule.PATH_TRAILING_SLASH,
                         "a trailing slash on a member that is not a directory header: '"
-                                + text + "'");
+                                + BundleRejection.quote(text) + "'");
             }
             // A conventional trailing slash on a directory header, and the only one: it is
             // removed here so that "a/" and "a" collide for duplicate detection rather than
@@ -273,7 +273,7 @@ public final class MemberPath {
         }
         if (canonical.isEmpty()) {
             throw new BundleRejection(BundleRule.PATH_EMPTY,
-                    "a directory header naming the archive root itself: '" + text + "'");
+                    "a directory header naming the archive root itself: '" + BundleRejection.quote(text) + "'");
         }
 
         List<String> segments = new ArrayList<>();
@@ -281,21 +281,21 @@ public final class MemberPath {
             if (segment.isEmpty()) {
                 throw new BundleRejection(BundleRule.PATH_EMPTY_SEGMENT,
                         "an empty path segment, from a doubled or leading separator: '"
-                                + text + "'");
+                                + BundleRejection.quote(text) + "'");
             }
             if (segment.equals(".")) {
                 throw new BundleRejection(BundleRule.PATH_DOT_SEGMENT,
-                        "a '.' segment: '" + text + "'");
+                        "a '.' segment: '" + BundleRejection.quote(text) + "'");
             }
             if (segment.equals("..")) {
                 throw new BundleRejection(BundleRule.PATH_TRAVERSAL,
-                        "a '..' segment: '" + text + "'");
+                        "a '..' segment: '" + BundleRejection.quote(text) + "'");
             }
             int segmentBytes = segment.getBytes(StandardCharsets.UTF_8).length;
             if (segmentBytes > limits.maxSegmentBytes()) {
                 throw new BundleRejection(BundleRule.PATH_SEGMENT_TOO_LONG,
                         "a segment of " + segmentBytes + " bytes, over the configured "
-                                + limits.maxSegmentBytes() + ": '" + text + "'");
+                                + limits.maxSegmentBytes() + ": '" + BundleRejection.quote(text) + "'");
             }
             segments.add(segment);
         }
@@ -315,7 +315,7 @@ public final class MemberPath {
             }
         } else {
             throw new BundleRejection(BundleRule.LAYOUT_UNEXPECTED_MEMBER,
-                    "'" + text + "' is neither " + MANIFEST_MEMBER + " nor under "
+                    "'" + BundleRejection.quote(text) + "' is neither " + MANIFEST_MEMBER + " nor under "
                             + PAYLOAD_ROOT + "/, and the bundle layout has no other place"
                             + " for a member");
         }
@@ -325,12 +325,12 @@ public final class MemberPath {
         if (payloadBytes > limits.maxPathBytes()) {
             throw new BundleRejection(BundleRule.PATH_TOO_LONG,
                     "a payload path of " + payloadBytes + " bytes, over the configured "
-                            + limits.maxPathBytes() + ": '" + text + "'");
+                            + limits.maxPathBytes() + ": '" + BundleRejection.quote(text) + "'");
         }
         if (payloadSegments.size() > limits.maxDepth()) {
             throw new BundleRejection(BundleRule.PATH_TOO_DEEP,
                     "a payload path " + payloadSegments.size() + " segments deep, over the"
-                            + " configured " + limits.maxDepth() + ": '" + text + "'");
+                            + " configured " + limits.maxDepth() + ": '" + BundleRejection.quote(text) + "'");
         }
 
         return new MemberPath(String.join("/", segments), payloadPath,

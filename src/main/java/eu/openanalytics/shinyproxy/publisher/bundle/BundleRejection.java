@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.bundle;
 
+import java.nio.charset.StandardCharsets;
+
 /**
  * A bundle was refused, and this says which rule refused it.
  *
@@ -30,17 +32,53 @@ package eu.openanalytics.shinyproxy.publisher.bundle;
  * caller that forgets to look at it, and a dropped rejection here is an accepted attack.
  * Thrown, it can only be discarded deliberately.
  *
- * <p>The message is safe to log and to show a publisher: {@link #render(byte[])} escapes
- * the member name, because a name carrying control characters or invalid UTF-8 is exactly
- * the kind this class is usually reporting.
+ * <p><b>The message is printable ASCII, whatever it was built from.</b> It is logged, sent
+ * to a publisher and shown in terminals, and the names it quotes are exactly the hostile
+ * ones this class usually reports. The guarantee used to rest on every call site
+ * remembering {@link #render(byte[])}; about forty sites quoted a decoded name raw, so a
+ * member called {@code app/ok<U+202E>txt.R} put a bidi override into the log line that
+ * refused it (finding t5-e5e3071-F2). Now the constructor escapes the whole detail, so a
+ * site that forgets, and text the class does not control (an exception's message from the
+ * OS or the schema validator, which may quote the name again), cannot undo it.
+ *
+ * <p>Call sites still quote names with {@link #quote(String)} or {@link #render(byte[])},
+ * and not only for tidiness: those escape a backslash as well, so a name that literally
+ * contains the four characters {@code \x85} is not confused with one holding U+0085.
  */
 public class BundleRejection extends RuntimeException {
 
     private final BundleRule rule;
 
     public BundleRejection(BundleRule rule, String detail) {
-        super(rule.ruleName() + ": " + detail);
+        super(rule.ruleName() + ": " + printable(detail));
         this.rule = rule;
+    }
+
+    /**
+     * The detail with every character outside printable ASCII written as {@code \xNN}, one
+     * per UTF-8 byte, the same spelling {@link #render(byte[])} uses. A backslash is left
+     * alone, because the detail is already text in which rendered names have escaped
+     * theirs; rendering it again would double every escape a call site made.
+     */
+    static String printable(String detail) {
+        StringBuilder out = new StringBuilder(detail.length() + 8);
+        for (int i = 0; i < detail.length(); ) {
+            int cp = detail.codePointAt(i);
+            i += Character.charCount(cp);
+            if (cp >= 0x20 && cp < 0x7F) {
+                out.append((char) cp);
+            } else {
+                for (byte b : new String(Character.toChars(cp)).getBytes(StandardCharsets.UTF_8)) {
+                    out.append(String.format("\\x%02x", b & 0xFF));
+                }
+            }
+        }
+        return out.toString();
+    }
+
+    /** A decoded name, quoted the way {@link #render(byte[])} quotes raw bytes. */
+    public static String quote(String name) {
+        return render(name.getBytes(StandardCharsets.UTF_8));
     }
 
     public BundleRule rule() {
@@ -78,7 +116,8 @@ public class BundleRejection extends RuntimeException {
      * {@link #render} turns one byte outside printable ASCII into four, so a bound on bytes
      * bounds the output only for input that was never the problem. When the budget clips,
      * an ellipsis marks it, so the reader is told the evidence was cut rather than left to
-     * reconcile it with a count (findings 525c504-F1 and -F2).
+     * reconcile it with a count (findings 525c504-F1 and -F2). The mark is ASCII
+     * {@code ...}, since the message it lands in is printable ASCII (t5-e5e3071-F2).
      *
      * @param keepTail true to render the END of the input, for cases where the bytes next
      *                 to the truncation point are the informative ones
@@ -98,7 +137,7 @@ public class BundleRejection extends RuntimeException {
                 }
                 out.insert(0, piece);
             }
-            return "\u2026" + out;
+            return ELLIPSIS + out;
         }
         for (byte b : name) {
             String piece = render(new byte[] {b});
@@ -107,6 +146,9 @@ public class BundleRejection extends RuntimeException {
             }
             out.append(piece);
         }
-        return out + "\u2026";
+        return out + ELLIPSIS;
     }
+
+    /** What {@link #renderBounded} puts where it clipped. */
+    public static final String ELLIPSIS = "...";
 }

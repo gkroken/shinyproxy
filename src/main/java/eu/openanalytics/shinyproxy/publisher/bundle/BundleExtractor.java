@@ -195,7 +195,7 @@ public final class BundleExtractor {
             }
             if (manifest == null) {
                 throw new BundleRejection(BundleRule.MANIFEST_NOT_FIRST,
-                        "'" + path.memberPath() + "' arrives before manifest.json. The"
+                        "'" + BundleRejection.quote(path.memberPath()) + "' arrives before manifest.json. The"
                                 + " manifest is the first logical regular file, so that"
                                 + " nothing is written before the document describing it has"
                                 + " been read");
@@ -203,7 +203,7 @@ public final class BundleExtractor {
             ManifestValidator.Declared declared = validated.files().get(path.payloadPath());
             if (declared == null) {
                 throw new BundleRejection(BundleRule.INVENTORY_UNDECLARED_FILE,
-                        "S11: '" + path.payloadPath() + "' is in the archive but not in the"
+                        "S11: '" + BundleRejection.quote(path.payloadPath()) + "' is in the archive but not in the"
                                 + " manifest's files. Refused before any of it is written");
             }
             // The header's size is exactly what TarBlocks will deliver (it refuses a
@@ -211,7 +211,7 @@ public final class BundleExtractor {
             // declaration is known here, before the content is read.
             if (header.size() != declared.size()) {
                 throw new BundleRejection(BundleRule.INVENTORY_SIZE_MISMATCH,
-                        "S10: '" + path.payloadPath() + "' is " + header.size() + " bytes and"
+                        "S10: '" + BundleRejection.quote(path.payloadPath()) + "' is " + header.size() + " bytes and"
                                 + " the manifest declares " + declared.size());
             }
             MessageDigest sha256 = sha256();
@@ -221,7 +221,7 @@ public final class BundleExtractor {
             String actual = HexFormat.of().formatHex(sha256.digest());
             if (!actual.equals(declared.sha256())) {
                 throw new BundleRejection(BundleRule.INVENTORY_HASH_MISMATCH,
-                        "S10: '" + path.payloadPath() + "' has SHA-256 " + actual + " and the"
+                        "S10: '" + BundleRejection.quote(path.payloadPath()) + "' has SHA-256 " + actual + " and the"
                                 + " manifest declares " + declared.sha256());
             }
             written.add(path.payloadPath());

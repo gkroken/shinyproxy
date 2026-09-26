@@ -94,18 +94,18 @@ public final class ManifestValidator {
         String format = document.path("dependencies").path("format").textValue();
         if (!ENABLED_TYPES.contains(type)) {
             throw new BundleRejection(BundleRule.MANIFEST_TYPE_UNSUPPORTED,
-                    "S8: type '" + type + "' is registered but no reviewed recipe builds it"
+                    "S8: type '" + BundleRejection.quote(type) + "' is registered but no reviewed recipe builds it"
                             + " yet; this platform builds " + ENABLED_TYPES);
         }
         if (targetType.isPresent() && !targetType.get().equals(type)) {
             throw new BundleRejection(BundleRule.MANIFEST_TYPE_MISMATCH,
-                    "S9: the bundle is type '" + type + "' and the content it was uploaded to"
-                            + " is '" + targetType.get() + "'");
+                    "S9: the bundle is type '" + BundleRejection.quote(type) + "' and the content it was uploaded to"
+                            + " is '" + BundleRejection.quote(targetType.get()) + "'");
         }
         if (!FORMAT_OF_LANGUAGE.get(language).equals(format)) {
             throw new BundleRejection(BundleRule.MANIFEST_FORMAT_LANGUAGE_MISMATCH,
-                    "S7: dependencies.format is '" + format + "', and runtime.language '"
-                            + language + "' uses '" + FORMAT_OF_LANGUAGE.get(language) + "'");
+                    "S7: dependencies.format is '" + BundleRejection.quote(format) + "', and runtime.language '"
+                            + BundleRejection.quote(language) + "' uses '" + FORMAT_OF_LANGUAGE.get(language) + "'");
         }
 
         Map<String, Declared> files = inventory(document.path("files"), limits);
@@ -114,7 +114,7 @@ public final class ManifestValidator {
         requirePayloadPath(lockfile, false, "dependencies.path", limits);
         if (!files.containsKey(lockfile)) {
             throw new BundleRejection(BundleRule.MANIFEST_LOCKFILE_NOT_IN_INVENTORY,
-                    "S6: dependencies.path '" + lockfile + "' is not in files, so the"
+                    "S6: dependencies.path '" + BundleRejection.quote(lockfile) + "' is not in files, so the"
                             + " dependencies it pins would never be delivered");
         }
 
@@ -147,7 +147,7 @@ public final class ManifestValidator {
             String earlier = byFolded.putIfAbsent(MemberIndex.fold(path), path);
             if (earlier != null) {
                 throw new BundleRejection(BundleRule.MANIFEST_PATH_DUPLICATE,
-                        "S3: " + where + ".path '" + path + "' is the same path as '" + earlier
+                        "S3: " + where + ".path '" + BundleRejection.quote(path) + "' is the same path as '" + BundleRejection.quote(earlier)
                                 + "'" + (earlier.equals(path) ? "" : " under case folding,"
                                 + " and they would be one file on a case-insensitive system"));
             }
@@ -192,8 +192,8 @@ public final class ManifestValidator {
                 String ancestor = byFolded.get(folded.substring(0, slash));
                 if (ancestor != null) {
                     throw new BundleRejection(BundleRule.MANIFEST_PATH_DUPLICATE,
-                            "S3: '" + ancestor + "' is listed as a file and is also the"
-                                    + " directory of '" + file.getValue() + "'; one name cannot"
+                            "S3: '" + BundleRejection.quote(ancestor) + "' is listed as a file and is also the"
+                                    + " directory of '" + BundleRejection.quote(file.getValue()) + "'; one name cannot"
                                     + " be both");
                 }
             }
@@ -221,16 +221,16 @@ public final class ManifestValidator {
         requirePayloadPath(entrypoint, false, "entrypoint", limits);
         if (hasFileBeneath(entrypoint + "/", files)) {
             throw new BundleRejection(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED,
-                    "S4: entrypoint '" + entrypoint + "' is a directory; a Python Shiny"
+                    "S4: entrypoint '" + BundleRejection.quote(entrypoint) + "' is a directory; a Python Shiny"
                             + " entrypoint names a .py file");
         }
         if (!entrypoint.endsWith(".py")) {
             throw new BundleRejection(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED,
-                    "S4: entrypoint '" + entrypoint + "' does not end in .py");
+                    "S4: entrypoint '" + BundleRejection.quote(entrypoint) + "' does not end in .py");
         }
         if (!files.containsKey(entrypoint)) {
             throw new BundleRejection(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED,
-                    "S4: entrypoint '" + entrypoint + "' is not in files");
+                    "S4: entrypoint '" + BundleRejection.quote(entrypoint) + "' is not in files");
         }
     }
 
@@ -248,7 +248,7 @@ public final class ManifestValidator {
             requirePayloadPath(entrypoint, true, "entrypoint", limits);
             if (files.containsKey(entrypoint)) {
                 throw new BundleRejection(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED,
-                        "S5: entrypoint '" + entrypoint + "' is a file; an R Shiny"
+                        "S5: entrypoint '" + BundleRejection.quote(entrypoint) + "' is a file; an R Shiny"
                                 + " entrypoint names a directory ('.' for the payload root)");
             }
             prefix = entrypoint + "/";
@@ -257,7 +257,7 @@ public final class ManifestValidator {
         boolean pair = files.containsKey(prefix + "ui.R") && files.containsKey(prefix + "server.R");
         if (!single && !pair) {
             throw new BundleRejection(BundleRule.MANIFEST_ENTRYPOINT_UNRESOLVED,
-                    "S5: entrypoint '" + entrypoint + "' contains neither app.R nor both ui.R"
+                    "S5: entrypoint '" + BundleRejection.quote(entrypoint) + "' contains neither app.R nor both ui.R"
                             + " and server.R");
         }
     }
@@ -285,7 +285,7 @@ public final class ManifestValidator {
             };
             throw new BundleRejection(escapes ? BundleRule.MANIFEST_PATH_ESCAPES
                     : BundleRule.MANIFEST_PATH_NOT_CANONICAL,
-                    (escapes ? "S1: " : "S2: ") + where + " '" + path + "' is refused as an"
+                    (escapes ? "S1: " : "S2: ") + where + " '" + BundleRejection.quote(path) + "' is refused as an"
                             + " archive member would be -- " + ex.getMessage());
         }
     }

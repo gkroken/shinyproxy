@@ -107,8 +107,8 @@ public class ContainmentRulesAgreeTest {
             assertThrows(BundleRejection.class, () -> parseMember("app/a" + c + "b.txt"),
                     "MemberPath accepted " + where);
         }
-        assertEquals("a b~ .txt", ObjectKeys.validatedRenditionPath("a b~ .txt"));
-        assertEquals("a b~ .txt", parseMember("app/a b~ .txt").payloadPath());
+        assertEquals("a b~\u00a0.txt", ObjectKeys.validatedRenditionPath("a b~\u00a0.txt"));
+        assertEquals("a b~\u00a0.txt", parseMember("app/a b~\u00a0.txt").payloadPath());
     }
 
     @Test

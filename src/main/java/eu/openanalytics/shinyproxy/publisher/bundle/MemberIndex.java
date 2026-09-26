@@ -156,7 +156,7 @@ public final class MemberIndex {
     private void requireSameSpelling(Entry existing, String path) {
         if (!existing.path().equals(path)) {
             throw new BundleRejection(BundleRule.MEMBER_CASE_COLLISION,
-                    "'" + path + "' and '" + existing.path() + "' differ only by case. They"
+                    "'" + BundleRejection.quote(path) + "' and '" + BundleRejection.quote(existing.path()) + "' differ only by case. They"
                             + " are two members on this filesystem and one on a"
                             + " case-insensitive one, so which file the bundle contains"
                             + " depends on where it is unpacked");
@@ -165,20 +165,20 @@ public final class MemberIndex {
 
     private static BundleRejection duplicate(String path, String what) {
         return new BundleRejection(BundleRule.DUPLICATE_MEMBER,
-                "'" + path + "' appears twice as " + what + ". Whichever copy an extractor"
+                "'" + BundleRejection.quote(path) + "' appears twice as " + what + ". Whichever copy an extractor"
                         + " keeps, it is not the one that was validated");
     }
 
     /** The file/parent conflict, worded the same whichever of the two arrived first. */
     private static BundleRejection mustBeADirectory(String path, String because) {
         return new BundleRejection(BundleRule.MEMBER_KIND_CONFLICT,
-                "'" + path + "' is a regular member and also has to be a directory, because '"
-                        + because + "' is inside it");
+                "'" + BundleRejection.quote(path) + "' is a regular member and also has to be a directory, because '"
+                        + BundleRejection.quote(because) + "' is inside it");
     }
 
     private static BundleRejection kindConflict(String path, String was, String now) {
         return new BundleRejection(BundleRule.MEMBER_KIND_CONFLICT,
-                "'" + path + "' is " + was + " and also " + now + "; one path cannot be both");
+                "'" + BundleRejection.quote(path) + "' is " + was + " and also " + now + "; one path cannot be both");
     }
 
     /**

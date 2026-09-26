@@ -172,7 +172,7 @@ public final class PaxRecords {
 
             if (!seen.add(keyword)) {
                 throw new BundleRejection(BundleRule.PAX_DUPLICATE_KEYWORD,
-                        "the keyword '" + keyword + "' appears twice in one extended header;"
+                        "the keyword '" + BundleRejection.quote(keyword) + "' appears twice in one extended header;"
                                 + " a reader that takes the first and a reader that takes the"
                                 + " last are describing different members");
             }
@@ -180,7 +180,7 @@ public final class PaxRecords {
                 path = value;
             } else if (!IGNORED.contains(keyword)) {
                 throw new BundleRejection(BundleRule.PAX_KEYWORD_NOT_ALLOWED,
-                        "the extended header keyword '" + keyword + "' is "
+                        "the extended header keyword '" + BundleRejection.quote(keyword) + "' is "
                                 + (KNOWN_AND_REFUSED.contains(keyword) ? "not accepted here"
                                         : KNOWN_NAMESPACES.stream().anyMatch(keyword::startsWith)
                                                 ? "a vendor or POSIX-reserved extension, not"

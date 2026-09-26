@@ -281,7 +281,7 @@ public final class ExtractionRoot implements AutoCloseable {
                 return copy(content, channel);
             } catch (java.nio.file.FileAlreadyExistsException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + member.memberPath() + "' already exists in an extraction root"
+                        "'" + BundleRejection.quote(member.memberPath()) + "' already exists in an extraction root"
                                 + " this extractor created and is the only writer for");
             }
         } finally {
@@ -308,7 +308,7 @@ public final class ExtractionRoot implements AutoCloseable {
     private static List<String> requirePayload(MemberPath member) {
         if (member.role() != MemberPath.Role.PAYLOAD || member.payloadSegments().isEmpty()) {
             throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                    "'" + member.memberPath() + "' is not a payload file. This directory is"
+                    "'" + BundleRejection.quote(member.memberPath()) + "' is not a payload file. This directory is"
                             + " the payload root, and a bundle may carry its own"
                             + " 'app/manifest.json'; putting the archive's manifest here too"
                             + " would put two different members at one path");
@@ -325,7 +325,7 @@ public final class ExtractionRoot implements AutoCloseable {
             // manifest and this used to accept it, which is the asymmetry that produced
             // d13212e-F1 with the sign reversed (finding 191db7f-F2).
             throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                    "'" + member.memberPath() + "' is not a payload member, so this"
+                    "'" + BundleRejection.quote(member.memberPath()) + "' is not a payload member, so this"
                             + " directory has no place to make for it");
         }
         List<String> segments = member.payloadSegments();
@@ -365,12 +365,12 @@ public final class ExtractionRoot implements AutoCloseable {
                 next = current.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS);
             } catch (java.nio.file.NotDirectoryException | java.nio.file.NoSuchFileException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + segment + "' is not a directory this extractor can descend"
+                        "'" + BundleRejection.quote(segment) + "' is not a directory this extractor can descend"
                                 + " into: " + ex.getClass().getSimpleName()
                                 + ". A link or a substitution is the usual cause");
             } catch (IOException ex) {
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + segment + "' could not be opened as a directory: "
+                        "'" + BundleRejection.quote(segment) + "' could not be opened as a directory: "
                                 + ex.getMessage());
             }
             opened.push(next);
@@ -390,7 +390,7 @@ public final class ExtractionRoot implements AutoCloseable {
             return false;
         } catch (IOException ex) {
             throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                    "'" + segment + "' could not be examined through its parent's descriptor: "
+                    "'" + BundleRejection.quote(segment) + "' could not be examined through its parent's descriptor: "
                             + ex.getClass().getSimpleName());
         }
     }
@@ -421,14 +421,14 @@ public final class ExtractionRoot implements AutoCloseable {
                     PosixFilePermissions.asFileAttribute(PRIVATE_DIRECTORY));
         } catch (IOException ex) {
             throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                    "a directory for '" + segment + "' could not be staged in the extraction"
+                    "a directory for '" + BundleRejection.quote(segment) + "' could not be staged in the extraction"
                             + " root: " + ex.getClass().getSimpleName());
         }
         try {
             rootStream.move(staging, parent, name);
         } catch (IOException ex) {
             BundleRejection refused = new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                    "'" + segment + "' could not be put in place (" + ex.getClass()
+                    "'" + BundleRejection.quote(segment) + "' could not be put in place (" + ex.getClass()
                             .getSimpleName() + "); something other than this extractor is"
                             + " changing the tree");
             try {
@@ -568,7 +568,7 @@ public final class ExtractionRoot implements AutoCloseable {
                 // This class creates nothing else, so something else put it there. Refused
                 // rather than frozen around: the tree is not the one that was validated.
                 throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + name + "' in the extraction root is neither a file nor a"
+                        "'" + BundleRejection.quote(name.toString()) + "' in the extraction root is neither a file nor a"
                                 + " directory; something other than this extractor wrote it");
             }
         } catch (IOException ex) {
@@ -578,7 +578,7 @@ public final class ExtractionRoot implements AutoCloseable {
 
     private static BundleRejection changedUnderUs(String name, Throwable cause) {
         return new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                "the extraction root changed while it was being frozen, at '" + name + "' ("
+                "the extraction root changed while it was being frozen, at '" + BundleRejection.quote(name.toString()) + "' ("
                         + (cause == null ? "unknown" : cause.getClass().getSimpleName())
                         + "); something other than this extractor is writing to it");
     }

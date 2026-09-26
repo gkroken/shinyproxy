@@ -320,7 +320,7 @@ public class MemberPathTest {
     }
 
     private static boolean ellipsisIn(byte[] field) {
-        return messageFor(field).contains("\u2026");
+        return messageFor(field).contains(BundleRejection.ELLIPSIS);
     }
 
     /** A 155-byte ustar-prefix-shaped field: a name, its NUL padding, and bytes hidden in it. */
