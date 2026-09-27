@@ -25,7 +25,9 @@ import os
 import pathlib
 import shutil
 import subprocess
+import uuid
 
+import egress_gateway
 import quota_volume
 import shipping_worker as sw
 
@@ -68,28 +70,32 @@ def _client_config(directory):
 
 
 def build_gateway(tmp):
-    """Squid, forwarding to the registry on port 5000 and nothing else. The same
-    allow-one-host gateway dev/launcher-contract-probe.py uses; copied rather than
-    imported so this probe's network names stand alone."""
-    d = pathlib.Path(tmp)
-    (d / "squid.conf").write_text(
-        "http_port 8888\n"
-        "acl registry dstdomain %s\n"
-        "acl registry_port port 5000\n"
-        "http_access allow registry registry_port\n"
-        "http_access deny all\n"
-        "cache deny all\n"
-        "access_log stdio:/dev/stdout\n"
-        "cache_log stdio:/dev/stderr\n"
-        "pid_filename none\n"
-        "coredump_dir /tmp\n" % REGISTRY)
-    (d / "Dockerfile.gw").write_text(
-        "FROM alpine:3.20\nRUN apk add --no-cache squid\n"
-        "COPY squid.conf /etc/squid/squid.conf\nUSER squid\n"
-        'CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]\n')
-    if docker(["build", "-q", "-t", GATEWAY_IMAGE, "-f", str(d / "Dockerfile.gw"),
-               tmp], timeout=900).returncode != 0:
+    """The squid image; its configuration is dev/egress_gateway's, mounted at run time."""
+    d = pathlib.Path(tmp) / "gateway-image"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Dockerfile").write_text(egress_gateway.DOCKERFILE)
+    if docker(["build", "-q", "-t", GATEWAY_IMAGE, str(d)], timeout=900).returncode != 0:
         raise SystemExit("could not build the gateway image")
+
+
+def start_gateway(repos=(), weaken=None, add_hosts=()):
+    """(Re)starts the gateway with the shipped rule for these repository hosts. The
+    registry is always allowed. `weaken` and `add_hosts` (name:ip entries in the gateway's
+    own resolver) are for the egress probe; the defaults are what every probe runs."""
+    docker(["rm", "-f", GATEWAY])
+    conf_dir = pathlib.Path(state["tmp"]) / ("gateway-conf-%s" % (weaken or "shipped"))
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    conf = egress_gateway.write_conf(conf_dir, REGISTRY, list(repos), weaken)
+    docker(["run", "-d", "--name", GATEWAY, "--network", INNER, "--network-alias", GATEWAY,
+            "-v", "%s:/etc/squid/squid.conf:ro" % conf]
+           + ["--add-host=%s" % h for h in add_hosts] + [GATEWAY_IMAGE])
+    docker(["network", "connect", OUTER, GATEWAY])
+    for _ in range(30):
+        logs = sw.logs(GATEWAY)
+        if "Accepting HTTP" in logs:
+            return
+        subprocess.run(["sleep", "1"])
+    raise SystemExit("the gateway did not start: %s" % logs[-300:])
 
 
 def setup(tmp):
@@ -110,9 +116,8 @@ def setup(tmp):
             "-v", "%s/htpasswd:/auth/htpasswd:ro" % tmp,
             "-e", "REGISTRY_AUTH=htpasswd", "-e", "REGISTRY_AUTH_HTPASSWD_REALM=skald",
             "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd", "registry:2"])
-    docker(["run", "-d", "--name", GATEWAY, "--network", INNER, "--network-alias",
-            GATEWAY, GATEWAY_IMAGE])
-    docker(["network", "connect", OUTER, GATEWAY])
+    state["tmp"] = tmp
+    start_gateway()
     subprocess.run(["sleep", "5"])
     # The launcher seeds a base image; the worker reaches it only through the gateway. The
     # seed push is authenticated, from the host side (docker login to the published port).
@@ -173,6 +178,13 @@ def stop_worker():
     state["loop"] = None
 
 
+# Every build passes --no-cache. The worker outlives a single attempt within a probe run,
+# so an attempt whose script is byte-identical to an earlier one (a self-test re-running
+# the same matrix against a weakened gateway) was otherwise answered from BuildKit's cache:
+# the RUN never executed, and the report was the earlier run's. Measured: five gateway
+# weakenings in a row reported exactly the first one's result.
+
+
 def run_local_step(tmp, name, probe_script, stream=False):
     """Like run_probe_step, but the report comes back through the client's local export
     rather than a push and a pull: a second stage copies only /report, so nothing large
@@ -187,10 +199,16 @@ def run_local_step(tmp, name, probe_script, stream=False):
     out.mkdir(parents=True)
     os.chmod(out, 0o777)
     (ctx / "probe.sh").write_text(probe_script)
-    run = ("RUN sh /probe.sh" if stream
-           else "RUN sh /probe.sh > /report 2>&1 || true")
+    # A fresh nonce per build, appended to the report by the RUN itself: a report that does
+    # not end with THIS build's nonce did not come from this build, and is refused.
+    nonce = uuid.uuid4().hex
+    (ctx / "nonce").write_text(nonce + "\n")
+    tail = 'echo "skald_nonce=$(cat /nonce)" >> /report'
+    run = ("RUN sh /probe.sh && %s" % tail if stream
+           else "RUN (sh /probe.sh > /report 2>&1 || true) && %s" % tail)
     (ctx / "Dockerfile").write_text(
         "FROM %s:5000/base/alpine:3.20 AS run\n"
+        "COPY nonce /nonce\n"
         "COPY probe.sh /probe.sh\n"
         "%s\n"
         "FROM scratch\n"
@@ -200,7 +218,7 @@ def run_local_step(tmp, name, probe_script, stream=False):
                     "-v", "%s:/cfg:ro" % setup.client_config, "-e", "DOCKER_CONFIG=/cfg"]
                    + sw.client_args(SOCK) + ["--entrypoint", "buildctl", sw.UPSTREAM_IMAGE,
                     "--addr", sw.SOCKET_ADDR, "build", "--progress", "plain",
-                    "--frontend", "dockerfile.v0", "--local", "context=/ctx",
+                    "--no-cache", "--frontend", "dockerfile.v0", "--local", "context=/ctx",
                     "--local", "dockerfile=/ctx", "--output", "type=local,dest=/out"],
                    timeout=900)
     blob = build.stdout + build.stderr
@@ -208,7 +226,12 @@ def run_local_step(tmp, name, probe_script, stream=False):
         report = (out / "report").read_text(errors="replace")
     except OSError:
         report = ""
-    return (report if build.returncode == 0 else ""), blob
+    lines = report.rstrip("\n").split("\n")
+    if build.returncode != 0:
+        return "", blob
+    if not lines or lines[-1] != "skald_nonce=" + nonce:
+        return "", blob + "\n(the report does not carry this build's nonce: stale, refused)"
+    return "\n".join(lines[:-1]) + "\n", blob
 
 
 def run_probe_step(tmp, name, probe_script):
@@ -232,7 +255,7 @@ def run_probe_step(tmp, name, probe_script):
                     "-v", "%s:/cfg:ro" % setup.client_config, "-e", "DOCKER_CONFIG=/cfg"]
                    + sw.client_args(SOCK) + ["--entrypoint", "buildctl", sw.UPSTREAM_IMAGE,
                     "--addr", sw.SOCKET_ADDR, "build",
-                    "--frontend", "dockerfile.v0", "--local", "context=/ctx",
+                    "--no-cache", "--frontend", "dockerfile.v0", "--local", "context=/ctx",
                     "--local", "dockerfile=/ctx",
                     "--output", "type=image,name=%s,push=true" % tag], timeout=900)
     blob = build.stdout + build.stderr

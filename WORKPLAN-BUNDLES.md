@@ -1709,8 +1709,19 @@ below are marked passed by this planning document.
       carries `--memory-swap` equal to the limit (`fba1089`). Logs were bounded only by
       BuildKit's defaults, which nobody had set; they are now pinned as the profile's
       `daemon_bounds` and proved by this probe. Still owed from part 3: moving
-      `runc-rootless` from unmeasured to measured in the spec, citing these runs. Part 4
-      (the squid egress matrix) follows.
+      `runc-rootless` from unmeasured to measured in the spec, citing these runs.
+
+      Part 4, the egress deny matrix from inside a RUN step (`dev/validate-run-egress.sh`),
+      through squid as the probes now ship it (`dev/egress_gateway.py`): an allowlisted
+      repository is fetched, and every unlisted host, IP literal, private address, the
+      metadata endpoint, an ALLOWLISTED name resolving to the metadata endpoint, a suffix
+      of an allowed name, a redirect out of an allowed host, CONNECT to an unlisted host or
+      a non-443 port, a direct socket around the gateway, and external DNS are refused;
+      the registry answers but refuses writes. Each refusal must be squid's own
+      `ERR_ACCESS_DENIED`, not an unreachable host. Private (RFC 1918) destinations are
+      refused only as unlisted literals, not by rule, because an operator's mirror lives
+      on one (Q3); a configured name resolving privately is the operator's statement. The
+      tinyproxy suite (`dev/validate-egress.sh`) stays as T3's record.
 
       **The reviewer is the independent reviewer AGENT, decided 2026-09-18 by the user.**
       There will be no human security review at this gate. The two-session split in
