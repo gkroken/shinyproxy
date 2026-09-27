@@ -493,13 +493,15 @@ def self_test(tmp):
         print("  ok   destroy() detaches it")
     shutil.rmtree(probe_dir, ignore_errors=True)
 
-    # Live, launch 1: every in-worker defence removed at once -- memory and swap, pids,
-    # cpus, the log bounds (set to unlimited) -- and the quota volume without its options.
-    # Each check must go red on its own evidence.
+    # Live, launch 1: every in-worker defence removed at once -- the SWAP bound (the
+    # memory limit stays, so the memory check going red shows --memory-swap specifically
+    # is what holds it: Docker's default swap lets the growth finish), pids, cpus, the log
+    # bounds (set to unlimited) -- and the quota volume without its options. Each check
+    # must go red on its own evidence.
     print()
-    print("  -- live: a worker without --memory*, --pids-limit, --cpus, the log bounds, "
-          "and nosuid,nodev")
-    h.start_worker(omit=("--memory", "--pids-limit", "--cpus",
+    print("  -- live: a worker without --memory-swap, --pids-limit, --cpus, the log "
+          "bounds, and nosuid,nodev")
+    h.start_worker(omit=("--memory-swap", "--pids-limit", "--cpus",
                          "--env=BUILDKIT_STEP_LOG_MAX"),
                    extra=["--env=BUILDKIT_STEP_LOG_MAX_SIZE=-1",
                           "--env=BUILDKIT_STEP_LOG_MAX_SPEED=-1"],

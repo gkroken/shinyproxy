@@ -7,13 +7,13 @@
     "shape": "The launcher selects a runtime and is handed ONE profile object. It does not assemble flags from scattered constants, because a scattered flag is one an operator can drop without the profile changing.",
     "default_runtime": "runc-rootless",
     "refuse_to_start": "A runtime that cannot enforce every required bound in the selected profile MUST refuse to start the worker. It may not start it with the bounds it does have. A seam that silently degrades turns the profile from a description of a state into a description of an intention -- and 'we run rootless' then becomes a sentence nobody has checked in a year.",
-    "selectable_rule": "A runtime is selectable ONLY when status is 'measured' and its enforces list covers every required bound. Anything else is selectable: false, including the default. This is not pessimism: T3 has measured one runtime, and decision 6's gate says the production driver connects only after T3/T5 pass. The file therefore says what is true today rather than what is intended.",
+    "selectable_rule": "A runtime is selectable ONLY when status is 'measured' and its enforces list covers every required bound. Anything else is selectable: false, including the default. Selectable says the measurement exists, not that a production driver may connect: decision 6's gate decides that, after T3/T5 pass. The file says what is true today rather than what is intended.",
 
     "runtimes": {
       "runc-rootful": {
         "status": "measured",
         "selectable": true,
-        "measured_by": "dev/validate-sandbox.sh",
+        "measured_by": ["dev/validate-sandbox.sh"],
         "measured_on": "2026-09-18; memory swap added and all ten re-run 2026-09-26",
         "enforces": [
           "cpu quota",
@@ -27,12 +27,104 @@
           "network none",
           "seccomp"
         ],
+        "proofs": {
+          "cpu quota": {
+            "file": "dev/sandbox-probe.py",
+            "check": "cpu quota"
+          },
+          "memory limit": {
+            "file": "dev/sandbox-probe.py",
+            "check": "memory limit"
+          },
+          "memory swap": {
+            "file": "dev/sandbox-probe.py",
+            "check": "memory swap"
+          },
+          "pid limit": {
+            "file": "dev/sandbox-probe.py",
+            "check": "pid limit"
+          },
+          "no-new-privileges": {
+            "file": "dev/sandbox-probe.py",
+            "check": "no-new-privileges"
+          },
+          "read-only rootfs": {
+            "file": "dev/sandbox-probe.py",
+            "check": "read-only rootfs"
+          },
+          "sized tmpfs": {
+            "file": "dev/sandbox-probe.py",
+            "check": "sized tmpfs"
+          },
+          "loop-backed volume": {
+            "file": "dev/sandbox-probe.py",
+            "check": "loop-backed volume"
+          },
+          "network none": {
+            "file": "dev/sandbox-probe.py",
+            "check": "network none"
+          },
+          "seccomp": {
+            "file": "dev/sandbox-probe.py",
+            "check": "seccomp"
+          }
+        },
         "note": "What T3(a) actually measured, 9 of 9, and 10 of 10 since the memory swap bound (2026-09-26). It is NOT the shipping default: an escape from a rootful worker lands as host UID 0, and this host has no AppArmor behind that. Recorded as selectable because it is the one runtime whose bounds are demonstrated, and because a file that marks every runtime unselectable would be a file nobody can act on."
       },
       "runc-rootless": {
-        "status": "unmeasured",
-        "selectable": false,
-        "enforces": [],
+        "status": "measured",
+        "selectable": true,
+        "measured_by": ["dev/validate-shipping-worker.sh", "dev/validate-run-bounds.sh", "dev/validate-run-egress.sh", "dev/validate-run-attacks.sh"],
+        "measured_on": "2026-09-27",
+        "enforces": [
+          "cpu quota",
+          "memory limit",
+          "memory swap",
+          "pid limit",
+          "read-only rootfs",
+          "sized tmpfs",
+          "loop-backed volume",
+          "network none",
+          "seccomp"
+        ],
+        "proofs": {
+          "cpu quota": {
+            "file": "dev/run-bounds-probe.py",
+            "check": "cpu is bounded from a RUN"
+          },
+          "memory limit": {
+            "file": "dev/run-bounds-probe.py",
+            "check": "memory is bounded from a RUN"
+          },
+          "memory swap": {
+            "file": "dev/run-bounds-probe.py",
+            "check": "memory is bounded from a RUN"
+          },
+          "pid limit": {
+            "file": "dev/run-bounds-probe.py",
+            "check": "fork is bounded from a RUN"
+          },
+          "read-only rootfs": {
+            "file": "dev/shipping-worker-probe.py",
+            "check": "the root filesystem is read-only"
+          },
+          "sized tmpfs": {
+            "file": "dev/shipping-worker-probe.py",
+            "check": "the scratch tmpfs is sized and noexec"
+          },
+          "loop-backed volume": {
+            "file": "dev/run-bounds-probe.py",
+            "check": "disk is bounded from a RUN"
+          },
+          "network none": {
+            "file": "dev/run-egress-probe.py",
+            "check": "no direct socket off the host"
+          },
+          "seccomp": {
+            "file": "dev/shipping-worker-probe.py",
+            "check": "the worker's seccomp filter reaches the RUN"
+          }
+        },
         "waived": {
           "no_new_privileges": {
             "decided": "2026-09-26 by the user (gate finding t5-e5e3071-F6), after the shipping launch was measured",
@@ -45,12 +137,12 @@
             "measured_by": "dev/validate-shipping-worker.sh"
           }
         },
-        "owes": [
-          "repeat all the probes (ten since memory swap) in rootless mode; the rootful measurements do not transfer, because the enforcing agent changes",
-          "a Delegate= drop-in for the user manager, or evidence that the root cgroup's existing delegation reaches a rootless worker",
-          "a replacement for the loop-backed ext4 quota, which today is attached by privileged setup containers a rootless worker will not have"
-        ],
-        "note": "Decision 6's intended default and the user's 2026-09-18 choice. Unmeasured is not a criticism of the choice; it is the state of the evidence, and selectable: false is what stops the intention being mistaken for the measurement."
+        "resolved": {
+          "repeat the probes in rootless mode": "Done in gate finding t5-e5e3071-F6, parts 1-4 (2026-09-26/27): each enforced bound is measured from inside a real RUN step, or on the running worker, under the shipping launch, each with an allow control and a self-test that restarts the worker without the defence -- see proofs. The rootful numbers were not carried over.",
+          "a Delegate= drop-in, or evidence the delegation reaches a rootless worker": "Not needed for this deployment: the worker is rootless BuildKit inside a container started by the platform's Docker daemon, so the cgroup bounds are applied by that daemon to the worker's cgroup, and the RUN-step measurements (cpu 2.0 cores under a 2-core quota, memory killed at 1984 MiB under 2g, fork refused below 512) are the evidence that they reach build code three layers down. A deployment running the worker under a user manager instead would need this again.",
+          "a replacement for the loop-backed quota attached by privileged setup containers": "Not replaced, and deliberately: the quota volume is attached by the trusted LAUNCHER (dev/quota_volume.py, two one-off privileged setup containers, never shared with the worker), which decision 6 allows the platform's Docker control plane to do. The worker receives the volume, mounted nosuid,nodev, never the device. Measured from a RUN: writes stop with ENOSPC at the quota."
+        },
+        "note": "Decision 6's default and the user's 2026-09-18 choice, measured 2026-09-27 under the shipping launch. The waived no-new-privileges is covered only through its waiver and its three replacement checks. Selectable because it is measured and covers every bound; decision 6's gate still decides when a production driver connects (after the T5 gate re-verifies F6)."
       },
       "runsc": {
         "status": "candidate",
@@ -223,6 +315,7 @@
     "Every daemon bound names a probe that dev/run-bounds-probe.py records with kind='bound' and the same literal argument, and every such probe is claimed by exactly one daemon bound -- the rules above, against the RUN-step probe. Daemon bounds are enforced by buildkitd whatever the runtime, so no runtime lists them.",
     "No forbidden argument may appear in any bound's or daemon bound's argument.",
     "A runtime is selectable only if it is measured and enforces every bound. The default is not exempt.",
-    "The measured runtime is rootful; the default is rootless and unmeasured. Until that changes, this file records an intention and one measurement, and says which is which."
+    "Every enforced bound of a measured runtime names its proof: a probe file and the literal name of the check in it that measured the bound UNDER THAT RUNTIME. A runtime cannot borrow another's measurement -- the rootful numbers never counted for rootless, because the enforcing agent changes.",
+    "Both runc runtimes are measured (rootful by T3(a), rootless by gate finding t5-e5e3071-F6); the default is rootless. runsc and kata are not."
   ]
 }

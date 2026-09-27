@@ -793,6 +793,19 @@ def _argument_agrees(name, b, recorded_args, fail):
 RUN_BOUNDS_PROBE = "dev/run-bounds-probe.py"
 
 
+def _check_names(path):
+    """The literal names a probe file gives its checks: the first argument of every call
+    to record() or row() that is a string literal. Parsed statically, like the rest."""
+    import ast
+    names = set()
+    for node in ast.walk(ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("record", "row")
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            names.add(node.args[0].value)
+    return names
+
+
 def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
     """The literal launch arguments, bound to the probes that demonstrate them.
 
@@ -956,6 +969,47 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
                 fail("runtime %s both enforces and waives %s" % (rt, name))
             waived_probes[rt].add(probe)
 
+    # Proofs. A measured runtime names, for every bound it enforces, the probe file and the
+    # literal name of the check that measured it UNDER THAT RUNTIME, and the file must be
+    # one its measured_by scripts run. Without this, "measured" was a status word: rootless
+    # stayed unmeasured for weeks while rootful's numbers sat one key away, and nothing
+    # would have stopped a runtime claiming bounds another runtime's probe had measured.
+    for rt, r in sorted(runtimes.items()):
+        if r.get("status") != "measured":
+            continue
+        scripts = r.get("measured_by") or []
+        if isinstance(scripts, str):
+            scripts = [scripts]
+        texts = []
+        for script in scripts:
+            if not pathlib.Path(script).exists():
+                fail("runtime %s is measured_by %r, which does not exist" % (rt, script))
+            else:
+                texts.append(pathlib.Path(script).read_text(encoding="utf-8"))
+        if not scripts:
+            fail("runtime %s is measured but names no measured_by script" % rt)
+        proofs = r.get("proofs") or {}
+        for bound_probe in sorted(r.get("enforces") or []):
+            proof = proofs.get(bound_probe)
+            if not proof or not proof.get("file") or not proof.get("check"):
+                fail("runtime %s enforces %r but names no proof (file and check) for it"
+                     % (rt, bound_probe))
+                continue
+            if not pathlib.Path(proof["file"]).exists():
+                fail("runtime %s's proof of %r names %s, which does not exist"
+                     % (rt, bound_probe, proof["file"]))
+                continue
+            if not any(proof["file"] in t for t in texts):
+                fail("runtime %s's proof of %r is in %s, which none of its measured_by "
+                     "scripts runs" % (rt, bound_probe, proof["file"]))
+            if proof["check"] not in _check_names(proof["file"]):
+                fail("runtime %s's proof of %r cites check %r, which %s does not record"
+                     % (rt, bound_probe, proof["check"], proof["file"]))
+        stray = sorted(set(proofs) - set(r.get("enforces") or []))
+        if stray:
+            fail("runtime %s gives proofs for %s, which it does not claim to enforce"
+                 % (rt, ", ".join(stray)))
+
     # The seam's selectable rule, which is the refuse-to-start clause in machine form.
     # A waived bound counts as covered only through a waiver that passed the checks above.
     required = set(bounds[n]["probe"] for n in bounds if bounds[n].get("probe"))
@@ -993,6 +1047,10 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
                 "nothing fixed can become configurable unnoticed" % n_ph)
     good.append("  ok   %d fact(s) held apart from bounds; %d forbidden argument(s) absent "
                 "from the launch line" % (len(probe_facts), len(forbidden)))
+    n_proofs = sum(len((r.get("proofs") or {})) for r in runtimes.values()
+                   if r.get("status") == "measured")
+    good.append("  ok   %d proof(s): every bound a measured runtime enforces names the check "
+                "that measured it under that runtime" % n_proofs)
     good.append("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
                 % (", ".join(selectable), len(runtimes) - len(selectable)))
     return bad, good
@@ -1283,9 +1341,15 @@ ISOLATION_CASES = [
     ("the forbidden list emptied",
      lambda d: d["profiles"]["build-worker"].__setitem__("forbidden_arguments", []),
      "lists no forbidden arguments"),
+    # runsc, not runc-rootless: rootless is measured and selectable since the F6 spec
+    # flip, so marking it selectable would mutate nothing and the case would pass vacuously.
     ("an unmeasured runtime marked selectable",
-     lambda d: _rt(d)["runc-rootless"].__setitem__("selectable", True),
+     lambda d: _rt(d)["runsc"].__setitem__("selectable", True),
      "only a measured runtime"),
+    ("the rootless runtime missing a bound",
+     lambda d: (_rt(d)["runc-rootless"]["enforces"].remove("seccomp"),
+                _rt(d)["runc-rootless"]["proofs"].pop("seccomp")),
+     "runc-rootless is selectable but does not enforce seccomp"),
     ("a selectable runtime missing a bound",
      lambda d: _rt(d)["runc-rootful"].__setitem__(
          "enforces", [e for e in _rt(d)["runc-rootful"]["enforces"]
@@ -1297,8 +1361,9 @@ ISOLATION_CASES = [
     # Needs BOTH edits: clearing the flag alone is caught by the measured-but-not-
     # selectable branch instead, which would leave this one untested (f1078e5-F1).
     ("no runtime selectable at all",
-     lambda d: (_rt(d)["runc-rootful"].__setitem__("selectable", False),
-                _rt(d)["runc-rootful"].__setitem__("status", "unmeasured")),
+     lambda d: [(_rt(d)[r].__setitem__("selectable", False),
+                 _rt(d)[r].__setitem__("status", "unmeasured"))
+                for r in ("runc-rootful", "runc-rootless")],
      "constrains nothing"),
     # Daemon bounds (t5-e5e3071-F6 part 3): the same correspondence, against
     # dev/run-bounds-probe.py.
@@ -1320,6 +1385,35 @@ ISOLATION_CASES = [
      lambda d: d["profiles"]["build-worker"]["daemon_bounds"]["step_log_size"]
      .__setitem__("argument", "--privileged"),
      "decision 6 forbids"),
+    # Proofs (t5-e5e3071-F6 spec flip): a measured runtime cites, per enforced bound, the
+    # check that measured it under that runtime.
+    ("a measured runtime with a bound and no proof",
+     lambda d: _rt(d)["runc-rootless"]["proofs"].pop("cpu quota"),
+     "enforces 'cpu quota' but names no proof"),
+    ("a proof citing a check the file does not record",
+     lambda d: _rt(d)["runc-rootless"]["proofs"]["seccomp"].__setitem__(
+         "check", "the worker is probably fine"),
+     "which dev/shipping-worker-probe.py does not record"),
+    ("a proof in a file no measured_by script runs",
+     lambda d: _rt(d)["runc-rootless"]["proofs"]["network none"].__setitem__(
+         "file", "dev/egress-probe.py"),
+     "none of its measured_by scripts runs"),
+    ("a proof borrowed from another runtime's probe",
+     lambda d: _rt(d)["runc-rootless"]["proofs"].__setitem__(
+         "pid limit", {"file": "dev/sandbox-probe.py", "check": "pid limit"}),
+     "none of its measured_by scripts runs"),
+    ("a proof whose file does not exist",
+     lambda d: _rt(d)["runc-rootless"]["proofs"]["seccomp"].__setitem__(
+         "file", "dev/no-such-probe.py"),
+     "which does not exist"),
+    ("a measured_by script that does not exist",
+     lambda d: _rt(d)["runc-rootless"]["measured_by"].append("dev/no-such-script.sh"),
+     "is measured_by 'dev/no-such-script.sh', which does not exist"),
+    ("a proof for a bound the runtime does not claim",
+     lambda d: _rt(d)["runc-rootless"]["proofs"].__setitem__(
+         "no-new-privileges", {"file": "dev/shipping-worker-probe.py",
+                               "check": "the worker holds no capabilities"}),
+     "which it does not claim to enforce"),
     ("the build-worker profile deleted",
      lambda d: d.__setitem__("profiles", {}), "declares no build-worker"),
     ("the runtimes map emptied",
