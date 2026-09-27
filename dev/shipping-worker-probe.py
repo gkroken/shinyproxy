@@ -26,6 +26,10 @@ Checks, each with an allow control:
         not any host subuid/subgid range, per the host's own files
      6. the worker holds no capabilities (PID 1's CapEff and CapPrm are 0)
   7. the root filesystem is read-only, and the tmpfs and the workspace are writable
+     7b. the scratch tmpfs, measured: writes stop at its size, an executable there does
+         not run, and the kernel reports noexec,nosuid,nodev
+     7c. the worker's seccomp filter reaches the RUN (the worker filtered, and the RUN
+         carrying the worker's filter plus runc's own)
   8. no worker's state outlives it (the workspace volume included)
 
 Usage: python3 dev/shipping-worker-probe.py [--json] [--self-test]
@@ -165,6 +169,63 @@ def judge_caps(status):
     return ok, "CapEff %s, CapPrm %s" % (eff, prm)
 
 
+def _status_field(text, key):
+    for line in text.splitlines():
+        if line.startswith(key + ":"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def judge_seccomp_inherited(run_status, worker_status):
+    """(ok, detail): the worker's filter reaches the RUN. The worker's PID 1 must be in
+    filter mode with at least one filter (the shipped one -- check 1 compares its JSON),
+    and the RUN must carry more filters than the worker: the worker's, inherited, plus
+    runc's own. With an unconfined worker the RUN has only runc's, which is what the
+    self-test shows. A mode of 2 in the RUN alone cannot tell the two apart."""
+    w_mode, w_n = _status_field(worker_status, "Seccomp"), _status_field(
+        worker_status, "Seccomp_filters")
+    r_mode, r_n = _status_field(run_status, "Seccomp"), _status_field(
+        run_status, "Seccomp_filters")
+    try:
+        ok = (w_mode == "2" and r_mode == "2" and int(w_n) >= 1
+              and int(r_n) >= int(w_n) + 1)
+    except ValueError:
+        ok = False
+    return ok, "worker: mode %s, %s filter(s); RUN: mode %s, %s filter(s)" % (
+        w_mode or "?", w_n or "?", r_mode or "?", r_n or "?")
+
+
+TMPFS_CAP = 256 * 1024 * 1024   # tmpfs_size "256m"
+
+
+def judge_tmpfs(written, exec_out, options, cap=TMPFS_CAP):
+    """(ok, detail) for the worker's /tmp: writes stop at the size, an executable there
+    does not run, and noexec,nosuid,nodev are what the kernel reports."""
+    capped = 0 < written <= cap
+    noexec = exec_out != "" and "RAN" not in exec_out
+    present = [o for o in ("noexec", "nosuid", "nodev") if o in options.split(",")]
+    ok = capped and noexec and len(present) == 3
+    return ok, "asked for 300 MiB, wrote %d bytes (cap %d); exec gave %r; options %s" % (
+        written, cap, exec_out[:40], options or "none read")
+
+
+def measure_tmpfs():
+    """What the worker's own /tmp does, from inside the worker as its uid."""
+    got = docker(["exec", WORKER, "sh", "-c",
+                  "dd if=/dev/zero of=/tmp/fill bs=1M count=300 2>/dev/null; "
+                  "stat -c %s /tmp/fill; rm -f /tmp/fill; "
+                  "printf '#!/bin/sh\\necho RAN\\n' > /tmp/x; chmod +x /tmp/x; "
+                  "/tmp/x 2>&1 | tail -1; rm -f /tmp/x; "
+                  "awk '$2==\"/tmp\"{print $4}' /proc/mounts"])
+    lines = [l for l in got.stdout.strip().splitlines() if l.strip()]
+    try:
+        written = int(lines[0])
+    except (ValueError, IndexError):
+        written = -1
+    return (written, lines[1] if len(lines) > 1 else "",
+            lines[2] if len(lines) > 2 else "")
+
+
 # ------------------------------------------------------------------ observations
 
 def scan_image(image):
@@ -223,7 +284,7 @@ def make_context(tmp, name, run):
 
 
 RUN_REPORT = ("B=/bin/busybox; echo $((6*7))-RAN > /o.txt; $B cat /proc/self/uid_map > /uid_map; "
-              "$B cat /proc/self/gid_map > /gid_map")
+              "$B cat /proc/self/gid_map > /gid_map; $B cat /proc/self/status > /status")
 
 
 def run_build(ctx, out):
@@ -351,6 +412,19 @@ def main(argv):
                    "ok" if scratch_ok else "refused", "ok" if workspace_ok else "refused"),
                root_refused and scratch_ok and workspace_ok)
 
+        # 7b. The scratch tmpfs, measured rather than read from the configuration.
+        ok, detail = judge_tmpfs(*measure_tmpfs())
+        record("the scratch tmpfs is sized and noexec",
+               "writes stop at tmpfs_size; an executable in /tmp does not run; "
+               "noexec,nosuid,nodev in /proc/mounts", detail, ok)
+
+        # 7c. The worker's seccomp filter reaches build code.
+        worker_status = docker(["exec", WORKER, "cat", "/proc/1/status"]).stdout
+        ok, detail = judge_seccomp_inherited(read(out / "status"), worker_status)
+        record("the worker's seccomp filter reaches the RUN",
+               "worker PID 1 filtered; the RUN carries the worker's filter plus its own",
+               detail, ok)
+
         # 4. The image the worker runs.
         ok, detail = judge_privilege_files(scan_image(sw.BUILDKIT_IMAGE),
                                            sw.PRIVILEGED_HELPERS)
@@ -450,6 +524,16 @@ def self_test(tmp, profile):
     no_swap_bound["HostConfig"]["MemorySwap"] = 2 * exp["memory"]
     expect_fail("--memory without --memory-swap (Docker's default: as much again in swap)",
                 judge_hostconfig(no_swap_bound, exp))
+    expect_fail("a RUN with only its own filter",
+                judge_seccomp_inherited("Seccomp:\t2\nSeccomp_filters:\t1\n",
+                                        "Seccomp:\t2\nSeccomp_filters:\t1\n"))
+    expect_fail("a status with no seccomp lines", judge_seccomp_inherited("", ""))
+    expect_fail("a tmpfs written past its cap", judge_tmpfs(
+        300 * 1024 * 1024, "Permission denied", "rw,nosuid,nodev,noexec"))
+    expect_fail("a tmpfs that runs a payload", judge_tmpfs(
+        1024, "RAN", "rw,nosuid,nodev,noexec"))
+    expect_fail("a tmpfs whose options were not read", judge_tmpfs(
+        1024, "Permission denied", ""))
     expect_fail("a different seccomp profile",
                 judge_hostconfig(conforming("seccomp=" + json.dumps(weaker)), exp))
     expect_fail("a seccomp option that is a path, not the profile",
@@ -462,8 +546,24 @@ def self_test(tmp, profile):
 
     # Live: the worker launched without --read-only. The configuration check and the
     # write check must both notice.
-    launch(tmp, profile, omit=["--read-only"])
+    # Also without the sized tmpfs and with an unconfined worker, so the tmpfs and seccomp
+    # checks are shown red on a real worker, not only on strings.
+    launch(tmp, profile, omit=["--read-only", "--tmpfs", "--security-opt=seccomp"],
+           extra=["--security-opt=seccomp=unconfined"])
     if sw.wait_ready(WORKER):
+        expect_fail("the worker's /tmp without the sized noexec tmpfs",
+                    judge_tmpfs(*measure_tmpfs()))
+        out = pathlib.Path(tmp) / "out-unconfined"
+        rc, blob = run_build(make_context(tmp, "unconfined", RUN_REPORT), str(out))
+        if rc != 0:
+            print("  FAIL no RUN built under the unconfined worker, so the seccomp check "
+                  "was not shown red: %s" % blob.strip()[-120:])
+            missed.append("live seccomp")
+        else:
+            expect_fail("an unconfined worker's RUN",
+                        judge_seccomp_inherited(
+                            read(out / "status"),
+                            docker(["exec", WORKER, "cat", "/proc/1/status"]).stdout))
         inspected = json.loads(docker(["inspect", WORKER]).stdout or "[{}]")[0]
         expect_fail("the launch without --read-only",
                     judge_hostconfig(inspected, expected_config(profile)))
