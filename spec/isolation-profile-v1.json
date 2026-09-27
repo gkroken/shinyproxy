@@ -241,7 +241,7 @@
           "placeholders": ["egress_network"],
           "configurable": true,
           "enforced_by": "a Docker network with no route off-host except the configured egress gateway; `none` is the measured floor",
-          "why": "Q3 set the rule as deny-all except the configured repository hosts. `--network none` is what the probe demonstrates and is the floor the gateway is measured against; the gateway itself is T3's remaining work and is NOT proved by this bound."
+          "why": "Q3 set the rule as deny-all except the configured repository hosts. `--network none` is what dev/sandbox-probe.py demonstrates, the floor. The shipped network -- an internal network whose only way off the host is the egress gateway -- is measured under the rootless worker by dev/run-egress-probe.py (t5-e5e3071-F6 part 4): no direct socket off the host or to a repository, and squid's deny matrix. The probe NAME 'network none' is inherited from the rootful probe and says less than that; renaming it is left to the next change of this file's vocabulary (7388c8d review N1)."
         },
         "seccomp": {
           "argument": "--security-opt=seccomp=<seccomp_profile>",
