@@ -14,17 +14,25 @@ probes run -- the RUN-attack harness and dev/run-egress-probe.py alike -- so the
 is measured is the rule that is shipped as the reference for T7.
 
 The rule, in the order squid evaluates it (first match wins):
-  1. link-local destinations (169.254.0.0/16, fe80::/10) are refused, whatever the NAME
-     resolved from. This is the cloud metadata endpoint. A repository never lives there,
-     and an allowlisted name the operator's DNS points at it (or rebinding) must not become
-     a path to instance credentials. An IP literal is refused by rule 5 anyway; this rule
-     is for names.
+  1. instance-metadata destinations are refused, whatever the NAME resolved from: all of
+     link-local (169.254.0.0/16, fe80::/10 -- AWS, GCP, Azure, OCI, OpenStack and most
+     others serve metadata at 169.254.169.254) plus the known metadata addresses outside
+     it, METADATA_ADDRESSES below (AWS's IPv6 endpoint, Alibaba Cloud's). A repository
+     never lives at one, and an allowlisted name the operator's DNS points there (or
+     rebinding) must not become a path to instance credentials. This is a LIST, not a
+     guarantee: a provider whose endpoint is not on it is not covered, which is why the
+     list is named here rather than described as "the metadata endpoint". Whole ranges
+     were rejected where a mirror can legitimately live (100.64.0.0/10 also carries
+     carrier-grade NAT and overlay networks such as Tailscale). An IP literal is refused
+     by rule 5 anyway; this rule is for names.
   2. the gateway's own loopback (to_localhost) is refused: squid's cache manager and any
      sidecar listening there are not a build's business.
   3. CONNECT (how HTTPS crosses a proxy) only to port 443.
   4. the registry, on its port; then each configured repository host, by EXACT name
      (dstdomain without a leading dot: no subdomains, and not a regex, so
-     `allowed-repo.evil` does not match `allowed-repo`).
+     `allowed-repo.evil` does not match `allowed-repo`), and only on the repository ports
+     (80 and 443 by default). A mirror's other ports -- an admin API, a database, a
+     metrics endpoint -- are not a build's business (b3d129f-F1).
   5. everything else is refused.
 
 Private (RFC 1918) destinations are NOT refused by rule: an operator's own mirror (Nexus,
@@ -43,15 +51,22 @@ removed. The shipped configuration is weaken=None.
 import pathlib
 
 PORT = 8888
-WEAKENINGS = ("allow_all", "no_linklocal_deny", "unanchored", "any_connect_port")
+# Instance-metadata addresses outside link-local, denied by address (b3d129f-F2).
+METADATA_ADDRESSES = ("fd00:ec2::254/128",      # AWS, IPv6 IMDS
+                      "100.100.100.200/32")     # Alibaba Cloud
+REPO_PORTS = (80, 443)
+WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
+              "any_repo_port")
 
 
-def squid_conf(registry, repos, weaken=None):
-    """The squid.conf text. `repos` are the configured repository host names."""
+def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
+    """The squid.conf text. `repos` are the configured repository host names, reachable
+    on `repo_ports`."""
     if weaken not in (None,) + WEAKENINGS:
         raise ValueError("unknown weakening %r" % weaken)
     lines = ["http_port %d" % PORT,
-             "acl linklocal dst 169.254.0.0/16 fe80::/10",
+             "acl metadata dst 169.254.0.0/16 fe80::/10 %s" % " ".join(METADATA_ADDRESSES),
+             "acl repo_ports port %s" % " ".join(str(p) for p in repo_ports),
              "acl SSL_ports port 443",
              "acl CONNECT method CONNECT",
              "acl registry dstdomain %s" % registry,
@@ -63,8 +78,8 @@ def squid_conf(registry, repos, weaken=None):
                 r.replace(".", r"\.") for r in repos))
         else:
             lines.append("acl repos dstdomain %s" % " ".join(repos))
-    if weaken != "no_linklocal_deny":
-        lines.append("http_access deny linklocal")
+    if weaken != "no_metadata_deny":
+        lines.append("http_access deny metadata")
     lines.append("http_access deny to_localhost")
     if weaken != "any_connect_port":
         lines.append("http_access deny CONNECT !SSL_ports")
@@ -72,7 +87,8 @@ def squid_conf(registry, repos, weaken=None):
         lines.append("http_access allow all")
     lines.append("http_access allow registry registry_port")
     if repos:
-        lines.append("http_access allow repos")
+        lines.append("http_access allow repos" if weaken == "any_repo_port"
+                     else "http_access allow repos repo_ports")
     lines += ["http_access deny all",
               "cache deny all",
               "access_log stdio:/dev/stdout",

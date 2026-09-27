@@ -17,8 +17,9 @@ The matrix, each row judged on what squid itself answered -- a refusal must be s
   control   an allowlisted repository is fetched (without it every denial is meaningless)
   unlisted  a host not on the allowlist, by name and by IP literal
   private   an RFC 1918 IP literal
-  metadata  169.254.169.254, by IP literal, and by an ALLOWLISTED name that resolves to
-            it (rebinding, or an operator's DNS pointing there)
+  metadata  169.254.169.254, by IP literal, and ALLOWLISTED names that resolve to it, to
+            AWS's IPv6 endpoint and to Alibaba's (rebinding, or an operator's DNS)
+  port      an allowlisted repository on a port that is not a repository port
   suffix    a name that extends an allowlisted one (allowed-repo.evil)
   redirect  an allowed repository redirecting to an unlisted host and to the metadata
             endpoint: the client follows, and the second hop must be refused; a redirect
@@ -50,8 +51,13 @@ results = []
 
 ALLOWED, DENIED, SUFFIX, REBIND = ("allowed-repo", "denied-host", "allowed-repo.evil",
                                    "rebind-repo")
-REPOS = [ALLOWED, REBIND]
 METADATA = "169.254.169.254"
+# Allowlisted names the gateway's resolver points at each kind of metadata address: the
+# link-local one most clouds use, and the two outside link-local (b3d129f-F2).
+REBINDS = {REBIND: METADATA, "rebind-aws6": "fd00:ec2::254",
+           "rebind-alibaba": "100.100.100.200"}
+REPOS = [ALLOWED] + sorted(REBINDS)
+ADD_HOSTS = ["%s:%s" % (name, addr) for name, addr in sorted(REBINDS.items())]
 HOSTS = {ALLOWED: "ALLOWED-CONTENT", DENIED: "DENIED-CONTENT", SUFFIX: "EVIL-CONTENT"}
 
 
@@ -147,13 +153,19 @@ get unlisted_ip http://%(denied_ip)s/
 get private_ip http://10.255.255.1/
 get metadata http://%(metadata)s/latest/meta-data/
 get rebind http://%(rebind)s/
+get rebind_aws6 http://rebind-aws6/
+get rebind_alibaba http://rebind-alibaba/
+get repo_badport http://%(allowed)s:6379/
 get suffix http://%(suffix)s/
 get redirect_ok http://%(allowed)s/cgi-bin/to-self
 get redirect_unlisted http://%(allowed)s/cgi-bin/to-denied
 get redirect_meta http://%(allowed)s/cgi-bin/to-meta
 connect connect_allowed %(allowed)s 443
 connect connect_unlisted %(denied)s 443
-connect connect_badport %(allowed)s 22
+# Port 80, not an arbitrary one: 80 is a repository port, so only the CONNECT-to-443 rule
+# refuses this tunnel. Against port 22 the repository-port rule refused it as well, and a
+# gateway without the CONNECT rule still passed (measured, b3d129f-F1 follow-up).
+connect connect_badport %(allowed)s 80
 direct direct_control %(gate_ip)s 8888
 direct direct_repo %(allowed_ip)s 80
 direct direct_internet 1.1.1.1 53
@@ -222,6 +234,12 @@ def judge(report):
     row("metadata endpoint refused", policy_denied(r, "metadata"), "metadata")
     row("allowlisted name resolving to metadata refused", policy_denied(r, "rebind"),
         "rebind")
+    row("allowlisted name resolving to AWS IPv6 metadata refused",
+        policy_denied(r, "rebind_aws6"), "rebind_aws6")
+    row("allowlisted name resolving to Alibaba metadata refused",
+        policy_denied(r, "rebind_alibaba"), "rebind_alibaba")
+    row("allowlisted repository on another port refused", policy_denied(r, "repo_badport"),
+        "repo_badport")
     row("suffix of an allowed name refused", policy_denied(r, "suffix", "EVIL-CONTENT"),
         "suffix")
     redirect_ok = (fields(r.get("redirect_ok", "")).get("first") == "302"
@@ -272,7 +290,7 @@ def run_matrix(tmp, label):
 
 
 def shipped_gateway(weaken=None):
-    h.start_gateway(repos=REPOS, weaken=weaken, add_hosts=["%s:%s" % (REBIND, METADATA)])
+    h.start_gateway(repos=REPOS, weaken=weaken, add_hosts=ADD_HOSTS)
 
 
 def main(argv):
@@ -316,8 +334,12 @@ WEAKENINGS = [
     ("allow all before deny all", dict(weaken="allow_all"),
      ["unlisted host refused by squid", "unlisted host refused by IP",
       "private IP literal refused", "suffix of an allowed name refused"]),
-    ("no link-local deny", dict(weaken="no_linklocal_deny"),
-     ["allowlisted name resolving to metadata refused"]),
+    ("no metadata deny", dict(weaken="no_metadata_deny"),
+     ["allowlisted name resolving to metadata refused",
+      "allowlisted name resolving to AWS IPv6 metadata refused",
+      "allowlisted name resolving to Alibaba metadata refused"]),
+    ("repositories on any port", dict(weaken="any_repo_port"),
+     ["allowlisted repository on another port refused"]),
     ("the allowlist unanchored", dict(weaken="unanchored"),
      ["suffix of an allowed name refused"]),
     ("CONNECT to any port", dict(weaken="any_connect_port"),
@@ -357,8 +379,7 @@ def self_test(tmp):
     for label, kw, must_fail in WEAKENINGS:
         weaken = kw.get("weaken")
         repos = kw.get("repos", REPOS)
-        h.start_gateway(repos=repos, weaken=weaken,
-                        add_hosts=["%s:%s" % (REBIND, METADATA)])
+        h.start_gateway(repos=repos, weaken=weaken, add_hosts=ADD_HOSTS)
         rows, blob = run_matrix(tmp, label.replace(" ", "-"))
         if rows is None:
             print("  FAIL %s: no report: %s" % (label, blob.strip()[-120:]))
