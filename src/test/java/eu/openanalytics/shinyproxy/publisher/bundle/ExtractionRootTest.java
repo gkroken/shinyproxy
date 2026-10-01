@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 /**
  * The write path, against a real filesystem and real symlinks.
@@ -232,6 +233,56 @@ public class ExtractionRootTest {
             assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, gone.rule());
             assertTrue(gone.getMessage().contains("NoSuchFileException")
                     && gone.getMessage().contains("www/removed-after-write"), gone.getMessage());
+        }
+    }
+
+    @Test
+    public void aWriteIntoAParentWhoseModeWasTakenAwayIsRefusedNotCrashedOn(@TempDir Path tmp)
+            throws Exception {
+        // Gate finding t5-67b4ef5-F1: the F3 race with the racer flipping modes instead of
+        // swapping directories. A parent this extractor created 0700 is set to 000 after it
+        // was opened; the create through its descriptor gets EACCES, which reached the caller
+        // as a raw AccessDeniedException in 6 runs of the gate's 30.
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work")) {
+            root.createDirectory(member("app/www/"));
+            Path www = root.path().resolve("www");
+            try (SecureDirectoryStream<Path> opened =
+                         (SecureDirectoryStream<Path>) Files.newDirectoryStream(www)) {
+                Files.setPosixFilePermissions(www, PosixFilePermissions.fromString("---------"));
+                try {
+                    assumeFalse(Files.isWritable(www), "running with privileges that ignore modes");
+                    BundleRejection ex = assertThrows(BundleRejection.class,
+                            () -> root.writeInto(opened, "x.R", "www/x.R", "app/www/x.R",
+                                    new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)),
+                                    false));
+                    assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+                    assertTrue(ex.getMessage().contains("AccessDeniedException"), ex.getMessage());
+                } finally {
+                    Files.setPosixFilePermissions(www, PosixFilePermissions.fromString("rwx------"));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void aKeyReadUnderADirectoryWhoseModeWasTakenAwayIsRefusedNotCrashedOn(
+            @TempDir Path tmp) throws Exception {
+        // The other t5-67b4ef5-F1 site: the key read by name through the parent, with the
+        // parent's search permission gone.
+        Path dir = Files.createDirectory(tmp.resolve("d"));
+        Files.writeString(dir.resolve("written"), "x");
+        try (SecureDirectoryStream<Path> directory =
+                     (SecureDirectoryStream<Path>) Files.newDirectoryStream(dir)) {
+            Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("---------"));
+            try {
+                assumeFalse(Files.isReadable(dir), "running with privileges that ignore modes");
+                BundleRejection ex = assertThrows(BundleRejection.class,
+                        () -> ExtractionRoot.keyOf(directory, Path.of("written"), "d/written"));
+                assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule());
+                assertTrue(ex.getMessage().contains("AccessDeniedException"), ex.getMessage());
+            } finally {
+                Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
+            }
         }
     }
 

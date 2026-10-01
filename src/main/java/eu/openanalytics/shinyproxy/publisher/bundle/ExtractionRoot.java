@@ -302,8 +302,11 @@ public final class ExtractionRoot implements AutoCloseable {
      * records what was written, for freeze() to compare.
      *
      * <p>Every call here is relative to the parent's descriptor, so something else changing
-     * the tree surfaces as a NoSuchFileException or NotDirectoryException rather than as a
-     * write somewhere else. Those are refusals, typed like {@link #descend}'s and freeze's:
+     * the tree surfaces as a NoSuchFileException, NotDirectoryException or
+     * AccessDeniedException rather than as a write somewhere else. EACCES belongs in that
+     * list: this extractor created every directory here 0700 as its own uid, so permission
+     * to write or search one can only have been taken away by something else changing its
+     * mode (gate finding t5-67b4ef5-F1; presentIn already treated it that way). Those are refusals, typed like {@link #descend}'s and freeze's:
      * reaching a caller as a raw IOException, they read as an infrastructure failure to
      * retry rather than as a tree this extractor no longer owns (gate finding
      * t5-f4f5f32-F3). Package-private so a test can hand it a parent that is already gone.
@@ -328,7 +331,8 @@ public final class ExtractionRoot implements AutoCloseable {
                     "'" + BundleRejection.quote(memberPath) + "' already exists"
                             + " in an extraction root this extractor created and is the"
                             + " only writer for");
-        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException ex) {
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException
+                 | java.nio.file.AccessDeniedException ex) {
             throw changedWhileWriting(relative, ex);
         }
         // The key is read after the write, by name through the parent's descriptor, so
@@ -341,8 +345,9 @@ public final class ExtractionRoot implements AutoCloseable {
 
     /**
      * The file key of {@code name} in {@code directory}, read without following a link. An
-     * entry that is gone or no longer under a directory is a tree changed under this
-     * extractor, refused like the rest (t5-f4f5f32-F3); the post-write read here was one of
+     * entry that is gone, no longer under a directory, or under a directory whose mode was
+     * changed is a tree changed under this extractor, refused like the rest (t5-f4f5f32-F3,
+     * t5-67b4ef5-F1); the post-write read here was one of
      * the two places the gate's race ended in a raw exception.
      */
     static Object keyOf(SecureDirectoryStream<Path> directory, Path name, String relative)
@@ -350,7 +355,8 @@ public final class ExtractionRoot implements AutoCloseable {
         try {
             return directory.getFileAttributeView(name, PosixFileAttributeView.class,
                     LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey();
-        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException ex) {
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException
+                 | java.nio.file.AccessDeniedException ex) {
             throw changedWhileWriting(relative, ex);
         }
     }
