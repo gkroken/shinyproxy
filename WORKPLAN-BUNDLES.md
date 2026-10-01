@@ -1913,7 +1913,12 @@ below are marked passed by this planning document.
       the chain (18368a9 review N1). (2) GzipMember treats a source read of 0 bytes as end
       of upload. A blocking InputStream never returns 0, but if this track hands the
       extractor a non-blocking or adapter stream, make a 0 fail closed first (b991250
-      review note).
+      review note). (3) Call `BundleExtractor.requireUtf8FileNames()` when publishing
+      starts, so a JVM without a UTF-8 locale refuses to start publishing rather than
+      refusing every bundle with a non-ASCII file name; `extract()` also calls it before
+      touching the disk. The deployment notes must say the service needs a UTF-8 locale
+      (e.g. `LANG=C.UTF-8` in the unit file): path encoding follows `sun.jnu.encoding`, not
+      `file.encoding` (gate re-verification finding `t5-f4f5f32-F4`).
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.

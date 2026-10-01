@@ -78,6 +78,40 @@ public final class BundleExtractor {
     private BundleExtractor() {
     }
 
+    /**
+     * Refuses to go on unless this JVM encodes file names as UTF-8.
+     *
+     * <p>A JVM started without a UTF-8 locale (a service unit with no LANG, which is common
+     * for ShinyProxy deployments) encodes paths in its platform charset: under the C locale,
+     * ASCII. {@code file.encoding} is UTF-8 on JDK 18+ either way; path encoding follows
+     * {@code sun.jnu.encoding}, which it does not set. Every bundle with a non-ASCII file name
+     * then ended in an unchecked InvalidPathException from the first write -- fail-closed, but
+     * with no rule, and making the contract's support for NFC non-ASCII names depend on the
+     * environment (gate finding t5-f4f5f32-F4).
+     *
+     * <p>Not a {@link BundleRejection}: no publisher can fix the server's locale, and a
+     * refusal under a bundle rule would tell them their file name is wrong. It is the
+     * operator's, so it is an IllegalStateException naming the fix. T8's startup wiring calls
+     * this so publishing refuses to start rather than failing per bundle; {@link #extract}
+     * calls it too, before anything touches the disk, so no path reaches the crash.
+     */
+    public static void requireUtf8FileNames() {
+        String encoding = System.getProperty("sun.jnu.encoding");
+        boolean utf8;
+        try {
+            utf8 = encoding != null && java.nio.charset.Charset.forName(encoding)
+                    .equals(java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException unknown) {
+            utf8 = false;
+        }
+        if (!utf8) {
+            throw new IllegalStateException("this JVM encodes file names as '" + encoding
+                    + "' (sun.jnu.encoding), not UTF-8, so a bundle file name outside ASCII"
+                    + " cannot be written. Start the service under a UTF-8 locale, e.g."
+                    + " LANG=C.UTF-8 or LC_ALL=C.UTF-8; file.encoding does not affect this");
+        }
+    }
+
     public static Extracted extract(InputStream upload, long uploadSize, Path workspace,
                                     ExtractionLimits limits) throws IOException {
         return extract(upload, uploadSize, workspace, limits, System::nanoTime);
@@ -95,6 +129,7 @@ public final class BundleExtractor {
     public static Extracted extract(InputStream upload, long uploadSize, Path workspace,
                                     ExtractionLimits limits, LongSupplier nanoTime)
             throws IOException {
+        requireUtf8FileNames();
         if (uploadSize >= 0) {
             GzipMember.checkUploadSize(uploadSize, limits);
         }
