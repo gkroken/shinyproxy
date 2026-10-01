@@ -24,20 +24,24 @@ The rule, in the order squid evaluates it (first match wins):
      list is named here rather than described as "the metadata endpoint". Whole ranges
      were rejected where a mirror can legitimately live (100.64.0.0/10 also carries
      carrier-grade NAT and overlay networks such as Tailscale). An IP literal is refused
-     by rule 5 anyway; this rule is for names.
+     by rule 5 (because rule 4 matches with -n); this rule is for names.
   2. the gateway's own loopback (to_localhost) is refused: squid's cache manager and any
      sidecar listening there are not a build's business.
   3. CONNECT (how HTTPS crosses a proxy) only to port 443.
   4. the registry, on its port; then each configured repository host, by EXACT name
      (dstdomain without a leading dot: no subdomains, and not a regex, so
-     `allowed-repo.evil` does not match `allowed-repo`), and only on the repository ports
+     `allowed-repo.evil` does not match `allowed-repo`; and with -n, so squid matches the
+     URL's host AS WRITTEN and never looks up an IP literal's reverse DNS -- without -n an
+     address whose PTR names an allowlisted host is admitted, and the address's owner sets
+     its PTR: gate finding t5-f4f5f32-F1), and only on the repository ports
      (80 and 443 by default). A mirror's other ports -- an admin API, a database, a
      metrics endpoint -- are not a build's business (b3d129f-F1).
   5. everything else is refused.
 
 Private (RFC 1918) destinations are NOT refused by rule: an operator's own mirror (Nexus,
 Artifactory, Posit Package Manager) typically lives on one, and Q3 exists to let it work.
-A private IP LITERAL is refused by rule 5 like any unlisted destination; a configured name
+A private IP LITERAL is refused by rule 5 like any unlisted destination (rule 4's -n is
+what makes that true for EVERY literal, whatever its reverse DNS says); a configured name
 that resolves privately is allowed, because configuring it is the operator's statement that
 it is a repository.
 
@@ -56,7 +60,7 @@ METADATA_ADDRESSES = ("fd00:ec2::254/128",      # AWS, IPv6 IMDS
                       "100.100.100.200/32")     # Alibaba Cloud
 REPO_PORTS = (80, 443)
 WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
-              "any_repo_port")
+              "any_repo_port", "reverse_lookup")
 
 
 def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
@@ -69,15 +73,21 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
              "acl repo_ports port %s" % " ".join(str(p) for p in repo_ports),
              "acl SSL_ports port 443",
              "acl CONNECT method CONNECT",
-             "acl registry dstdomain %s" % registry,
+             # -n: match the URL's host as written, never its reverse DNS (gate finding
+             # t5-f4f5f32-F1). Without it squid resolves the PTR of an IP-literal URL and
+             # admits the address if the PTR names an allowlisted host -- and whoever owns
+             # an address sets its PTR, so build code reached an attacker's server.
+             "acl registry dstdomain %s%s" % (
+                 "" if weaken == "reverse_lookup" else "-n ", registry),
              "acl registry_port port 5000"]
     if repos:
         if weaken == "unanchored":
             # A regex with no anchors: matches any host CONTAINING the name.
-            lines.append("acl repos dstdom_regex %s" % " ".join(
+            lines.append("acl repos dstdom_regex -n %s" % " ".join(
                 r.replace(".", r"\.") for r in repos))
         else:
-            lines.append("acl repos dstdomain %s" % " ".join(repos))
+            lines.append("acl repos dstdomain %s%s" % (
+                "" if weaken == "reverse_lookup" else "-n ", " ".join(repos)))
     if weaken != "no_metadata_deny":
         lines.append("http_access deny metadata")
     lines.append("http_access deny to_localhost")

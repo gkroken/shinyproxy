@@ -66,6 +66,7 @@ import sys
 import tempfile
 
 import buildkit_worker_profile as worker_profile
+import egress_gateway
 import worker_disposal
 
 INNER, OUTER = "skald-lc-inner", "skald-lc-outer"
@@ -116,20 +117,13 @@ def cleanup():
 
 
 def build_gateway(tmp):
-    """Squid, allowing exactly the registry on its port. No cache: it forwards, and that is
-    all it may do. Why squid and not tinyproxy is in the module docstring."""
+    """Squid with the shipped egress rule (dev/egress_gateway.py), allowing exactly the
+    registry on its port. It used to carry its own copy of the rule; that copy was a second
+    place gate finding t5-f4f5f32-F1 (reverse-DNS allowlist bypass) would have had to be
+    fixed, so it now uses the one definition. Why squid and not tinyproxy is in the module
+    docstring."""
     d = pathlib.Path(tmp)
-    (d / "squid.conf").write_text(
-        "http_port 8888\n"
-        "acl registry dstdomain %s\n"
-        "acl registry_port port 5000\n"
-        "http_access allow registry registry_port\n"
-        "http_access deny all\n"
-        "cache deny all\n"
-        "access_log stdio:/dev/stdout\n"
-        "cache_log stdio:/dev/stderr\n"
-        "pid_filename none\n"
-        "coredump_dir /tmp\n" % REGISTRY)
+    (d / "squid.conf").write_text(egress_gateway.squid_conf(REGISTRY, []))
     (d / "Dockerfile.gw").write_text(
         "FROM alpine:3.20\nRUN apk add --no-cache squid\n"
         "COPY squid.conf /etc/squid/squid.conf\nUSER squid\n"

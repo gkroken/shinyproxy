@@ -78,17 +78,24 @@ def build_gateway(tmp):
         raise SystemExit("could not build the gateway image")
 
 
-def start_gateway(repos=(), weaken=None, add_hosts=()):
+def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None):
     """(Re)starts the gateway with the shipped rule for these repository hosts. The
-    registry is always allowed. `weaken` and `add_hosts` (name:ip entries in the gateway's
-    own resolver) are for the egress probe; the defaults are what every probe runs."""
+    registry is always allowed. `weaken`, `add_hosts` (name:ip entries in the gateway's
+    /etc/hosts) and `resolver` (an IP the gateway uses as its only DNS server, standing in
+    for the internet's DNS, where an attacker controls the reverse zone of an address the
+    attacker owns) are for the egress probe; the defaults are what every probe runs."""
     docker(["rm", "-f", GATEWAY])
     conf_dir = pathlib.Path(state["tmp"]) / ("gateway-conf-%s" % (weaken or "shipped"))
     conf_dir.mkdir(parents=True, exist_ok=True)
     conf = egress_gateway.write_conf(conf_dir, REGISTRY, list(repos), weaken)
-    docker(["run", "-d", "--name", GATEWAY, "--network", INNER, "--network-alias", GATEWAY,
-            "-v", "%s:/etc/squid/squid.conf:ro" % conf]
-           + ["--add-host=%s" % h for h in add_hosts] + [GATEWAY_IMAGE])
+    mounts = ["-v", "%s:/etc/squid/squid.conf:ro" % conf]
+    if resolver:
+        rc = conf_dir / "resolv.conf"
+        rc.write_text("nameserver %s\n" % resolver)
+        rc.chmod(0o644)
+        mounts += ["-v", "%s:/etc/resolv.conf:ro" % rc]
+    docker(["run", "-d", "--name", GATEWAY, "--network", INNER, "--network-alias", GATEWAY]
+           + mounts + ["--add-host=%s" % h for h in add_hosts] + [GATEWAY_IMAGE])
     docker(["network", "connect", OUTER, GATEWAY])
     for _ in range(30):
         logs = sw.logs(GATEWAY)

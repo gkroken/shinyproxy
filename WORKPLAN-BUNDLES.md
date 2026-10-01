@@ -1715,7 +1715,10 @@ below are marked passed by this planning document.
       repository is fetched, and every unlisted host, IP literal, private address, the
       metadata endpoint, an ALLOWLISTED name resolving to the metadata endpoint, a suffix
       of an allowed name, a redirect out of an allowed host, CONNECT to an unlisted host or
-      a non-443 port, a direct socket around the gateway, and external DNS are refused;
+      a non-443 port, a direct socket around the gateway, external DNS, and an IP literal whose reverse DNS
+      names an allowlisted host (gate re-verification finding `t5-f4f5f32-F1`: squid's
+      `dstdomain` follows the PTR of an IP-literal URL unless given `-n`, and an address's
+      owner sets its PTR) are refused;
       the registry answers but refuses writes. Each refusal must be squid's own
       `ERR_ACCESS_DENIED`, not an unreachable host. Private (RFC 1918) destinations are
       refused only as unlisted literals, not by rule, because an operator's mirror lives
