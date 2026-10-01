@@ -290,35 +290,76 @@ public final class ExtractionRoot implements AutoCloseable {
         try {
             SecureDirectoryStream<Path> directory = descend(segments.subList(0, segments.size() - 1),
                     true, opened);
-            Path name = Path.of(segments.get(segments.size() - 1));
-            // CREATE_NEW refuses anything already at the name, symlink included, and
-            // NOFOLLOW_LINKS says so explicitly rather than relying on that. Both, because
-            // this is the one call that turns an archive into bytes on a disk.
-            Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW,
-                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-            MessageDigest digest = sha256();
-            long written;
-            try (SeekableByteChannel channel = directory.newByteChannel(name, options,
-                    PosixFilePermissions.asFileAttribute(
-                            executable ? PRIVATE_EXECUTABLE : PRIVATE_FILE))) {
-                written = copy(content, channel, digest);
-            } catch (java.nio.file.FileAlreadyExistsException ex) {
-                throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
-                        "'" + BundleRejection.quote(member.memberPath()) + "' already exists"
-                                + " in an extraction root this extractor created and is the"
-                                + " only writer for");
-            }
-            // The key is read after the write, by name through the parent's descriptor, so
-            // a swap in between would record the swapped file's key. The digest is what
-            // this object wrote, whatever is there now, and freeze() compares both.
-            created.put(String.join("/", segments), new Created(directory
-                    .getFileAttributeView(name, PosixFileAttributeView.class,
-                            LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey(),
-                    written, digest.digest()));
-            return written;
+            return writeInto(directory, segments.get(segments.size() - 1),
+                    String.join("/", segments), member.memberPath(), content, executable);
         } finally {
             closeAll(opened);
         }
+    }
+
+    /**
+     * Creates file {@code fileName} in {@code directory}, writes {@code content} into it and
+     * records what was written, for freeze() to compare.
+     *
+     * <p>Every call here is relative to the parent's descriptor, so something else changing
+     * the tree surfaces as a NoSuchFileException or NotDirectoryException rather than as a
+     * write somewhere else. Those are refusals, typed like {@link #descend}'s and freeze's:
+     * reaching a caller as a raw IOException, they read as an infrastructure failure to
+     * retry rather than as a tree this extractor no longer owns (gate finding
+     * t5-f4f5f32-F3). Package-private so a test can hand it a parent that is already gone.
+     */
+    long writeInto(SecureDirectoryStream<Path> directory, String fileName, String relative,
+                   String memberPath, InputStream content, boolean executable)
+            throws IOException {
+        Path name = Path.of(fileName);
+        // CREATE_NEW refuses anything already at the name, symlink included, and
+        // NOFOLLOW_LINKS says so explicitly rather than relying on that. Both, because
+        // this is the one call that turns an archive into bytes on a disk.
+        Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        MessageDigest digest = sha256();
+        long written;
+        try (SeekableByteChannel channel = directory.newByteChannel(name, options,
+                PosixFilePermissions.asFileAttribute(
+                        executable ? PRIVATE_EXECUTABLE : PRIVATE_FILE))) {
+            written = copy(content, channel, digest);
+        } catch (java.nio.file.FileAlreadyExistsException ex) {
+            throw new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                    "'" + BundleRejection.quote(memberPath) + "' already exists"
+                            + " in an extraction root this extractor created and is the"
+                            + " only writer for");
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException ex) {
+            throw changedWhileWriting(relative, ex);
+        }
+        // The key is read after the write, by name through the parent's descriptor, so
+        // a swap in between would record the swapped file's key. The digest is what
+        // this object wrote, whatever is there now, and freeze() compares both.
+        created.put(relative, new Created(keyOf(directory, name, relative), written,
+                digest.digest()));
+        return written;
+    }
+
+    /**
+     * The file key of {@code name} in {@code directory}, read without following a link. An
+     * entry that is gone or no longer under a directory is a tree changed under this
+     * extractor, refused like the rest (t5-f4f5f32-F3); the post-write read here was one of
+     * the two places the gate's race ended in a raw exception.
+     */
+    static Object keyOf(SecureDirectoryStream<Path> directory, Path name, String relative)
+            throws IOException {
+        try {
+            return directory.getFileAttributeView(name, PosixFileAttributeView.class,
+                    LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey();
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException ex) {
+            throw changedWhileWriting(relative, ex);
+        }
+    }
+
+    private static BundleRejection changedWhileWriting(String relative, Throwable cause) {
+        return new BundleRejection(BundleRule.WRITE_PATH_NOT_AS_EXPECTED,
+                "the extraction root changed while '" + BundleRejection.quote(relative)
+                        + "' was being written (" + cause.getClass().getSimpleName()
+                        + "); something other than this extractor is writing to it");
     }
 
     /**
@@ -393,9 +434,8 @@ public final class ExtractionRoot implements AutoCloseable {
             relative.append(relative.length() == 0 ? "" : "/").append(segment);
             if (create && !presentIn(current, name, segment)) {
                 createThrough(current, name, segment);
-                created.put(relative.toString(), Created.directory(current
-                        .getFileAttributeView(name, PosixFileAttributeView.class,
-                                LinkOption.NOFOLLOW_LINKS).readAttributes().fileKey()));
+                created.put(relative.toString(), Created.directory(
+                        keyOf(current, name, relative.toString())));
             }
             SecureDirectoryStream<Path> next;
             try {

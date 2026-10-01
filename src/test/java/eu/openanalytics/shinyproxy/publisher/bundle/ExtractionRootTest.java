@@ -194,6 +194,48 @@ public class ExtractionRootTest {
     private static final int RACE_ATTEMPTS = 20_000;
 
     @Test
+    public void aWriteIntoAParentThatIsGoneIsRefusedNotCrashedOn(@TempDir Path tmp)
+            throws Exception {
+        // Gate finding t5-f4f5f32-F3, its window set up exactly instead of raced: the parent
+        // is opened, THEN removed by something else, THEN the member is created through the
+        // descriptor. The create fails with ENOENT; before the fix that reached the caller as
+        // a raw NoSuchFileException (3 runs in 30 of the gate's race-parent-swap), which T8
+        // would read as "infrastructure, retry" rather than as a refusal.
+        try (ExtractionRoot root = ExtractionRoot.createUnder(tmp, "work")) {
+            root.createDirectory(member("app/www/"));
+            Path www = root.path().resolve("www");
+            try (SecureDirectoryStream<Path> opened =
+                         (SecureDirectoryStream<Path>) Files.newDirectoryStream(www)) {
+                Files.delete(www);
+                BundleRejection ex = assertThrows(BundleRejection.class,
+                        () -> root.writeInto(opened, "x.R", "www/x.R", "app/www/x.R",
+                                new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8)),
+                                false));
+                assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, ex.rule(), ex.getMessage());
+                assertTrue(ex.getMessage().contains("changed while 'www/x.R' was being written")
+                        && ex.getMessage().contains("NoSuchFileException"), ex.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void aKeyReadOfAnEntryThatIsGoneIsRefusedNotCrashedOn(@TempDir Path tmp)
+            throws Exception {
+        // The other site the gate named (t5-f4f5f32-F3): the file key read after a write, and
+        // after a directory is created, by name through the parent. The entry is gone by the
+        // time it is read.
+        try (SecureDirectoryStream<Path> directory =
+                     (SecureDirectoryStream<Path>) Files.newDirectoryStream(tmp)) {
+            BundleRejection gone = assertThrows(BundleRejection.class,
+                    () -> ExtractionRoot.keyOf(directory, Path.of("removed-after-write"),
+                            "www/removed-after-write"));
+            assertEquals(BundleRule.WRITE_PATH_NOT_AS_EXPECTED, gone.rule());
+            assertTrue(gone.getMessage().contains("NoSuchFileException")
+                    && gone.getMessage().contains("www/removed-after-write"), gone.getMessage());
+        }
+    }
+
+    @Test
     public void aTreeChangedUnderTheFreezeIsRefusedNotCrashedOn(@TempDir Path tmp)
             throws Exception {
         // The rename race, set up exactly: something has put a symlink into the tree by the
