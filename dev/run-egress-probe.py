@@ -437,13 +437,16 @@ WEAKENINGS = [
       "private IP literal refused", "suffix of an allowed name refused"],
      lambda r, ptr: (fetched(r, "unlisted_ip", "DENIED-CONTENT")
                      and fetched(r, "suffix", "EVIL-CONTENT"))),
-    # Nothing answers at a metadata address here, so the evidence is that squid TRIED --
-    # it did not refuse by policy -- while the control shows the gateway was alive.
+    # Nothing answers at a metadata address here. The evidence that squid TRIED is the
+    # IPv6 one: with no IPv6 route squid fails the connect at once and says so
+    # (503 ERR_CONNECT_FAIL, measured in every live run), where the IPv4 ones only time
+    # out -- and a timeout alone is not evidence of anything (0b57894 review N1). None
+    # of the three may be refused by policy.
     ("no metadata deny", dict(weaken="no_metadata_deny"),
      ["allowlisted name resolving to metadata refused",
       "allowlisted name resolving to AWS IPv6 metadata refused",
       "allowlisted name resolving to Alibaba metadata refused"],
-     lambda r, ptr: (fetched(r, "allowed", "ALLOWED-CONTENT")
+     lambda r, ptr: (_squid_tag(r, "rebind_aws6") == "ERR_CONNECT_FAIL"
                      and all(_squid_tag(r, k) != "ERR_ACCESS_DENIED"
                              for k in ("rebind", "rebind_aws6", "rebind_alibaba")))),
     ("repositories on any port", dict(weaken="any_repo_port"),
