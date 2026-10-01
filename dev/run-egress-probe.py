@@ -367,6 +367,7 @@ def run_matrix(tmp, label):
     lines = [l.strip() for l in report.strip().splitlines() if l.strip()]
     if not lines:
         return None, blob
+    state["report"], state["ptr_ok"] = parse(lines), ptr_ok
     rows = judge(lines, ptr_ok)
     rows["the gateway's resolver serves the canaries' PTRs (control)"] = (ptr_ok, ptr_detail)
     return rows, blob
@@ -377,7 +378,7 @@ def shipped_gateway(weaken=None, repos=None):
                     add_hosts=ADD_HOSTS, resolver=state["resolver"])
 
 
-state = {"resolver": None}
+state = {"resolver": None, "report": {}, "ptr_ok": False}
 
 
 def main(argv):
@@ -416,29 +417,53 @@ def main(argv):
 
 # Each weakening, and the rows it must turn red. Every red row is printed too, so a
 # weakening that turns a row red only by collateral is visible in the log.
+def _squid_tag(r, key):
+    return fields(r.get(key, "")).get("squid")
+
+
+# Each weakening: its rows that must turn red, and the POSITIVE EVIDENCE that the hole its
+# rule closes was actually used. A row is red for many reasons -- a failed control, a dead
+# resolver, a request cut off by `timeout` -- and accepting "red" alone let a weakening
+# read as caught without the bypass ever being shown (90a889d review N1). The evidence is
+# judged on the raw report, so it names WHICH branch made the row red. Every red row is
+# printed too, so collateral is visible in the log.
 WEAKENINGS = [
     ("the unlisted host allowlisted", dict(repos=REPOS + [DENIED]),
      ["unlisted host refused by squid", "redirect to an unlisted host refused",
-      "CONNECT to an unlisted host refused"]),
+      "CONNECT to an unlisted host refused"],
+     lambda r, ptr: fetched(r, "unlisted", "DENIED-CONTENT")),
     ("allow all before deny all", dict(weaken="allow_all"),
      ["unlisted host refused by squid", "unlisted host refused by IP",
-      "private IP literal refused", "suffix of an allowed name refused"]),
+      "private IP literal refused", "suffix of an allowed name refused"],
+     lambda r, ptr: (fetched(r, "unlisted_ip", "DENIED-CONTENT")
+                     and fetched(r, "suffix", "EVIL-CONTENT"))),
+    # Nothing answers at a metadata address here, so the evidence is that squid TRIED --
+    # it did not refuse by policy -- while the control shows the gateway was alive.
     ("no metadata deny", dict(weaken="no_metadata_deny"),
      ["allowlisted name resolving to metadata refused",
       "allowlisted name resolving to AWS IPv6 metadata refused",
-      "allowlisted name resolving to Alibaba metadata refused"]),
+      "allowlisted name resolving to Alibaba metadata refused"],
+     lambda r, ptr: (fetched(r, "allowed", "ALLOWED-CONTENT")
+                     and all(_squid_tag(r, k) != "ERR_ACCESS_DENIED"
+                             for k in ("rebind", "rebind_aws6", "rebind_alibaba")))),
     ("repositories on any port", dict(weaken="any_repo_port"),
-     ["allowlisted repository on another port refused"]),
+     ["allowlisted repository on another port refused"],
+     lambda r, ptr: _squid_tag(r, "repo_badport") == "ERR_CONNECT_FAIL"),
     ("reverse lookups (dstdomain without -n)", dict(weaken="reverse_lookup"),
      ["IP literal whose PTR names a repository refused",
       "IP literal whose PTR names the registry refused",
-      "CONNECT to an IP whose PTR names a repository refused"]),
+      "CONNECT to an IP whose PTR names a repository refused"],
+     lambda r, ptr: (ptr and fetched(r, "ptr_repo", "CANARY-REPO")
+                     and r.get("ptr_connect") == "200")),
     ("the allowlist unanchored", dict(weaken="unanchored"),
-     ["suffix of an allowed name refused"]),
+     ["suffix of an allowed name refused"],
+     lambda r, ptr: fetched(r, "suffix", "EVIL-CONTENT")),
     ("CONNECT to any port", dict(weaken="any_connect_port"),
-     ["CONNECT to a non-443 port refused"]),
+     ["CONNECT to a non-443 port refused"],
+     lambda r, ptr: r.get("connect_badport") == "200"),
     ("the allowlist emptied", dict(repos=[]),
-     ["allowed repository fetched (control)"]),
+     ["allowed repository fetched (control)"],
+     lambda r, ptr: _squid_tag(r, "allowed") == "ERR_ACCESS_DENIED"),
 ]
 
 
@@ -469,7 +494,21 @@ def self_test(tmp):
     else:
         print("  ok   a missing DNS tool is inconclusive, not a pass")
 
-    for label, kw, must_fail in WEAKENINGS:
+    # Offline: no weakening's evidence may be satisfied by a run in which every request
+    # timed out and the resolver control failed -- the run that turns every row red for
+    # the wrong reason (90a889d review N1).
+    dead = {k: "first:none last:none squid:none body:none" for k in (
+        "allowed", "unlisted", "unlisted_ip", "private_ip", "rebind", "rebind_aws6",
+        "rebind_alibaba", "repo_badport", "suffix", "ptr_repo", "ptr_registry")}
+    dead.update(connect_badport="none", ptr_connect="none", direct_repo="refused")
+    satisfied = [label for label, _, _, evidence in WEAKENINGS if evidence(dead, False)]
+    if satisfied:
+        print("  FAIL evidence satisfied by a dead run: %s" % ", ".join(satisfied))
+        missed.append("evidence on a dead run")
+    else:
+        print("  ok   no weakening's evidence is satisfied by a run where nothing answered")
+
+    for label, kw, must_fail, evidence in WEAKENINGS:
         weaken = kw.get("weaken")
         repos = kw.get("repos", REPOS)
         shipped_gateway(weaken=weaken, repos=repos)
@@ -484,6 +523,10 @@ def self_test(tmp):
         if reds:
             print("  FAIL %s: NOT caught by %s" % (label, ", ".join(reds)))
             missed.append(label)
+        elif not evidence(state["report"], state["ptr_ok"]):
+            print("  FAIL %s: its rows are red, but not because the hole was used -- no "
+                  "positive evidence in the report" % label)
+            missed.append(label)
         else:
             print("  ok   %s -- red: %s" % (label, "; ".join(
                 "%s (%s)" % (n, rows[n][1][:70]) for n in must_fail)))
@@ -493,7 +536,8 @@ def self_test(tmp):
     docker(["network", "connect", h.OUTER, h.WORKER])
     rows, blob = run_matrix(tmp, "routable")
     docker(["network", "disconnect", h.OUTER, h.WORKER])
-    if rows is None or rows["no direct socket to the repository"][0]:
+    if (rows is None or rows["no direct socket to the repository"][0]
+            or state["report"].get("direct_repo") != "CONNECTED"):
         print("  FAIL the worker on the routable network: direct socket NOT caught (%s)"
               % (rows["no direct socket to the repository"][1] if rows
                  else blob.strip()[-120:]))
