@@ -793,6 +793,24 @@ def _argument_agrees(name, b, recorded_args, fail):
 RUN_BOUNDS_PROBE = "dev/run-bounds-probe.py"
 
 
+def _measures_runtime(path):
+    """The runtime a probe file declares it measures: a module-level
+    `MEASURES_RUNTIME = "<runtime>"`, read statically. None if it declares none."""
+    import ast
+    for node in ast.parse(pathlib.Path(path).read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "MEASURES_RUNTIME"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            return node.value.value
+    return None
+
+
+def _probe_files_run_by(script_text):
+    """The dev/*.py probe files a measured_by wrapper script runs."""
+    return sorted(set(re.findall(r"python3? (dev/[A-Za-z0-9_.-]+\.py)", script_text)))
+
+
 def _check_names(path):
     """The literal names a probe file gives its checks: the first argument of every call
     to record() or row() that is a string literal. Parsed statically, like the rest."""
@@ -970,10 +988,14 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
             waived_probes[rt].add(probe)
 
     # Proofs. A measured runtime names, for every bound it enforces, the probe file and the
-    # literal name of the check that measured it UNDER THAT RUNTIME, and the file must be
-    # one its measured_by scripts run. Without this, "measured" was a status word: rootless
-    # stayed unmeasured for weeks while rootful's numbers sat one key away, and nothing
-    # would have stopped a runtime claiming bounds another runtime's probe had measured.
+    # literal name of the check that measured it UNDER THAT RUNTIME. "Under that runtime" is
+    # checked, not inferred: every probe file declares MEASURES_RUNTIME, a proof's file
+    # must declare the citing runtime, and so must every probe file the runtime's
+    # measured_by scripts run. The first version only required the proof's file to be named
+    # in one of the runtime's own measured_by scripts, and a two-line edit defeated it --
+    # list the rootful script under rootless, then cite the rootful probe (gate finding
+    # t5-f4f5f32-F2).
+    script_owner = {}
     for rt, r in sorted(runtimes.items()):
         if r.get("status") != "measured":
             continue
@@ -982,10 +1004,26 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
             scripts = [scripts]
         texts = []
         for script in scripts:
+            if script in script_owner and script_owner[script] != rt:
+                fail("runtime %s is measured_by %s, which runtime %s also cites; one "
+                     "script cannot measure two runtimes" % (rt, script, script_owner[script]))
+            script_owner.setdefault(script, rt)
             if not pathlib.Path(script).exists():
                 fail("runtime %s is measured_by %r, which does not exist" % (rt, script))
-            else:
-                texts.append(pathlib.Path(script).read_text(encoding="utf-8"))
+                continue
+            text = pathlib.Path(script).read_text(encoding="utf-8")
+            texts.append(text)
+            probes = _probe_files_run_by(text)
+            if not probes:
+                fail("runtime %s is measured_by %s, which runs no dev/*.py probe this "
+                     "checker can see" % (rt, script))
+            for probe_file in probes:
+                measured = (_measures_runtime(probe_file)
+                            if pathlib.Path(probe_file).exists() else None)
+                if measured != rt:
+                    fail("runtime %s is measured_by %s, which runs %s, which measures %s, "
+                         "not %s" % (rt, script, probe_file, measured or "no declared "
+                                     "runtime", rt))
         if not scripts:
             fail("runtime %s is measured but names no measured_by script" % rt)
         proofs = r.get("proofs") or {}
@@ -999,6 +1037,11 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
                 fail("runtime %s's proof of %r names %s, which does not exist"
                      % (rt, bound_probe, proof["file"]))
                 continue
+            measured = _measures_runtime(proof["file"])
+            if measured != rt:
+                fail("runtime %s's proof of %r is in %s, which measures %s, not %s"
+                     % (rt, bound_probe, proof["file"],
+                        measured or "no declared runtime", rt))
             if not any(proof["file"] in t for t in texts):
                 fail("runtime %s's proof of %r is in %s, which none of its measured_by "
                      "scripts runs" % (rt, bound_probe, proof["file"]))
@@ -1398,6 +1441,18 @@ ISOLATION_CASES = [
      lambda d: _rt(d)["runc-rootless"]["proofs"]["network none"].__setitem__(
          "file", "dev/egress-probe.py"),
      "none of its measured_by scripts runs"),
+    # The gate's two-edit borrow (t5-f4f5f32-F2): list the rootful script under rootless,
+    # then cite the rootful probe. The first version of the rule passed this.
+    ("a proof borrowed together with the other runtime's script",
+     lambda d: (_rt(d)["runc-rootless"]["measured_by"].append("dev/validate-sandbox.sh"),
+                [_rt(d)["runc-rootless"]["proofs"].__setitem__(
+                    b, {"file": "dev/sandbox-probe.py", "check": b})
+                 for b in ("cpu quota", "memory limit", "pid limit",
+                           "loop-backed volume")]),
+     "is in dev/sandbox-probe.py, which measures runc-rootful, not runc-rootless"),
+    ("another runtime's script listed under measured_by",
+     lambda d: _rt(d)["runc-rootless"]["measured_by"].append("dev/validate-sandbox.sh"),
+     "which runs dev/sandbox-probe.py, which measures runc-rootful, not runc-rootless"),
     ("a proof borrowed from another runtime's probe",
      lambda d: _rt(d)["runc-rootless"]["proofs"].__setitem__(
          "pid limit", {"file": "dev/sandbox-probe.py", "check": "pid limit"}),

@@ -38,6 +38,11 @@ import subprocess
 import sys
 import tempfile
 
+# The runtime this probe measures, read statically by dev/schema-fixture-check.py: a
+# runtime's proofs in spec/isolation-profile-v1.json may cite only probes that measure THAT
+# runtime (gate finding t5-f4f5f32-F2).
+MEASURES_RUNTIME = "runc-rootful"
+
 IMAGE = os.environ.get("SANDBOX_PROBE_IMAGE", "python:3.12-slim")
 SETUP_IMAGE = os.environ.get("SANDBOX_SETUP_IMAGE", "debian:12-slim")
 VOLUME = "skald-sandbox-probe"

@@ -315,7 +315,7 @@
     "Every daemon bound names a probe that dev/run-bounds-probe.py records with kind='bound' and the same literal argument, and every such probe is claimed by exactly one daemon bound -- the rules above, against the RUN-step probe. Daemon bounds are enforced by buildkitd whatever the runtime, so no runtime lists them.",
     "No forbidden argument may appear in any bound's or daemon bound's argument.",
     "A runtime is selectable only if it is measured and enforces every bound. The default is not exempt.",
-    "Every enforced bound of a measured runtime names its proof: a probe file and the literal name of the check in it that measured the bound UNDER THAT RUNTIME. A runtime cannot borrow another's measurement -- the rootful numbers never counted for rootless, because the enforcing agent changes.",
+    "Every enforced bound of a measured runtime names its proof: a probe file and the literal name of the check in it that measured the bound UNDER THAT RUNTIME. A runtime cannot borrow another's measurement -- the rootful numbers never counted for rootless, because the enforcing agent changes. Mechanically: every probe file declares MEASURES_RUNTIME; a proof's file must declare the citing runtime, every probe a runtime's measured_by scripts run must too, and no script may measure two runtimes (gate finding t5-f4f5f32-F2).",
     "Both runc runtimes are measured (rootful by T3(a), rootless by gate finding t5-e5e3071-F6); the default is rootless. runsc and kata are not."
   ]
 }

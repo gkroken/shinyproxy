@@ -48,6 +48,11 @@ import buildkit_worker_profile as worker_profile
 import shipping_worker as sw
 import worker_disposal
 
+# The runtime this probe measures, read statically by dev/schema-fixture-check.py: a
+# runtime's proofs in spec/isolation-profile-v1.json may cite only probes that measure THAT
+# runtime (gate finding t5-f4f5f32-F2).
+MEASURES_RUNTIME = "runc-rootless"
+
 NET = "skald-sw-net"
 WORKER = "skald-sw-worker"
 VOLUME = "skald-sw-ws"

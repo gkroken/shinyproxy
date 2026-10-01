@@ -32,6 +32,11 @@ import quota_volume
 import run_attack_harness as h
 import shipping_worker as sw
 
+# The runtime this probe measures, read statically by dev/schema-fixture-check.py: a
+# runtime's proofs in spec/isolation-profile-v1.json may cite only probes that measure THAT
+# runtime (gate finding t5-f4f5f32-F2).
+MEASURES_RUNTIME = "runc-rootless"
+
 docker = h.docker
 results = []
 
