@@ -1096,6 +1096,12 @@ def _isolation_findings(spec, recorded, shipping=None, run_recorded=None):
                 "that measured it under that runtime" % n_proofs)
     good.append("  ok   selectable: %s; %d runtime(s) refused for being unmeasured"
                 % (", ".join(selectable), len(runtimes) - len(selectable)))
+    # The "ok" summary lines are claims about the whole profile, so they are withheld when
+    # anything above failed: printing "every bound ... names the check that measured it"
+    # under the FAIL lines that say otherwise read as a pass to anyone skimming (gate note
+    # t5-67b4ef5 N1). The exit code was always right; now the summary agrees with it.
+    if bad:
+        good = ["  --   summary withheld: %d failure(s) above" % len(bad)]
     return bad, good
 
 
@@ -1450,6 +1456,12 @@ ISOLATION_CASES = [
                  for b in ("cpu quota", "memory limit", "pid limit",
                            "loop-backed volume")]),
      "is in dev/sandbox-probe.py, which measures runc-rootful, not runc-rootless"),
+    # Proves the script_owner check by its own text (gate note t5-67b4ef5 N2). The probe
+    # declaration check fails the same edit too, which is why a case asserting only "it
+    # failed" left removing script_owner green.
+    ("one script cited by two runtimes",
+     lambda d: _rt(d)["runc-rootless"]["measured_by"].append("dev/validate-sandbox.sh"),
+     "which runtime runc-rootful also cites; one script cannot measure two runtimes"),
     ("another runtime's script listed under measured_by",
      lambda d: _rt(d)["runc-rootless"]["measured_by"].append("dev/validate-sandbox.sh"),
      "which runs dev/sandbox-probe.py, which measures runc-rootful, not runc-rootless"),
@@ -1530,7 +1542,11 @@ def self_test():
 
     missed = []
     for label, mutate, expect in ISOLATION_CASES:
-        found, _ = _isolation_findings(_mutate(spec, mutate), recorded)
+        found, summary = _isolation_findings(_mutate(spec, mutate), recorded)
+        if found and any(line.lstrip().startswith("ok") for line in summary):
+            # A case that failed must not also print an "ok" summary (t5-67b4ef5 N1).
+            print("  FAIL an ok summary was printed beside the failure: %s" % label)
+            missed.append(label + " (summary)")
         if not found:
             print("  FAIL not caught at all: %s" % label)
             missed.append(label)

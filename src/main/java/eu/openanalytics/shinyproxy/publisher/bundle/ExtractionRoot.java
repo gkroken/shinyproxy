@@ -306,10 +306,11 @@ public final class ExtractionRoot implements AutoCloseable {
      * AccessDeniedException rather than as a write somewhere else. EACCES belongs in that
      * list: this extractor created every directory here 0700 as its own uid, so permission
      * to write or search one can only have been taken away by something else changing its
-     * mode (gate finding t5-67b4ef5-F1; presentIn already treated it that way). Those are refusals, typed like {@link #descend}'s and freeze's:
-     * reaching a caller as a raw IOException, they read as an infrastructure failure to
-     * retry rather than as a tree this extractor no longer owns (gate finding
-     * t5-f4f5f32-F3). Package-private so a test can hand it a parent that is already gone.
+     * mode (gate finding t5-67b4ef5-F1; presentIn already treated it that way). Those are
+     * refusals, typed like {@link #descend}'s and freeze's: reaching a caller as a raw
+     * IOException, they read as an infrastructure failure to retry rather than as a tree
+     * this extractor no longer owns (gate finding t5-f4f5f32-F3). Package-private so a test
+     * can hand it a parent that is already gone.
      */
     long writeInto(SecureDirectoryStream<Path> directory, String fileName, String relative,
                    String memberPath, InputStream content, boolean executable)
