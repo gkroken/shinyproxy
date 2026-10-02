@@ -183,6 +183,27 @@ public class DockerWorkerLauncherTest {
     }
 
     @Test
+    public void aRefusedRelaunchLeavesTheLiveLaunchRunning() throws Exception {
+        // 67b7c17-F1: the same attempt launched twice. The second launch refuses, and its
+        // refusal must not dispose of the first, whose objects carry the same label.
+        String id = attempt();
+        Handle first = launcher.launch(request(id));
+        try {
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> launcher.launch(request(id)));
+            assertTrue(e.getMessage().contains("already taken"), e.getMessage());
+            assertTrue(docker.inspectContainer(first.worker()).state().running(),
+                    "the first launch's worker still runs");
+            assertTrue(docker.inspectContainer(first.gateway()).state().running(),
+                    "and its gateway");
+            assertTrue(docker.inspectVolume(first.workspaceVolume()).options().get("device")
+                    .startsWith("/dev/loop"), "and its workspace, still on its loop device");
+        } finally {
+            assertEquals(List.of(), launcher.dispose(first));
+        }
+    }
+
+    @Test
     public void aVolumeTakenBetweenTheCheckAndTheCreateIsNotAdopted() throws Exception {
         // The upfront name check refuses first in every launch, so the re-check after
         // create (the race guard) is exercised on its own here: the name is taken, as it

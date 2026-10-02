@@ -89,6 +89,8 @@ public final class DockerWorkerLauncher {
     static final String QUOTA_IMAGES_VOLUME = "skald-quota-images";
     private static final Pattern ATTEMPT = Pattern.compile("[a-z0-9]{8,40}");
     static final long GATEWAY_MEMORY = 256L << 20;
+    static final int REMOVAL_ATTEMPTS = 12;
+    static final long REMOVAL_PAUSE_MILLIS = 5_000;
     private static final Pattern LOOP = Pattern.compile("/dev/loop[0-9]{1,4}");
 
     /** The images the launcher runs, each by digest: the derived worker and gateway, a
@@ -163,12 +165,20 @@ public final class DockerWorkerLauncher {
     public Handle launch(Request request) throws InterruptedException {
         Handle h = handle(request.attemptId());
         Map<String, String> labels = Map.of(ATTEMPT_LABEL, request.attemptId());
+        // Outside the try: a refusal has made nothing, so there is nothing to dispose, and
+        // disposing would tear down whatever holds the names -- which, when it carries this
+        // attempt's label, is a LIVE launch of the same attempt (67b7c17-F1). A stale one is
+        // the reconciliation's to sweep: it knows from the lease that the attempt is dead.
+        try {
+            refuseTakenNames(h);
+        } catch (DockerException e) {
+            throw new IllegalStateException("could not check the attempt's names: " + e.getMessage(), e);
+        }
         try {
             String squid = GatewayConfig.squidConf(request.egress().registry(),
                     request.egress().repos(), request.egress().privateMirrors());
             Launch launch = profile.launch(request.settings(), h.network(), h.workspaceVolume());
 
-            refuseTakenNames(h);
             docker.createNetwork(NetworkConfig.builder().name(h.network()).internal(true)
                     .checkDuplicate(true).labels(labels).build());
             for (String v : List.of(h.socketVolume(), h.configVolume())) {
@@ -352,7 +362,9 @@ public final class DockerWorkerLauncher {
         docker.createContainer(ContainerConfig.builder().image(images.worker()).cmd(DAEMON_ARGS)
                 .env(env).labels(labels).hostConfig(hc).build(), h.worker());
         docker.startContainer(h.worker());
-        waitForLog(h.worker(), "found worker", 60);
+        // 120 s: a 60 s wait was missed once under load (the daemon stalled after its fsverity
+        // check and reported a worker only later); a healthy start takes a few seconds.
+        waitForLog(h.worker(), "found worker", 120);
     }
 
     /**
@@ -368,15 +380,15 @@ public final class DockerWorkerLauncher {
                 "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
             quietly(errors, () -> {
                 if (ours(docker.inspectContainer(c).config().labels(), h)) {
-                    docker.removeContainer(c, RemoveContainerParam.forceKill(),
-                            RemoveContainerParam.removeVolumes());
+                    retrying(() -> docker.removeContainer(c, RemoveContainerParam.forceKill(),
+                            RemoveContainerParam.removeVolumes()));
                 }
             });
         }
         for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume())) {
             quietly(errors, () -> {
                 if (ours(docker.inspectVolume(v).labels(), h)) {
-                    docker.removeVolume(v);
+                    retrying(() -> docker.removeVolume(v));
                 }
             });
         }
@@ -401,6 +413,28 @@ public final class DockerWorkerLauncher {
         left.addAll(errors.stream().filter(e -> !e.contains("No such") && !e.contains("not found"))
                 .map(e -> "error: " + e).toList());
         return left;
+    }
+
+    /**
+     * Runs a removal, retrying for up to a minute while the daemon answers with anything
+     * but "not found". Measured: a force-remove of a worker whose process was stuck returned
+     * HTTP 500 while the kill was still in flight; the container exited (137) shortly
+     * after, but the disposal had already given up, and its three volumes stayed "in use".
+     */
+    private static void retrying(Step removal) throws Exception {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                removal.run();
+                return;
+            } catch (NotFoundException | VolumeNotFoundException e) {
+                return;
+            } catch (DockerException e) {
+                if (attempt >= REMOVAL_ATTEMPTS) {
+                    throw e;
+                }
+                Thread.sleep(REMOVAL_PAUSE_MILLIS);
+            }
+        }
     }
 
     private static boolean ours(Map<String, String> labels, Handle h) {
