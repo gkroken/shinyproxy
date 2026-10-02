@@ -324,8 +324,12 @@ public class BuildCoordinatorTest {
 
     @Test
     public void aCancelDuringTheRunStopsTheWorkerThenCancels() throws Exception {
-        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
-        BuildRunner runner = new BuildRunner(coordinator, ONE);
+        // The cancel flag reaches the driver through the heartbeat's renewal (at most one
+        // renew_every later), so a short renewal interval keeps this test short.
+        CoordinatorSettings fast = new CoordinatorSettings(Duration.ofSeconds(2), Duration.ofSeconds(1),
+            Duration.ofMinutes(20), 1);
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, fast);
+        BuildRunner runner = new BuildRunner(coordinator, fast);
         UUID build = queued("alice");
         CountDownLatch running = new CountDownLatch(1);
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -488,6 +492,65 @@ public class BuildCoordinatorTest {
         assertEquals("INTERRUPTED", state(build));
         assertTrue(healthy.claim("n2").isPresent());
         outage.shutdown();
+    }
+
+    /** A DataSource whose connections, while {@code hanging}, take six seconds to arrive. */
+    private static final class HangingDataSource extends org.springframework.jdbc.datasource.DelegatingDataSource {
+        volatile boolean hanging;
+
+        HangingDataSource(javax.sql.DataSource target) {
+            super(target);
+        }
+
+        @Override
+        public java.sql.Connection getConnection() throws java.sql.SQLException {
+            if (hanging) {
+                try {
+                    Thread.sleep(6000);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return super.getConnection();
+        }
+    }
+
+    @Test
+    public void aWorkerWhoseRenewalHangsIsStoppedBeforeItsLeaseCouldExpire() throws Exception {
+        // 071ef50-F1 in its hanging form (59f1bc3 review): a renewal that neither returns nor
+        // throws -- a connection that takes 6 s to arrive -- must not delay the stop signal.
+        // Lease 3 s, renew 1 s: the driver has to hear "stop" before 3 s, while renew() is
+        // still stuck.
+        HangingDataSource hanging = new HangingDataSource(jdbc.getDataSource());
+        BuildCoordinator runnersView = new BuildCoordinator(new JdbcTemplate(hanging), THREE_SECONDS);
+        UUID build = queued("alice");
+        long[] stoppedAfterMs = {-1};
+        long start = System.nanoTime();
+        ExecutorService window = Executors.newSingleThreadExecutor();
+        window.submit(() -> {
+            Thread.sleep(700);
+            hanging.hanging = true;     // the ~1 s renewal waits 6 s for its connection
+            Thread.sleep(900);
+            hanging.hanging = false;
+            return null;
+        });
+        BuildRunner.Result result = new BuildRunner(runnersView, THREE_SECONDS).runOnce("n1", (b, stop) -> {
+            for (int i = 0; i < 200; i++) {
+                if (stop.getAsBoolean()) {
+                    stoppedAfterMs[0] = (System.nanoTime() - start) / 1_000_000;
+                    return new BuildDriver.Built(DIGEST);
+                }
+                Thread.sleep(50);
+            }
+            return new BuildDriver.Built(DIGEST);
+        });
+        assertTrue(stoppedAfterMs[0] >= 0, "the driver was never told to stop");
+        assertTrue(stoppedAfterMs[0] < 2900, "told to stop only after " + stoppedAfterMs[0]
+            + " ms, past the point where the 3 s lease could be reaped");
+        assertEquals(BuildRunner.Result.FENCED, result);
+        assertEquals(null, jdbc.queryForObject("SELECT output_image FROM skald.build WHERE id = ?",
+            String.class, build));
+        window.shutdown();
     }
 
     @Test

@@ -23,6 +23,7 @@
 package eu.openanalytics.shinyproxy.publisher.build;
 
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -40,8 +41,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * worker's, and the driver is told to stop through the same signal as a cancellation;
  * whatever it returns afterwards is not written. A renewal that THROWS (a connection blip,
  * a failover) is not an answer, so it is retried on the next tick -- but the worker is
- * declared lost once the last SUCCESSFUL renewal is older than lease minus renew_every,
- * which is always before the database could expire the lease. That bound is the point: the
+ * declared lost once the last SUCCESSFUL renewal is older than lease minus half of
+ * renew_every, which is always before the database could expire the lease. That cutoff is evaluated by
+ * the driver's stop signal itself, from memory, so a renewal that HANGS cannot delay it; and
+ * the cancel flag reaches the driver through the heartbeat's renewal, so the driver's thread
+ * never waits on the database. That bound is the point: the
  * slot must not look free to another coordinator while this worker still runs untrusted
  * code (071ef50-F1, where one thrown renewal killed the heartbeat task for good --
  * ScheduledExecutorService suppresses every run after a task throws -- and the first worker
@@ -71,19 +75,6 @@ public final class BuildRunner {
         this.settings = settings;
     }
 
-    /**
-     * The cancel flag as the driver's stop signal sees it. A read that throws is "keep going":
-     * the driver must not receive the exception, and a lease lost meanwhile is still caught by
-     * the heartbeat.
-     */
-    private boolean cancelRequested(Lease lease) {
-        try {
-            return coordinator.cancelRequested(lease);
-        } catch (RuntimeException unanswered) {
-            return false;
-        }
-    }
-
     public Result runOnce(String owner, BuildDriver driver) {
         long claimStarted = System.nanoTime();
         Optional<BuildDriver.Claimed> claimed = coordinator.claim(owner);
@@ -101,34 +92,53 @@ public final class BuildRunner {
             return t;
         });
         long every = settings.renewEvery().toMillis();
-        long tolerate = settings.lease().minus(settings.renewEvery()).toNanos();
+        // The cutoff: half a renewal period before the lease could expire. It must be MORE
+        // than one period after the last success, or a healthy worker is declared lost in the
+        // moment before each on-time renewal completes (measured: lease - renew_every, exactly
+        // one period, stopped three healthy builds). renew_every <= lease/2 leaves one and a
+        // half periods, so one failed renewal is survived; and the worker still stops half a
+        // period before the database could expire it (10 s at the defaults).
+        long tolerate = settings.lease().minus(settings.renewEvery().dividedBy(2)).toNanos();
         AtomicLong lastRenewed = new AtomicLong(claimStarted);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        // The worker's one question, answered from memory only: lost, cancelled, or too long
+        // since the last renewal the database confirmed. A function of TIME, so it turns true
+        // on schedule however long a renewal is stuck -- a renewal that hangs (an unreachable
+        // host, a half-open connection, a pool wait) never returns to say so (071ef50-F1).
+        BooleanSupplier stop = () -> {
+            if (!lost.get() && System.nanoTime() - lastRenewed.get() >= tolerate) {
+                lost.set(true);
+            }
+            return lost.get() || cancelled.get();
+        };
         heartbeat.scheduleAtFixedRate(() -> {
-            // Never throws: a scheduled task that throws is never run again.
+            // Never throws: a scheduled task that throws is never run again. A renewal the
+            // database REFUSES is definitive. One that throws or hangs is no answer; the time
+            // cutoff in `stop` covers it.
             if (lost.get()) {
                 return;
             }
             long started = System.nanoTime();
             try {
-                if (coordinator.renew(lease)) {
-                    lastRenewed.set(started);
-                } else {
+                Optional<Boolean> renewed = coordinator.renewAndReadCancel(lease);
+                if (renewed.isEmpty()) {
                     lost.set(true);
+                } else {
+                    lastRenewed.set(started);
+                    cancelled.set(renewed.get());
                 }
             } catch (Throwable unanswered) {
-                if (System.nanoTime() - lastRenewed.get() >= tolerate) {
-                    lost.set(true);
-                }
+                // retried on the next tick
             }
-        }, every, every, TimeUnit.MILLISECONDS);
+        }, 0, every, TimeUnit.MILLISECONDS);
         try {
             BuildDriver.Outcome outcome;
             try {
-                outcome = driver.run(build, () -> lost.get() || cancelRequested(lease));
+                outcome = driver.run(build, stop);
             } catch (Exception ex) {
                 outcome = new BuildDriver.Failed("DRIVER_ERROR", ex.getClass().getSimpleName());
             }
-            if (lost.get()) {
+            if (stop.getAsBoolean() && lost.get()) {
                 return Result.FENCED;
             }
             if (outcome instanceof BuildDriver.Built built) {

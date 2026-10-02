@@ -124,13 +124,26 @@ public final class BuildCoordinator {
 
     /** Extends a live lease. False when the lease is no longer the caller's: stop. */
     public boolean renew(Lease lease) {
-        return jdbc.update("UPDATE skald.build SET lease_expires_at = now() + make_interval(secs => ?),"
+        return renewAndReadCancel(lease).isPresent();
+    }
+
+    /**
+     * Extends a live lease and, in the same statement, reads whether a cancellation was
+     * requested. Empty when the lease is no longer the caller's. One statement, so the
+     * heartbeat brings the cancel flag to the worker and the driver's own thread never has
+     * to touch the database (071ef50-F1: a driver blocked in a database read cannot be told
+     * to stop).
+     */
+    public Optional<Boolean> renewAndReadCancel(Lease lease) {
+        List<Boolean> rows = jdbc.queryForList("UPDATE skald.build SET lease_expires_at = now()"
+                + " + make_interval(secs => ?),"
                 + " updated_at = now() WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
                 + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()"
                 // Past the wall deadline the lease is not renewed, so the heartbeat stops the
                 // worker without waiting for a reaper (071ef50 review N2).
-                + " AND deadline_at > now()",
-                settings.lease().toSeconds(), lease.buildId(), lease.generation(), lease.owner()) == 1;
+                + " AND deadline_at > now() RETURNING cancel_requested_at IS NOT NULL", Boolean.class,
+                settings.lease().toSeconds(), lease.buildId(), lease.generation(), lease.owner());
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     /** Has a cancellation been requested for the attempt this lease holds? */
