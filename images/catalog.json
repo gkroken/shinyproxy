@@ -22,7 +22,18 @@
       "package_manager_sha256": {
         "renv": "c6dd55e6ad50e846bb91e2d2ced99b32c08a110dc9f5337cb7ea29749f049c5f"
       },
-      "system_packages": ["libuv1-dev", "pkg-config", "zlib1g-dev"]
+      "system_packages": ["libuv1-dev", "pkg-config", "zlib1g-dev"],
+      "system_packages_pulled_in": ["libpkgconf3", "libuv1t64", "pkgconf", "pkgconf-bin"],
+      "system_package_licenses": {
+        "libuv1-dev": "Expat (MIT); a few files ISC/BSD-2-Clause",
+        "libuv1t64": "Expat (MIT); a few files ISC/BSD-2-Clause",
+        "pkg-config": "ISC (pkgconf; transitional package)",
+        "pkgconf": "ISC; pkg.m4 GPL-2+ or ISC",
+        "pkgconf-bin": "ISC",
+        "libpkgconf3": "ISC; getopt BSD-2/BSD-4",
+        "zlib1g-dev": "Zlib"
+      },
+      "system_package_licenses_note": "Summaries of /usr/share/doc/<package>/copyright in the built image, which is authoritative. Build tools and libraries inside the base, used to compile R packages; nothing here is linked into Skald."
     },
     {
       "id": "python-shiny-3.13.16-amd64-r1",
@@ -41,7 +52,9 @@
       },
       "user": "10001:10001",
       "port": 3838,
-      "system_packages": []
+      "system_packages": [],
+      "system_packages_pulled_in": [],
+      "system_package_licenses": {}
     }
   ]
 }

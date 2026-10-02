@@ -16,9 +16,11 @@ has 1.2.x is the kind of record this project keeps catching.
 
 Two kinds of check:
   static  the catalog and the Dockerfiles agree (upstream digest, renv version and hash, the
-          system packages apt installs), and every upstream is digest-pinned
+          system packages apt installs, a licence for every added package), every upstream
+          is digest-pinned, and no package-manager invocation is in a form this cannot read
   live    inside each built image: exact language version, package-manager version, OS, the
-          uid 10001 user, every recorded system package installed, and for R that NO repository is configured -- rocker defaults to
+          uid 10001 user, the EXACT set of OS packages the base adds over its upstream
+          (explicit plus pulled in, so a transitive surprise is caught too), and for R that NO repository is configured -- rocker defaults to
           Posit Package Manager (p3m.dev), which the user does not want, and a default baked
           into the base is one a build could silently resolve against
 
@@ -92,7 +94,30 @@ def judge_static(entry, dockerfile_text):
     if installed != sorted(entry["system_packages"]):
         problems.append("Dockerfile apt-installs %s != catalog system_packages %s"
                         % (installed, sorted(entry["system_packages"])))
+    problems += unreadable_package_commands(dockerfile_text)
+    added = set(entry["system_packages"]) | set(entry["system_packages_pulled_in"])
+    if set(entry["system_package_licenses"]) != added:
+        problems.append("system_package_licenses covers %s, the base adds %s"
+                        % (sorted(entry["system_package_licenses"]), sorted(added)))
     return not problems, "; ".join(problems) or "Dockerfile and catalog agree"
+
+
+# The only package-manager forms a base may use: what apt_installed reads, and the index
+# refresh before it. Anything else -- `apt install`, `apt-get -y install`, dpkg -i, aptitude
+# -- would install packages apt_installed cannot see, so it is refused rather than parsed
+# (9a21ce5 review N1).
+READABLE_PACKAGE_COMMANDS = ("apt-get update", "apt-get install -y --no-install-recommends ")
+
+
+def unreadable_package_commands(dockerfile_text):
+    instructions = "\n".join(l for l in dockerfile_text.splitlines()
+                             if not l.lstrip().startswith("#"))
+    problems = []
+    for m in re.finditer(r"(?<![\w/.-])(apt-get|apt|aptitude|dpkg)(?![\w/.-])", instructions):
+        if not instructions.startswith(READABLE_PACKAGE_COMMANDS, m.start()):
+            problems.append("a package-manager command this cannot read: %r"
+                            % instructions[m.start():m.start() + 40].split("\n")[0])
+    return problems
 
 
 def apt_installed(dockerfile_text):
@@ -103,7 +128,7 @@ def apt_installed(dockerfile_text):
     return sorted(names)
 
 
-def judge_live(entry, facts):
+def judge_live(entry, facts, upstream_facts=None):
     """(ok, detail): what the built image reports, against the catalog."""
     problems = []
     if facts.get("version") != entry["version"]:
@@ -114,10 +139,19 @@ def judge_live(entry, facts):
             problems.append("%s %s, catalog %s" % (tool, facts.get(tool), want))
     if not str(facts.get("os", "")).startswith(entry["os"]):
         problems.append("os %s, catalog %s" % (facts.get("os"), entry["os"]))
-    have = set(facts.get("dpkg", "").split())
+    have = installed_packages(facts)
     for pkg in entry["system_packages"]:
         if pkg not in have:
             problems.append("system package %s is not installed" % pkg)
+    if upstream_facts is not None:
+        added = set(have) - set(installed_packages(upstream_facts))
+        recorded = set(entry["system_packages"]) | set(entry["system_packages_pulled_in"])
+        if added - recorded:
+            problems.append("the base adds OS packages the catalog does not record: %s"
+                            % sorted(added - recorded))
+        if recorded - added:
+            problems.append("the catalog records OS packages the base does not add: %s"
+                            % sorted(recorded - added))
     if facts.get("uid") != entry["user"].split(":")[0]:
         problems.append("user skald has uid %s, catalog %s" % (facts.get("uid"), entry["user"]))
     if entry["language"] == "r":
@@ -130,7 +164,18 @@ def judge_live(entry, facts):
         # which rocker sets, prefixes "R/<version> ".
         if facts.get("agent", "").startswith("R/"):
             problems.append("R sends PPM's binary-selecting user agent: %s" % facts.get("agent"))
-    return not problems, "; ".join(problems) or "every recorded fact holds"
+    if problems:
+        return False, "; ".join(problems)
+    added = sorted(set(have) - set(installed_packages(upstream_facts or {"dpkg": ""}))) \
+        if upstream_facts is not None else []
+    return True, "every recorded fact holds" + (
+        "; adds " + ", ".join("%s=%s" % (p, have[p]) for p in added) if added else "")
+
+
+def installed_packages(facts):
+    """{name: version} from the dpkg fact ("name=version" tokens)."""
+    return dict(tok.split("=", 1) if "=" in tok else (tok, "")
+                for tok in facts.get("dpkg", "").split())
 
 
 # ------------------------------------------------------------------ the run
@@ -145,13 +190,15 @@ FACTS = {
 }
 COMMON = ". /etc/os-release; echo os=$NAME $VERSION_ID; echo uid=$(id -u skald);"
 # Names of the packages dpkg reports fully installed (not merely known or config-files).
-DPKG = (" echo dpkg=$(dpkg-query -W -f='${db:Status-Status} ${Package}\\n'"
+DPKG = (" echo dpkg=$(dpkg-query -W -f='${db:Status-Status} ${Package}=${Version}\\n'"
         " | awk '$1 == \"installed\" {print $2}' | tr '\\n' ' ')")
 
 
-def facts_of(image, language):
+def facts_of(image, language=None):
+    """The image's facts; with no language, only the OS-level ones (for an upstream)."""
+    script = (FACTS[language] + COMMON + DPKG) if language else DPKG
     out = docker(["run", "--rm", "--network", "none", "--entrypoint", "sh", image, "-c",
-                  FACTS[language] + COMMON + DPKG], timeout=300)
+                  script], timeout=300)
     facts = {}
     for line in out.stdout.splitlines():
         if "=" in line:
@@ -203,7 +250,11 @@ def main(argv):
                        % (built.stdout + built.stderr).strip()[-300:], False)
                 continue
             tags.append(tag)
-            ok, detail = judge_live(entry, facts_of(tag, entry["language"]))
+            # The upstream's own package set, for the exact-difference check. Pulled by
+            # digest: the build's copy lives in BuildKit's store, not necessarily docker's.
+            docker(["pull", "-q", entry["upstream"]], timeout=900)
+            ok, detail = judge_live(entry, facts_of(tag, entry["language"]),
+                                    facts_of(entry["upstream"]))
             record("live: " + entry["id"], "", detail, ok)
     finally:
         docker(["rm", "-f", FORGE])
@@ -227,7 +278,9 @@ def self_test():
     r = next(e for e in catalog()["bases"] if e["language"] == "r")
     good = {"version": r["version"], "renv": "1.3.0", "os": "Ubuntu 24.04", "uid": "10001",
             "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)",
-            "dpkg": "base-files libuv1-dev pkg-config zlib1g-dev"}
+            "dpkg": "base-files=13 libuv1-dev=1 pkg-config=1 zlib1g-dev=1 libpkgconf3=1"
+                    " libuv1t64=1 pkgconf=1 pkgconf-bin=1"}
+    upstream = {"dpkg": "base-files=13"}
 
     def expect(label, judged, want):
         ok, detail = judged
@@ -246,8 +299,12 @@ def self_test():
     expect("a wrong R is caught", judge_live(r, dict(clean, version="4.6.0")), False)
     expect("a root or missing user is caught", judge_live(r, dict(clean, uid="")), False)
     expect("a missing system package is caught", judge_live(r, dict(clean, dpkg=
-           "base-files libuv1-dev pkg-config")), False)
-    expect("the clean facts pass", judge_live(r, clean), True)
+           clean["dpkg"].replace(" zlib1g-dev=1", "")), upstream), False)
+    expect("an unrecorded added package is caught (transitive surprise)", judge_live(
+           r, dict(clean, dpkg=clean["dpkg"] + " libssl-dev=3"), upstream), False)
+    expect("a recorded package the base does not add is caught", judge_live(
+           r, clean, {"dpkg": "base-files=13 pkgconf=1"}), False)
+    expect("the clean facts pass", judge_live(r, clean, upstream), True)
     text = (REPO / r["dockerfile"]).read_text()
     expect("an unpinned upstream is caught", judge_static(dict(r, upstream="rocker/r-ver:4.6.1"),
            text.replace(r["upstream"], "rocker/r-ver:4.6.1")), False)
@@ -260,6 +317,15 @@ def self_test():
     expect("a Dockerfile installing more than the catalog records is caught",
            judge_static(r, text.replace(" zlib1g-dev", " zlib1g-dev libcurl4-openssl-dev")),
            False)
+    run_line = "RUN apt-get update \\\n && apt-get install -y --no-install-recommends "
+    for form in ("apt-get update && apt-get -y install libfoo", "apt install -y libbar",
+                 "dpkg -i /tmp/x.deb", "aptitude install libbaz"):
+        expect("an unreadable install form is caught: " + form, judge_static(
+               r, text.replace(run_line, "RUN %s \\\n && apt-get install -y "
+                               "--no-install-recommends " % form)), False)
+    expect("a licence map missing a package is caught", judge_static(
+           dict(r, system_package_licenses={k: v for k, v in
+                r["system_package_licenses"].items() if k != "pkgconf"}), text), False)
     expect("the shipped Dockerfile and catalog agree", judge_static(r, text), True)
     expect("a catalog with no renv hash is caught",
            judge_static(dict(r, package_manager_sha256={}), text), False)
