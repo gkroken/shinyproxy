@@ -38,6 +38,12 @@ MVN_DOCKER := docker run --rm --network host --group-add $(DOCKER_GID) \
 test:                         ## Run the test suite (starts real containers)
 	@mkdir -p "$(M2)" "$(M2_HOME)"
 	@docker pull -q openanalytics/shinyproxy-integration-test-app >/dev/null
+	@# The build-worker launcher's integration test (DockerWorkerLauncherTest) launches the
+	@# real worker and gateway from the images/ Dockerfiles, with the pinned helper images.
+	@docker build -q -t skald-buildkit-worker:test images/buildkit-worker >/dev/null
+	@docker build -q -t skald-egress-gateway:test images/egress-gateway >/dev/null
+	@docker pull -q busybox@sha256:ea2b9914a16a4ac1981994af97b318f7c7d4db76b580c56177f08bf76f4a0be8 >/dev/null
+	@docker pull -q debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 >/dev/null
 	$(MVN_DOCKER) test
 
 # Coverage-guided fuzzing of the bundle parser (BundleFuzzTest). `make test` already runs

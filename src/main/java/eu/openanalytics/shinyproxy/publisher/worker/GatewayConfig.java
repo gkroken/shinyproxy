@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * repository ports; deny all. See that module's docstring for why each rule exists.
  *
  * <p>{@code GatewayConfigTest} holds this to squid.conf files the Python module generated
- * (dev/fixtures/worker/squid-*.conf, by dev/worker-artifacts.py --write), byte for byte.
+ * (dev/fixtures/worker/squid-confs.json, by dev/worker-artifacts.py --write), byte for byte.
  *
  * <p>Host names are written into squid's configuration language, so each is checked
  * against a strict DNS-name grammar first: a space would add an ACL value, a newline a
