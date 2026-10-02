@@ -42,7 +42,8 @@ import java.util.UUID;
  * after a restart, sees exactly the same thing, which is what makes several instances safe.
  *
  * <p>Every worker-side transition is one UPDATE whose WHERE clause carries the expected
- * state, the lease's generation and an unexpired lease. Zero rows matched means the attempt
+ * state, the lease's generation, an unexpired lease and an unpassed wall deadline (past it
+ * the attempt is TIMED_OUT's to the reaper, never a late success). Zero rows matched means the attempt
  * is no longer the caller's, and {@link Fenced} is thrown rather than anything being merged.
  * The transitions are spec/lifecycle-v1.json's build machine; none activates anything.
  */
@@ -125,7 +126,10 @@ public final class BuildCoordinator {
     public boolean renew(Lease lease) {
         return jdbc.update("UPDATE skald.build SET lease_expires_at = now() + make_interval(secs => ?),"
                 + " updated_at = now() WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
-                + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()",
+                + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()"
+                // Past the wall deadline the lease is not renewed, so the heartbeat stops the
+                // worker without waiting for a reaper (071ef50 review N2).
+                + " AND deadline_at > now()",
                 settings.lease().toSeconds(), lease.buildId(), lease.generation(), lease.owner()) == 1;
     }
 
@@ -149,7 +153,8 @@ public final class BuildCoordinator {
         int changed = jdbc.update("UPDATE skald.build SET state = 'FAILED', finished_at = now(),"
                 + " updated_at = now(), error_code = ?, error_detail = ?"
                 + " WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
-                + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()",
+                + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()"
+                + " AND deadline_at > now()",
                 code, detail, lease.buildId(), lease.generation(), lease.owner());
         requireOne(changed, lease, "FAILED");
         audit(lease.owner(), "build.failed", lease.buildId(), Map.of("code", code));
@@ -159,7 +164,8 @@ public final class BuildCoordinator {
     public void confirmCancelled(Lease lease) {
         int changed = jdbc.update("UPDATE skald.build SET state = 'CANCELLED', finished_at = now(),"
                 + " updated_at = now() WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
-                + " AND state = 'RUNNING' AND cancel_requested_at IS NOT NULL AND lease_expires_at > now()",
+                + " AND state = 'RUNNING' AND cancel_requested_at IS NOT NULL AND lease_expires_at > now()"
+                + " AND deadline_at > now()",
                 lease.buildId(), lease.generation(), lease.owner());
         requireOne(changed, lease, "CANCELLED");
         audit(lease.owner(), "build.cancelled", lease.buildId(), Map.of("confirmed", "true"));
@@ -170,7 +176,7 @@ public final class BuildCoordinator {
         args.addAll(List.of(lease.buildId(), lease.generation(), lease.owner(), from));
         int changed = jdbc.update("UPDATE skald.build SET " + set + ", updated_at = now()"
                 + " WHERE id = ? AND lease_generation = ? AND lease_owner = ? AND state = ?"
-                + " AND lease_expires_at > now()", args.toArray());
+                + " AND lease_expires_at > now() AND deadline_at > now()", args.toArray());
         requireOne(changed, lease, from + " -> next");
         audit(lease.owner(), action, lease.buildId(), Map.of("generation", String.valueOf(lease.generation())));
     }

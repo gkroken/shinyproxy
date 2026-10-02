@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Runs one claimed attempt through a {@link BuildDriver}: claim, keep the lease alive while
@@ -34,10 +35,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * step 4's shape, without the image publication that is T7's and the version transaction
  * that is a later T6 part). No request thread ever waits on this.
  *
- * <p>The heartbeat renews the lease every renew_every. When a renewal fails the lease is
- * gone (reaped, or the deadline passed), the attempt is no longer this worker's, and the
- * driver is told to stop through the same signal as a cancellation; whatever it returns
- * afterwards is not written.
+ * <p>The heartbeat renews the lease every renew_every. A renewal the database REFUSES means
+ * the lease is gone (reaped, or the deadline passed): the attempt is no longer this
+ * worker's, and the driver is told to stop through the same signal as a cancellation;
+ * whatever it returns afterwards is not written. A renewal that THROWS (a connection blip,
+ * a failover) is not an answer, so it is retried on the next tick -- but the worker is
+ * declared lost once the last SUCCESSFUL renewal is older than lease minus renew_every,
+ * which is always before the database could expire the lease. That bound is the point: the
+ * slot must not look free to another coordinator while this worker still runs untrusted
+ * code (071ef50-F1, where one thrown renewal killed the heartbeat task for good --
+ * ScheduledExecutorService suppresses every run after a task throws -- and the first worker
+ * ran on beside the next).
  */
 public final class BuildRunner {
 
@@ -63,11 +71,27 @@ public final class BuildRunner {
         this.settings = settings;
     }
 
+    /**
+     * The cancel flag as the driver's stop signal sees it. A read that throws is "keep going":
+     * the driver must not receive the exception, and a lease lost meanwhile is still caught by
+     * the heartbeat.
+     */
+    private boolean cancelRequested(Lease lease) {
+        try {
+            return coordinator.cancelRequested(lease);
+        } catch (RuntimeException unanswered) {
+            return false;
+        }
+    }
+
     public Result runOnce(String owner, BuildDriver driver) {
+        long claimStarted = System.nanoTime();
         Optional<BuildDriver.Claimed> claimed = coordinator.claim(owner);
         if (claimed.isEmpty()) {
             return Result.IDLE;
         }
+        // Measured from BEFORE the claim: the database set the expiry no earlier than this,
+        // so a local deadline counted from here is never later than the real one.
         BuildDriver.Claimed build = claimed.get();
         Lease lease = build.lease();
         AtomicBoolean lost = new AtomicBoolean(false);
@@ -77,15 +101,30 @@ public final class BuildRunner {
             return t;
         });
         long every = settings.renewEvery().toMillis();
+        long tolerate = settings.lease().minus(settings.renewEvery()).toNanos();
+        AtomicLong lastRenewed = new AtomicLong(claimStarted);
         heartbeat.scheduleAtFixedRate(() -> {
-            if (!lost.get() && !coordinator.renew(lease)) {
-                lost.set(true);
+            // Never throws: a scheduled task that throws is never run again.
+            if (lost.get()) {
+                return;
+            }
+            long started = System.nanoTime();
+            try {
+                if (coordinator.renew(lease)) {
+                    lastRenewed.set(started);
+                } else {
+                    lost.set(true);
+                }
+            } catch (Throwable unanswered) {
+                if (System.nanoTime() - lastRenewed.get() >= tolerate) {
+                    lost.set(true);
+                }
             }
         }, every, every, TimeUnit.MILLISECONDS);
         try {
             BuildDriver.Outcome outcome;
             try {
-                outcome = driver.run(build, () -> lost.get() || coordinator.cancelRequested(lease));
+                outcome = driver.run(build, () -> lost.get() || cancelRequested(lease));
             } catch (Exception ex) {
                 outcome = new BuildDriver.Failed("DRIVER_ERROR", ex.getClass().getSimpleName());
             }

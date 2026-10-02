@@ -1952,7 +1952,11 @@ below are marked passed by this planning document.
       refusing every bundle with a non-ASCII file name; `extract()` also calls it before
       touching the disk. The deployment notes must say the service needs a UTF-8 locale
       (e.g. `LANG=C.UTF-8` in the unit file): path encoding follows `sun.jnu.encoding`, not
-      `file.encoding` (gate re-verification finding `t5-f4f5f32-F4`).
+      `file.encoding` (gate re-verification finding `t5-f4f5f32-F4`). (4) A cancel requested
+      while RUNNING does not stop a driver that finishes first: the attempt goes on to
+      PUBLISHING with `cancel_requested_at` set, which is the machine's rule (no
+      RUNNING -> CANCELLED without a confirmed stop). Show it as "cancel requested; the
+      build had already finished", not as an ignored request (071ef50 review N3).
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.

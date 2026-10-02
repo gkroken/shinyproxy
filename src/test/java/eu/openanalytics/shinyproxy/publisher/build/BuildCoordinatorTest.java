@@ -397,6 +397,140 @@ public class BuildCoordinatorTest {
         reaper.shutdown();
     }
 
+    /** A DataSource that refuses connections while {@code failing} is set: a database blip. */
+    private static final class FlakyDataSource extends org.springframework.jdbc.datasource.DelegatingDataSource {
+        volatile boolean failing;
+
+        FlakyDataSource(javax.sql.DataSource target) {
+            super(target);
+        }
+
+        @Override
+        public java.sql.Connection getConnection() throws java.sql.SQLException {
+            if (failing) {
+                throw new java.sql.SQLException("simulated: the database is unreachable");
+            }
+            return super.getConnection();
+        }
+    }
+
+    private static final CoordinatorSettings THREE_SECONDS = new CoordinatorSettings(
+        Duration.ofSeconds(3), Duration.ofSeconds(1), Duration.ofMinutes(20), 1);
+
+    @Test
+    public void aRenewalThatThrowsOnceDoesNotKillTheHeartbeat() throws Exception {
+        // 071ef50-F1, the transient half: one renewal fails with a database error (not a
+        // refusal). The heartbeat must survive it, renew on the next tick, and the build finish.
+        FlakyDataSource flaky = new FlakyDataSource(jdbc.getDataSource());
+        BuildCoordinator coordinator = new BuildCoordinator(new JdbcTemplate(flaky), THREE_SECONDS);
+        UUID build = queued("alice");
+        java.util.concurrent.atomic.AtomicBoolean sawStop = new java.util.concurrent.atomic.AtomicBoolean();
+        ExecutorService blip = Executors.newSingleThreadExecutor();
+        blip.submit(() -> {
+            Thread.sleep(700);
+            flaky.failing = true;      // covers the renewal at ~1 s
+            Thread.sleep(700);
+            flaky.failing = false;
+            return null;
+        });
+        BuildRunner.Result result = new BuildRunner(coordinator, THREE_SECONDS).runOnce("n1", (b, stop) -> {
+            for (int i = 0; i < 50; i++) {
+                if (stop.getAsBoolean()) {
+                    sawStop.set(true);
+                    return new BuildDriver.Stopped();
+                }
+                Thread.sleep(100);
+            }
+            return new BuildDriver.Built(DIGEST);
+        });
+        assertFalse(sawStop.get(), "one failed renewal stopped a healthy build");
+        assertEquals(BuildRunner.Result.PUBLISHING, result);
+        assertEquals("PUBLISHING", state(build));
+        blip.shutdown();
+    }
+
+    @Test
+    public void aWorkerThatCannotRenewIsStoppedBeforeItsLeaseCouldExpire() throws Exception {
+        // 071ef50-F1, the reviewer's shape: the runner's database goes away for good just after
+        // the claim. Its renewals all THROW. The driver must be told to stop before the lease
+        // could expire -- otherwise a healthy coordinator reaps it, claims the next build, and
+        // two workers run under max_running = 1 while the first still runs untrusted code.
+        FlakyDataSource flaky = new FlakyDataSource(jdbc.getDataSource());
+        BuildCoordinator runnersView = new BuildCoordinator(new JdbcTemplate(flaky), THREE_SECONDS);
+        UUID build = queued("alice");
+        queued("bob");
+        long[] stoppedAfterMs = {-1};
+        long start = System.nanoTime();
+        ExecutorService outage = Executors.newSingleThreadExecutor();
+        outage.submit(() -> {
+            Thread.sleep(500);
+            flaky.failing = true;
+            return null;
+        });
+        BuildRunner.Result result = new BuildRunner(runnersView, THREE_SECONDS).runOnce("n1", (b, stop) -> {
+            for (int i = 0; i < 100; i++) {
+                if (stop.getAsBoolean()) {
+                    stoppedAfterMs[0] = (System.nanoTime() - start) / 1_000_000;
+                    return new BuildDriver.Built(DIGEST);
+                }
+                Thread.sleep(50);
+            }
+            return new BuildDriver.Built(DIGEST);
+        });
+        assertEquals(BuildRunner.Result.FENCED, result);
+        assertTrue(stoppedAfterMs[0] >= 0, "the driver was never told to stop");
+        assertTrue(stoppedAfterMs[0] < 2900, "told to stop only after " + stoppedAfterMs[0]
+            + " ms, when the 3 s lease could already have been reaped");
+        // The rest of the world, on a healthy connection, reaps it once the lease expires.
+        Thread.sleep(Math.max(0, 3200 - (System.nanoTime() - start) / 1_000_000));
+        BuildCoordinator healthy = new BuildCoordinator(jdbc, THREE_SECONDS);
+        healthy.reap();
+        assertEquals("INTERRUPTED", state(build));
+        assertTrue(healthy.claim("n2").isPresent());
+        outage.shutdown();
+    }
+
+    @Test
+    public void aPassedDeadlineStopsTheWorkerThroughItsOwnHeartbeat() throws Exception {
+        // 071ef50 review N2: past deadline_at the lease is not renewed, so the worker stops
+        // without any reaper running.
+        CoordinatorSettings fast = new CoordinatorSettings(Duration.ofSeconds(2), Duration.ofSeconds(1),
+            Duration.ofMinutes(20), 1);
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, fast);
+        UUID build = queued("alice");
+        CountDownLatch running = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Future<BuildRunner.Result> result = pool.submit(() -> new BuildRunner(coordinator, fast).runOnce("n1",
+            (b, stop) -> {
+                running.countDown();
+                for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
+                    Thread.sleep(100);
+                }
+                return new BuildDriver.Built(DIGEST);
+            }));
+        assertTrue(running.await(30, TimeUnit.SECONDS));
+        jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second' WHERE id = ?", build);
+        assertEquals(BuildRunner.Result.FENCED, result.get(10, TimeUnit.SECONDS));
+        assertEquals("RUNNING", state(build), "nothing but the reaper may end it");
+        coordinator.reap();
+        assertEquals("TIMED_OUT", state(build));
+        pool.shutdown();
+    }
+
+    @Test
+    public void noWorkerTransitionIsAcceptedPastTheDeadline() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        UUID build = queued("alice");
+        Lease lease = coordinator.claim("n1").orElseThrow().lease();
+        jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second',"
+            + " cancel_requested_at = now() WHERE id = ?", build);
+        assertFalse(coordinator.renew(lease));
+        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST), "a late success");
+        assertThrows(Fenced.class, () -> coordinator.fail(lease, "X", "late"));
+        assertThrows(Fenced.class, () -> coordinator.confirmCancelled(lease));
+        assertEquals("RUNNING", state(build));
+    }
+
     @Test
     public void aCrashedWorkerIsReapedAndTheQueueMovesOn() {
         // The crash, as the database sees it: a claim, then silence.
