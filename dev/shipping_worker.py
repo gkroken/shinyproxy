@@ -78,9 +78,9 @@ def docker(args, **kw):
     return subprocess.run(["docker"] + args, capture_output=True, text=True, **kw)
 
 
-def build_worker_image(directory, strip=tuple(STRIP), tag=BUILDKIT_IMAGE):
-    """The derived worker image. `strip` is a parameter so a self-test can build one that
-    keeps a setuid binary and require the scan to notice it."""
+def worker_dockerfile(strip=tuple(STRIP)):
+    """The derived worker image's Dockerfile text. images/buildkit-worker/Dockerfile ships
+    exactly this (below its comment header); dev/worker-artifacts.py checks that."""
     lines = ["FROM %s" % UPSTREAM_IMAGE, "USER root",
              "RUN addgroup -g %d skaldbuild && adduser -D -H -u %d -G skaldbuild skaldbuild"
              " && echo skaldbuild:%d:%d > /etc/subuid && echo skaldbuild:%d:%d > /etc/subgid"
@@ -88,9 +88,15 @@ def build_worker_image(directory, strip=tuple(STRIP), tag=BUILDKIT_IMAGE):
     if strip:
         lines.append("RUN chmod u-s,g-s %s" % " ".join("/" + s for s in strip))
     lines.append("USER %d:%d" % (WORKER_UID, WORKER_UID))
+    return "\n".join(lines) + "\n"
+
+
+def build_worker_image(directory, strip=tuple(STRIP), tag=BUILDKIT_IMAGE):
+    """The derived worker image. `strip` is a parameter so a self-test can build one that
+    keeps a setuid binary and require the scan to notice it."""
     d = pathlib.Path(directory)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "Dockerfile").write_text("\n".join(lines) + "\n")
+    (d / "Dockerfile").write_text(worker_dockerfile(strip))
     return docker(["build", "-q", "-t", tag, str(d)], timeout=900).returncode == 0
 
 
