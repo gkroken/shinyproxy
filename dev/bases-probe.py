@@ -80,6 +80,14 @@ def judge_static(entry, dockerfile_text):
     if renv is not None and arg_default(dockerfile_text, "RENV_VERSION") != renv:
         problems.append("Dockerfile RENV_VERSION %s != catalog %s"
                         % (arg_default(dockerfile_text, "RENV_VERSION"), renv))
+    if renv is not None:
+        # The toolchain's BYTES are pinned, not only its version (4dd3f76-F1).
+        sha = entry.get("package_manager_sha256", {}).get("renv")
+        if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            problems.append("catalog gives no SHA-256 for renv")
+        elif arg_default(dockerfile_text, "RENV_SHA256") != sha:
+            problems.append("Dockerfile RENV_SHA256 %s != catalog %s"
+                            % (arg_default(dockerfile_text, "RENV_SHA256"), sha))
     return not problems, "; ".join(problems) or "Dockerfile and catalog agree"
 
 
@@ -223,6 +231,37 @@ def self_test():
            text.replace(r["upstream"], "rocker/r-ver:4.6.1")), False)
     expect("a Dockerfile/catalog renv mismatch is caught",
            judge_static(r, text.replace("RENV_VERSION=1.3.0", "RENV_VERSION=1.2.0")), False)
+    expect("a Dockerfile/catalog renv hash mismatch is caught",
+           judge_static(r, text.replace(r["package_manager_sha256"]["renv"], "0" * 64)), False)
+    expect("a catalog with no renv hash is caught",
+           judge_static(dict(r, package_manager_sha256={}), text), False)
+
+    # Live: a base build whose pinned hash does not match what the mirror serves must FAIL
+    # -- the bytes of the toolchain every R build runs are checked, not their version string.
+    tmp_hash = pathlib.Path(tempfile.mkdtemp(prefix="skald-bases-hash-"))
+    try:
+        start_forge()
+        (tmp_hash / "Dockerfile").write_text(
+            text.replace(r["package_manager_sha256"]["renv"], "1" * 64))
+        # Plain progress, not -q: with -q the failing step's own output is not printed, and
+        # "where did it fail" is the point of this case.
+        built = docker(["build", "--progress", "plain", "--network", "host",
+                        "-t", "skald-base/selftest-hash:probe",
+                        "--build-arg", "CRAN_MIRROR=" + MIRROR, "-f", str(tmp_hash / "Dockerfile"),
+                        str(tmp_hash)], timeout=1800)
+        if built.returncode == 0:
+            print("  FAIL a base with a WRONG renv hash built")
+            missed.append("live wrong hash")
+        elif "computed checksum did NOT match" not in (built.stdout + built.stderr):
+            print("  FAIL the build failed, but not at the hash check: %s"
+                  % (built.stdout + built.stderr).strip()[-200:])
+            missed.append("live wrong hash reason")
+        else:
+            print("  ok   live: a wrong renv hash fails the base build at sha256sum --check")
+    finally:
+        docker(["rm", "-f", FORGE])
+        docker(["rmi", "-f", "skald-base/selftest-hash:probe"])
+        shutil.rmtree(tmp_hash, ignore_errors=True)
 
     # Live: the R base WITHOUT the line that replaces rocker's Rprofile.site.
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="skald-bases-"))
