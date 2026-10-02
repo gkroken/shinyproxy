@@ -1990,6 +1990,15 @@ below are marked passed by this planning document.
       `make build`, `make dev`, smoke, ACL, bundle live tests and `make test` anew.
       **Pass:** actual output and named failed mutations, no vacuous deny cases, no
       unresolved security finding or unapproved relaxation.
+      **Carried from T6, for the collector:** (1) the artifact ledger has one image record
+      per build ATTEMPT (ref = the attempt's tag, digest in its own column), so two attempts
+      can carry one digest. A digest may be collected only when NO pinned record carries it;
+      collecting by record would delete a published version's image whenever a failed
+      attempt produced the same digest (6ae3868-F1). (2) VersionAllocator allocates
+      max(version) + 1, which never reuses a number only while no version is ever deleted.
+      If retention or GC deletes versions, keep a high-water mark (e.g. a next_version column
+      on content) instead: a reused number reuses the spec id c<id>--v<n>, and ContainerProxy
+      memoises authorization per spec id (0c8add6 review N1).
 
 ## Risks and open questions
 

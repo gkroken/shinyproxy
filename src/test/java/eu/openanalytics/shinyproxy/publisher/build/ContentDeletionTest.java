@@ -151,14 +151,14 @@ public class ContentDeletionTest {
         Lease lease = coordinator.claim("n").orElseThrow().lease();
         coordinator.toPublishing(lease, DIGEST);
         // The image is in the ledger from the moment it exists, linked to its build.
-        assertEquals("LIVE", jdbc.queryForObject("SELECT state FROM skald.artifact WHERE ref = ?",
-            String.class, DIGEST));
+        assertEquals("LIVE", jdbc.queryForObject("SELECT state FROM skald.artifact WHERE subject_build_id = ?",
+            String.class, build));
         coordinator.fail(lease, "VERIFY_FAILED", "the pushed image did not verify");
 
         assertTrue(delete(c));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.build WHERE id = ?", Integer.class, build));
         Map<String, Object> record = jdbc.queryForMap("SELECT state, delete_requested_at IS NOT NULL AS asked,"
-            + " subject_content_id, subject_build_id FROM skald.artifact WHERE ref = ?", DIGEST);
+            + " subject_content_id, subject_build_id FROM skald.artifact WHERE subject_build_id = ?", build);
         assertEquals("DELETE_PENDING", record.get("state"));
         assertEquals(Boolean.TRUE, record.get("asked"));
         assertEquals(c, record.get("subject_content_id"), "the record no longer says whose image it was");
@@ -179,9 +179,58 @@ public class ContentDeletionTest {
         coordinator.markLogComplete(lease, 1);
         UUID version = coordinator.succeed(lease, null).id();
         Map<String, Object> record = jdbc.queryForMap("SELECT pinned, subject_version_id FROM skald.artifact"
-            + " WHERE ref = ?", DIGEST);
+            + " WHERE subject_build_id = ?", lease.buildId());
         assertEquals(Boolean.TRUE, record.get("pinned"));
         assertEquals(version, record.get("subject_version_id"));
+    }
+
+    @Test
+    public void aRetryWithTheSameDigestGetsItsOwnPinnedRecord() {
+        // 6ae3868-F1, the reviewer's repro: attempt 1 publishes digest D and is interrupted;
+        // the retry publishes the SAME D and succeeds. The ledger must hold one record per
+        // attempt -- the successful one pinned to its version, the failed one its own,
+        // unpinned -- or the live version's image looks like a failed build's.
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, MANY);
+        UUID c = content();
+        UUID first = admit(c);
+        Lease one = coordinator.claim("n1").orElseThrow().lease();
+        coordinator.toPublishing(one, DIGEST);
+        jdbc.update("UPDATE skald.build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", first);
+        coordinator.reap();
+        UUID second = admit(c);
+        Lease two = coordinator.claim("n2").orElseThrow().lease();
+        coordinator.toPublishing(two, DIGEST);
+        coordinator.markLogComplete(two, 1);
+        UUID version = coordinator.succeed(two, null).id();
+
+        Map<String, Object> won = jdbc.queryForMap("SELECT ref, digest, pinned, subject_version_id"
+            + " FROM skald.artifact WHERE subject_build_id = ?", second);
+        assertEquals(Boolean.TRUE, won.get("pinned"));
+        assertEquals(version, won.get("subject_version_id"));
+        assertEquals("sha256:" + "c".repeat(64), won.get("digest"));
+        assertEquals("registry:5000/c:build-" + second, won.get("ref"));
+        Map<String, Object> lost = jdbc.queryForMap("SELECT pinned, subject_version_id"
+            + " FROM skald.artifact WHERE subject_build_id = ?", first);
+        assertEquals(Boolean.FALSE, lost.get("pinned"));
+        assertEquals(null, lost.get("subject_version_id"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM skald.artifact WHERE digest = ?",
+            Integer.class, "sha256:" + "c".repeat(64)));
+    }
+
+    @Test
+    public void aSuccessWhoseImageTheLedgerDoesNotHoldIsRefused() {
+        // Fail closed: a version whose image no record pins is one a collector could delete.
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, MANY);
+        UUID c = content();
+        UUID build = admit(c);
+        Lease lease = coordinator.claim("n").orElseThrow().lease();
+        coordinator.toPublishing(lease, DIGEST);
+        coordinator.markLogComplete(lease, 1);
+        jdbc.update("DELETE FROM skald.artifact WHERE subject_build_id = ?", build);
+        assertThrows(IllegalStateException.class, () -> coordinator.succeed(lease, null));
+        assertEquals("PUBLISHING", jdbc.queryForObject("SELECT state FROM skald.build WHERE id = ?",
+            String.class, build));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.content_version", Integer.class));
     }
 
     @Test

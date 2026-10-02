@@ -163,15 +163,29 @@ public final class BuildCoordinator {
      * out or its content is deleted, the record survives and cleanup can find the image (the
      * plan: "Crash after push but before the transaction leaves an orphan image" -- an
      * orphan in the registry, never one missing from the ledger).
+     *
+     * <p>One record per ATTEMPT (decision 5: "Record tag and digest in the artifact ledger"):
+     * ref is the attempt's own tag reference, {@code <repository>:build-<build id>}, unique
+     * per build, and the digest is a column. Two attempts that produce the SAME digest -- a
+     * retry with a warm cache, any reproducible build -- get two records, so the one that
+     * succeeds is pinned to its version and the failed one stays its own unpinned record.
+     * Keyed by digest, the second was silently dropped and a published version's image looked
+     * like a failed build's (6ae3868-F1). Retention is therefore by reference: a digest may be
+     * collected only when no pinned record carries it (T10's collector).
      */
     public void toPublishing(Lease lease, String image) {
+        int at = image.indexOf("@sha256:");
+        if (at <= 0) {
+            throw new IllegalArgumentException("an output image is a digest reference: " + image);
+        }
+        String tagRef = image.substring(0, at) + ":build-" + lease.buildId();
+        String digest = image.substring(at + 1);
         tx.executeWithoutResult(status -> {
             fenced(lease, "RUNNING", "state = 'PUBLISHING', publishing_at = now(), output_image = ?",
                     List.of(image), "build.publishing");
-            jdbc.update("INSERT INTO skald.artifact (kind, ref, subject_content_id, subject_bundle_id,"
-                    + " subject_build_id) SELECT 'image', ?, content_id, bundle_id, id"
-                    + " FROM skald.build WHERE id = ? ON CONFLICT (ref) DO NOTHING",
-                    image, lease.buildId());
+            jdbc.update("INSERT INTO skald.artifact (kind, ref, digest, subject_content_id,"
+                    + " subject_bundle_id, subject_build_id) SELECT 'image', ?, ?, content_id,"
+                    + " bundle_id, id FROM skald.build WHERE id = ?", tagRef, digest, lease.buildId());
         });
     }
 
@@ -257,8 +271,14 @@ public final class BuildCoordinator {
                     + " updated_at = now() WHERE id = ?", lease.buildId());
             // A published version's image is pinned until its content is deleted (Q3's
             // retention, "Status, logs, admin transport and cleanup").
-            jdbc.update("UPDATE skald.artifact SET subject_version_id = ?, pinned = true"
+            int pinned = jdbc.update("UPDATE skald.artifact SET subject_version_id = ?, pinned = true"
                     + " WHERE kind = 'image' AND subject_build_id = ?", version.id(), lease.buildId());
+            if (pinned != 1) {
+                // Fail closed: a version whose image the ledger does not pin is one a collector
+                // could delete. Nothing commits (6ae3868-F1: this update matched 0 rows silently).
+                throw new IllegalStateException("build " + lease.buildId() + " has " + pinned
+                        + " image record(s) in the ledger, not 1; success refused");
+            }
             audit(lease.owner(), "build.succeeded", lease.buildId(),
                     Map.of("version", String.valueOf(version.version())));
             return version;
