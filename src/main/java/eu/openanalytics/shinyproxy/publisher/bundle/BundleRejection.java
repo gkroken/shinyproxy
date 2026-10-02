@@ -60,7 +60,7 @@ public class BundleRejection extends RuntimeException {
      * alone, because the detail is already text in which rendered names have escaped
      * theirs; rendering it again would double every escape a call site made.
      */
-    static String printable(String detail) {
+    public static String printable(String detail) {
         StringBuilder out = new StringBuilder(detail.length() + 8);
         for (int i = 0; i < detail.length(); ) {
             int cp = detail.codePointAt(i);
