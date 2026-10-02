@@ -25,8 +25,9 @@ no-new-privileges); the full runtime projection is T9's. Builds here use docker 
 --network host, as bases-probe does; the isolated rootless BuildKit driver is T7 part 3.
 
 Usage: python3 dev/recipes-probe.py [--self-test]
-  --self-test also runs live mutants on the Python recipe: no USER line (caught by the user
-  check), a recipe that installs the app's own (poisoned) lock (caught at build), a lock
+  --self-test also runs live cases on the Python recipe: an app shipping its own shiny.py
+  still gets the real launcher, and a launcher without -I is caught by it; no USER line
+  (caught by the user check), a recipe that installs the app's own (poisoned) lock (caught at build), a lock
   missing a dependency (caught by pip check at build), a wrong hash (caught by
   --require-hashes at build).
 """
@@ -77,7 +78,7 @@ def from_line(dockerfile, placeholder, reference):
     return dockerfile.replace(placeholder, reference)
 
 
-def context(name, reference, dockerfile=None, lock=None):
+def context(name, reference, dockerfile=None, lock=None, extra_app_files=None):
     """(tmp, context dir, Dockerfile path): app/ is the fixture with its own lock poisoned,
     skald/ the golden rendering (or a mutant's), the Dockerfile outside the context."""
     _, placeholder, lock_name = APPS_UNDER_TEST[name]
@@ -85,6 +86,8 @@ def context(name, reference, dockerfile=None, lock=None):
     ctx = tmp / "ctx"
     shutil.copytree(APPS / name, ctx / "app")
     (ctx / "app" / lock_name).write_text(GARBAGE[lock_name])
+    for rel, text in (extra_app_files or {}).items():
+        (ctx / "app" / rel).write_text(text)
     shutil.copytree(GOLDEN / name / "skald", ctx / "skald")
     if lock is not None:
         (ctx / "skald" / lock_name).write_text(lock)
@@ -105,7 +108,16 @@ def serve(tag, container):
                   "no-new-privileges", "-p", "127.0.0.1::3838", tag])
     if run.returncode != 0:
         return {"served": (False, "did not start: " + run.stderr.strip()[-200:])}
-    port = docker(["port", container, "3838/tcp"]).stdout.strip().splitlines()[0].rsplit(":", 1)[1]
+    time.sleep(1)
+    mapped = docker(["port", container, "3838/tcp"]).stdout.strip().splitlines()
+    if not mapped:
+        # Exited already: no port is mapped on a stopped container. Its output says why.
+        logs = docker(["logs", "--tail", "5", container])
+        detail = "exited at once: " + " | ".join(
+            (logs.stdout + logs.stderr).strip().splitlines()[-5:])[-300:]
+        docker(["rm", "-f", container])
+        return {"served": (False, detail), "user": (False, detail), "read-only": (False, detail)}
+    port = mapped[0].rsplit(":", 1)[1]
     status, body, deadline = None, "", time.time() + 180
     while time.time() < deadline:
         try:
@@ -117,8 +129,9 @@ def serve(tag, container):
     out = {}
     shiny_page = status == 200 and "shiny" in body.lower()
     out["served"] = (shiny_page, "HTTP %s, %d bytes%s" % (status, len(body),
-                     ", a Shiny page" if shiny_page else ": " + docker(
-                         ["logs", "--tail", "5", container]).stderr.strip()[-200:]))
+                     ", a Shiny page" if shiny_page else ": " + " | ".join(
+                         (lambda l: (l.stdout + l.stderr).strip().splitlines()[-5:])(
+                             docker(["logs", "--tail", "5", container])))[-300:]))
     top = docker(["top", container, "-eo", "pid,uid,args"]).stdout.strip().splitlines()[1:]
     uids = sorted({line.split()[1] for line in top})
     out["user"] = (bool(top) and uids == ["10001"],
@@ -239,6 +252,40 @@ def self_test(python_ref):
     else:
         mutant("installs the upload", dockerfile=reads_upload,
                expect_build_failure="Invalid requirement: 'not a lock at all'")
+    # 19c759c-F1: an uploaded shiny.py must not become the launcher. With the golden (-I),
+    # the real Shiny page is served and the impostor never runs; without -I it runs, prints
+    # its marker and exits, so nothing is served.
+    shadow = {"shiny.py": 'print("APP-CODE-RAN-AS-LAUNCHER")\nraise SystemExit(3)\n'}
+    tag = "skald-app/selftest:probe"
+    tmp, ctx, df = context(name, python_ref, extra_app_files=shadow)
+    try:
+        built = build(tag, ctx, df)
+        if built.returncode != 0:
+            record("self-test: an uploaded shiny.py", "did not build: "
+                   + (built.stdout + built.stderr)[-200:], False)
+        else:
+            ok, detail = serve(tag, "skald-recipe-selftest")["served"]
+            record("self-test: an uploaded shiny.py", ("launcher held: " if ok
+                   else "IMPOSTOR RAN: ") + detail, ok)
+    finally:
+        docker(["rmi", "-f", tag])
+        shutil.rmtree(tmp, ignore_errors=True)
+    not_isolated = golden.replace('"-I","-m","shiny"', '"-m","shiny"')
+    if not_isolated == golden:
+        record("self-test: launcher without -I", "the mutant did not apply", False)
+    else:
+        tmp, ctx, df = context(name, python_ref, dockerfile=not_isolated, extra_app_files=shadow)
+        try:
+            built = build(tag, ctx, df)
+            ok, detail = serve(tag, "skald-recipe-selftest")["served"] \
+                if built.returncode == 0 else (True, "did not build")
+            # Caught for the right reason: the impostor's own marker, not any failure.
+            caught = not ok and "APP-CODE-RAN-AS-LAUNCHER" in detail
+            record("self-test: launcher without -I", ("caught, the impostor ran: " + detail)
+                   if caught else "NOT caught as expected: " + detail, caught)
+        finally:
+            docker(["rmi", "-f", tag])
+            shutil.rmtree(tmp, ignore_errors=True)
     first_hash = lock.split("--hash=sha256:", 1)[1][:64]
     mutant("a wrong hash", lock_text=lock.replace(first_hash, "0" * 64),
            expect_build_failure="DO NOT MATCH THE HASHES")

@@ -6,6 +6,7 @@ RUN ["mkdir","-p","/opt/skald/library"]
 RUN ["chown","10001:10001","/opt/skald/library"]
 COPY skald/renv.lock /opt/skald/renv.lock
 USER 10001:10001
+WORKDIR /opt/skald
 RUN ["Rscript","--vanilla","-e","renv::restore(lockfile = \"/opt/skald/renv.lock\", library = \"/opt/skald/library\", repos = c(CRAN = \"http://localhost:18081/repository/cran-public/\"), prompt = FALSE)"]
 COPY app/ /app/
 WORKDIR /app

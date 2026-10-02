@@ -9,4 +9,4 @@ RUN ["/opt/skald/venv/bin/python","-m","pip","check"]
 COPY app/ /app/
 WORKDIR /app
 EXPOSE 3838
-CMD ["/opt/skald/venv/bin/python","-m","shiny","run","--host","0.0.0.0","--port","3838","app.py"]
+CMD ["/opt/skald/venv/bin/python","-I","-m","shiny","run","--host","0.0.0.0","--port","3838","app.py"]

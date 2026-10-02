@@ -52,7 +52,8 @@ import java.util.regex.Pattern;
  * restore runs as the base's unprivileged user, not root: installing an R source package or
  * a wheel runs package code, and that code is untrusted. The application is copied
  * root-owned, so the running app cannot rewrite itself. Every RUN and the CMD are exec form:
- * no shell parses anything here.
+ * no shell parses anything here. The Python launcher runs isolated ({@code -I}), so the
+ * upload cannot shadow the framework it launches.
  */
 public final class RecipeGenerator {
 
@@ -161,6 +162,9 @@ public final class RecipeGenerator {
                 + "RUN " + exec("chown", user, "/opt/skald/library") + "\n"
                 + "COPY skald/renv.lock /opt/skald/renv.lock\n"
                 + "USER " + user + "\n"
+                // renv takes the working directory as the project; give it the server's
+                // directory rather than '/' (19c759c review N2).
+                + "WORKDIR /opt/skald\n"
                 + "RUN " + exec("Rscript", "--vanilla", "-e", restore) + "\n"
                 + "COPY app/ /app/\n"
                 + "WORKDIR /app\n"
@@ -195,7 +199,11 @@ public final class RecipeGenerator {
                 + "COPY app/ /app/\n"
                 + "WORKDIR /app\n"
                 + "EXPOSE " + PORT + "\n"
-                + "CMD " + exec(pip, "-m", "shiny", "run", "--host", "0.0.0.0",
+                // -I: with -m, Python puts the working directory (/app, the upload) first
+                // on sys.path, so an uploaded shiny.py would BE the launcher. Isolated mode
+                // leaves it off (and ignores PYTHON* variables); shiny run then adds the
+                // app's directory itself, after the framework is imported (19c759c-F1).
+                + "CMD " + exec(pip, "-I", "-m", "shiny", "run", "--host", "0.0.0.0",
                         "--port", String.valueOf(PORT), entry) + "\n";
         return new Recipe(dockerfile, Map.of("skald/requirements.lock", lock.render()));
     }

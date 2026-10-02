@@ -136,6 +136,16 @@ public class RecipeGeneratorTest {
     }
 
     @Test
+    public void thePythonLauncherRunsIsolatedSoTheUploadCannotShadowShiny() {
+        // 19c759c-F1: `python -m shiny` in WORKDIR /app searched /app first, so an uploaded
+        // shiny.py replaced the launcher. The live case is in recipes-probe --self-test.
+        String cmd = RecipeGenerator.generate(PY_BASE, MIRRORS, pyManifest("app.py"),
+                read(APPS.resolve("python-shiny/requirements.lock"))).dockerfile().lines()
+                .filter(l -> l.startsWith("CMD ")).findFirst().orElseThrow();
+        assertTrue(cmd.startsWith("CMD [\"/opt/skald/venv/bin/python\",\"-I\",\"-m\",\"shiny\","), cmd);
+    }
+
+    @Test
     public void unsafeInputsAreRefused() {
         byte[] rLock = read(APPS.resolve("r-shiny/renv.lock"));
         byte[] pyLock = read(APPS.resolve("python-shiny/requirements.lock"));
