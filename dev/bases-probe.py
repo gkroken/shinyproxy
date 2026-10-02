@@ -113,7 +113,12 @@ def unreadable_package_commands(dockerfile_text):
     instructions = "\n".join(l for l in dockerfile_text.splitlines()
                              if not l.lstrip().startswith("#"))
     problems = []
-    for m in re.finditer(r"(?<![\w/.-])(apt-get|apt|aptitude|dpkg)(?![\w/.-])", instructions):
+    # A path-qualified command (/usr/bin/apt-get) is matched from its first '/', so it can
+    # never start a readable form and is refused (6774bde review). A path that merely
+    # CONTAINS "apt" as a directory (/var/lib/apt/lists) is not a command: the name must not
+    # be followed by '/'.
+    for m in re.finditer(r"(?<![\w/.-])(?:/[\w.-]+)*/?(?<![\w.-])(apt-get|apt|aptitude|dpkg)"
+                         r"(?![\w/.-])", instructions):
         if not instructions.startswith(READABLE_PACKAGE_COMMANDS, m.start()):
             problems.append("a package-manager command this cannot read: %r"
                             % instructions[m.start():m.start() + 40].split("\n")[0])
@@ -210,7 +215,7 @@ def facts_of(image, language=None):
 
 
 def start_forge():
-    docker(["rm", "-f", FORGE])
+    docker(["rm", "-f", "-v", FORGE])
     docker(["run", "-d", "--name", FORGE, "-p", "%d:8080" % FORGE_PORT, "--read-only",
             "--tmpfs", "/data:uid=65532,gid=65532", FORGE_IMAGE])
     for _ in range(30):
@@ -257,7 +262,7 @@ def main(argv):
                                     facts_of(entry["upstream"]))
             record("live: " + entry["id"], "", detail, ok)
     finally:
-        docker(["rm", "-f", FORGE])
+        docker(["rm", "-f", "-v", FORGE])
         for tag in tags:
             docker(["rmi", "-f", tag])
     bad = [r for r in results if not r["ok"]]
@@ -319,6 +324,8 @@ def self_test():
            False)
     run_line = "RUN apt-get update \\\n && apt-get install -y --no-install-recommends "
     for form in ("apt-get update && apt-get -y install libfoo", "apt install -y libbar",
+                 "/usr/bin/apt-get -y install libqux", "apt-get update && /usr/bin/apt-get "
+                 "install -y --no-install-recommends libquux",
                  "dpkg -i /tmp/x.deb", "aptitude install libbaz"):
         expect("an unreadable install form is caught: " + form, judge_static(
                r, text.replace(run_line, "RUN %s \\\n && apt-get install -y "
@@ -353,7 +360,7 @@ def self_test():
         else:
             print("  ok   live: a wrong renv hash fails the base build at sha256sum --check")
     finally:
-        docker(["rm", "-f", FORGE])
+        docker(["rm", "-f", "-v", FORGE])
         docker(["rmi", "-f", "skald-base/selftest-hash:probe"])
         shutil.rmtree(tmp_hash, ignore_errors=True)
 
@@ -379,7 +386,7 @@ def self_test():
                 expect("live: rocker's PPM default left in place is caught",
                        judge_live(r, facts_of(tag, "r")), False)
     finally:
-        docker(["rm", "-f", FORGE])
+        docker(["rm", "-f", "-v", FORGE])
         docker(["rmi", "-f", tag])
         shutil.rmtree(tmp, ignore_errors=True)
     print()

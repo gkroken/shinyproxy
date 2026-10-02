@@ -19,13 +19,15 @@ Checked for each app, in the real container:
   served    GET / on the published port answers 200 with Shiny's page
   user      every process in the container runs as uid 10001, PID 1 included
   read-only the app cannot write its own directory (/app is copied root-owned)
+and, once for the run, that the host's volume list is what it was before.
 
 The run is hardened the way a content container will be (--cap-drop ALL,
 no-new-privileges); the full runtime projection is T9's. Builds here use docker build with
 --network host, as bases-probe does; the isolated rootless BuildKit driver is T7 part 3.
 
 Usage: python3 dev/recipes-probe.py [--self-test]
-  --self-test also runs live cases on the Python recipe: an app shipping its own shiny.py
+  --self-test also checks that a registry removed without -v is seen as a leaked volume,
+  and runs live cases on the Python recipe: an app shipping its own shiny.py
   still gets the real launcher, and a launcher without -I is caught by it; no USER line
   (caught by the user check), a recipe that installs the app's own (poisoned) lock (caught at build), a lock
   missing a dependency (caught by pip check at build), a wrong hash (caught by
@@ -103,7 +105,7 @@ def build(tag, ctx, dockerfile):
 
 def serve(tag, container):
     """(ok, detail) for served, user and read-only, on a running container of tag."""
-    docker(["rm", "-f", container])
+    docker(["rm", "-f", "-v", container])
     run = docker(["run", "-d", "--name", container, "--cap-drop", "ALL", "--security-opt",
                   "no-new-privileges", "-p", "127.0.0.1::3838", tag])
     if run.returncode != 0:
@@ -115,7 +117,7 @@ def serve(tag, container):
         logs = docker(["logs", "--tail", "5", container])
         detail = "exited at once: " + " | ".join(
             (logs.stdout + logs.stderr).strip().splitlines()[-5:])[-300:]
-        docker(["rm", "-f", container])
+        docker(["rm", "-f", "-v", container])
         return {"served": (False, detail), "user": (False, detail), "read-only": (False, detail)}
     port = mapped[0].rsplit(":", 1)[1]
     status, body, deadline = None, "", time.time() + 180
@@ -139,13 +141,13 @@ def serve(tag, container):
     touch = docker(["exec", container, "sh", "-c", "touch /app/written 2>&1"])
     out["read-only"] = (touch.returncode != 0, "touch /app/written: "
                         + (touch.stdout.strip()[-80:] or "SUCCEEDED"))
-    docker(["rm", "-f", container])
+    docker(["rm", "-f", "-v", container])
     return out
 
 
 def bases_in_registry():
     """{language: digest reference} for every catalog base, built through forge and pushed."""
-    docker(["rm", "-f", REGISTRY])
+    docker(["rm", "-f", "-v", REGISTRY])
     docker(["run", "-d", "--name", REGISTRY, "-p", "127.0.0.1:%d:5000" % REGISTRY_PORT,
             "registry:2"])
     refs = {}
@@ -167,9 +169,17 @@ def bases_in_registry():
     return refs
 
 
+def host_volumes():
+    return set(docker(["volume", "ls", "-q"]).stdout.split())
+
+
 def main(argv):
     print("== the generated recipes, built through forge and run ==")
     print()
+    # Every container here is removed with -v (registry:2 and forge both declare a VOLUME),
+    # and the host's volume list is compared across the run so a leak shows in this output
+    # (e2332d4-F1; the t5-e5e3071-F7 class).
+    before = host_volumes()
     tags = []
     try:
         bases.start_forge()
@@ -192,9 +202,12 @@ def main(argv):
         if "--self-test" in argv:
             self_test(refs["python"])
     finally:
-        docker(["rm", "-f", bases.FORGE, REGISTRY])
+        docker(["rm", "-f", "-v", bases.FORGE, REGISTRY])
         for tag in tags:
             docker(["rmi", "-f", tag])
+        left = sorted(host_volumes() - before)
+        record("host: no volume left behind", "none new" if not left
+               else "%d new: %s" % (len(left), ", ".join(v[:12] for v in left)), not left)
     bad = [r for r in results if not r["ok"]]
     print()
     print("RESULT:", "both recipes build, serve and run unprivileged" if not bad
@@ -206,6 +219,16 @@ def self_test(python_ref):
     """Each live check must catch what it exists for, on a real build."""
     print()
     print("== self-test (live, Python recipe) ==")
+    # The volume check's own mutant: a registry:2 removed the old way, without -v, must
+    # show up as a new host volume. That volume is this case's own and is removed after.
+    before = host_volumes()
+    docker(["run", "-d", "--name", "skald-recipes-leak", "registry:2"])
+    docker(["rm", "-f", "skald-recipes-leak"])
+    leaked = sorted(host_volumes() - before)
+    record("self-test: rm without -v leaks", "caught: %d new volume(s)" % len(leaked)
+           if leaked else "NOT caught: no new volume", bool(leaked))
+    for v in leaked:
+        docker(["volume", "rm", v])
     name = "python-shiny"
     golden = (GOLDEN / name / "Dockerfile").read_text()
     lock = (GOLDEN / name / "skald/requirements.lock").read_text()
