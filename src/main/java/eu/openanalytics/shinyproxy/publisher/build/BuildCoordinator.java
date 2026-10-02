@@ -24,6 +24,7 @@ package eu.openanalytics.shinyproxy.publisher.build;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import eu.openanalytics.shinyproxy.publisher.registry.VersionAllocator;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -182,6 +183,69 @@ public final class BuildCoordinator {
                 lease.buildId(), lease.generation(), lease.owner());
         requireOne(changed, lease, "CANCELLED");
         audit(lease.owner(), "build.cancelled", lease.buildId(), Map.of("confirmed", "true"));
+    }
+
+    /**
+     * The attempt's log is complete and persisted (step 5: "Publish a complete log
+     * descriptor"). Fenced like every worker write. {@link #succeed} requires it: a success
+     * whose log could still be partial is not one (decision 4: "final log persistence").
+     */
+    public void markLogComplete(Lease lease, long cursor) {
+        int changed = jdbc.update("UPDATE skald.build SET log_complete = true, log_cursor = ?,"
+                + " updated_at = now() WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
+                + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()"
+                + " AND deadline_at > now()", cursor, lease.buildId(), lease.generation(), lease.owner());
+        requireOne(changed, lease, "log completion");
+    }
+
+    /**
+     * PUBLISHING -> SUCCEEDED, and the version, in ONE transaction (step 5; decision 4). The
+     * content row is locked first -- the coordination lock admission, version allocation and
+     * deletion share, always taken before a build row so lock order never inverts -- then the
+     * build row is re-read FOR UPDATE under the full fence. Then a version is allocated through
+     * the shared allocator with build_id set, the build is marked SUCCEEDED, and both commit
+     * together. Nothing is activated: activation stays a separate, explicit operation.
+     *
+     * <p>Exactly once: a second call finds the build SUCCEEDED and is fenced. A content item
+     * deleted meanwhile took the build row with it (cascade), so the fence refuses rather than
+     * allocate a version for nothing.
+     *
+     * @param specJson server-generated runtime metadata for the version (never the uploaded
+     *                 manifest)
+     * @throws Fenced if the attempt is no longer this worker's, or its log is not complete
+     */
+    public VersionAllocator.Allocated succeed(Lease lease, String specJson) {
+        return tx.execute(status -> {
+            List<UUID> content = jdbc.queryForList("SELECT content_id FROM skald.build WHERE id = ?",
+                    UUID.class, lease.buildId());
+            if (content.isEmpty()) {
+                throw new Fenced("build " + lease.buildId() + " no longer exists (its content was"
+                        + " deleted); no version is allocated");
+            }
+            jdbc.queryForList("SELECT id FROM skald.content WHERE id = ? FOR UPDATE", content.get(0));
+            List<Map<String, Object>> rows = jdbc.queryForList("SELECT output_image, log_complete,"
+                    + " created_by FROM skald.build WHERE id = ? AND lease_generation = ?"
+                    + " AND lease_owner = ? AND state = 'PUBLISHING' AND lease_expires_at > now()"
+                    + " AND deadline_at > now() FOR UPDATE",
+                    lease.buildId(), lease.generation(), lease.owner());
+            if (rows.isEmpty()) {
+                throw new Fenced("build " + lease.buildId() + " (generation " + lease.generation()
+                        + ") is not this worker's PUBLISHING attempt; success refused");
+            }
+            Map<String, Object> row = rows.get(0);
+            if (!Boolean.TRUE.equals(row.get("log_complete"))) {
+                throw new Fenced("build " + lease.buildId() + " has no complete log; success refused");
+            }
+            VersionAllocator.Allocated version = new VersionAllocator(jdbc).allocate(content.get(0),
+                    (String) row.get("output_image"), specJson, (String) row.get("created_by"),
+                    lease.buildId()).orElseThrow(() -> new Fenced("content of build "
+                    + lease.buildId() + " is gone"));
+            jdbc.update("UPDATE skald.build SET state = 'SUCCEEDED', finished_at = now(),"
+                    + " updated_at = now() WHERE id = ?", lease.buildId());
+            audit(lease.owner(), "build.succeeded", lease.buildId(),
+                    Map.of("version", String.valueOf(version.version())));
+            return version;
+        });
     }
 
     private void fenced(Lease lease, String from, String set, List<Object> setArgs, String action) {

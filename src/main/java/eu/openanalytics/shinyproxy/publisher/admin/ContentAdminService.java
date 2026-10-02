@@ -30,6 +30,7 @@ import eu.openanalytics.containerproxy.service.UserService;
 import eu.openanalytics.shinyproxy.publisher.registry.AccessControlProjector;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentPath;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
+import eu.openanalytics.shinyproxy.publisher.registry.VersionAllocator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -225,21 +226,16 @@ public class ContentAdminService {
         requireContent(contentId);
         String image = require(request.image(), "image");
 
-        // Serialise allocation for this content item. Without the lock, two concurrent adds read
-        // the same max(version) and the second violates content_version_unique, which reached
-        // the caller as an unrecoverable error rather than a conflict.
-        jdbc.queryForObject("SELECT id::text FROM skald.content WHERE id = ? FOR UPDATE",
-            String.class, contentId);
-
-        Integer version = jdbc.queryForObject(
-            "SELECT COALESCE(max(version), 0) + 1 FROM skald.content_version WHERE content_id = ?",
-            Integer.class, contentId);
-
+        // The shared allocator: it locks the content row, so concurrent adds -- and a build's
+        // success, which allocates through the same class -- serialise instead of reading the
+        // same max(version) (T6: one allocator for both paths).
+        int version;
         try {
-            jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by) "
-                + "VALUES (?, ?, ?, ?)", contentId, version, image, actor());
+            version = new VersionAllocator(jdbc).allocate(contentId, image, null, actor(), null)
+                .orElseThrow(() -> notFound("content " + contentId + " no longer exists"))
+                .version();
         } catch (DataIntegrityViolationException e) {
-            throw conflict("version " + version + " already exists");
+            throw conflict("a version for this content was allocated concurrently; try again");
         }
         audit("content.version.add", contentId,
             Map.of("version", String.valueOf(version), "image", image));
