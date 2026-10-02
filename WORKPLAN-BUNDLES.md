@@ -1720,10 +1720,14 @@ below are marked passed by this planning document.
       `dstdomain` follows the PTR of an IP-literal URL unless given `-n`, and an address's
       owner sets its PTR) are refused;
       the registry answers but refuses writes. Each refusal must be squid's own
-      `ERR_ACCESS_DENIED`, not an unreachable host. Private (RFC 1918) destinations are
-      refused only as unlisted literals, not by rule, because an operator's mirror lives
-      on one (Q3); a configured name resolving privately is the operator's statement. The
-      tinyproxy suite (`dev/validate-egress.sh`) stays as T3's record.
+      `ERR_ACCESS_DENIED`, not an unreachable host. Private and non-public destinations
+      (RFC 1918, CGNAT, this host, IPv6 ULA) are refused by rule whatever name they were
+      reached through, which is what refuses DNS rebinding; only a host the operator
+      DECLARES a private mirror may resolve to one (user decision 2026-10-01, on the
+      coder's recommendation; it replaced an earlier rule that let any configured name
+      resolve privately, which this section's "Block ... RFC1918 ... DNS rebinding" did not
+      allow). T7's repository configuration therefore marks an entry private. The tinyproxy
+      suite (`dev/validate-egress.sh`) stays as T3's record.
 
       With parts 1-4 in, `runc-rootless` is **measured and selectable** in
       `spec/isolation-profile-v1.json` (2026-09-27). Every bound it enforces names its

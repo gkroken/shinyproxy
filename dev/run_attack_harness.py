@@ -32,6 +32,13 @@ import quota_volume
 import shipping_worker as sw
 
 INNER, OUTER = "skald-atk-inner", "skald-atk-outer"
+# The outer network stands in for the internet, so it takes a public-looking range -- a
+# documentation range, RFC 5737 TEST-NET-2, never routed -- rather than Docker's default
+# private pool: the gateway refuses private destinations for public repository names, and
+# with the default pool every stand-in "internet" host would be private. PRIVATE is the
+# operator's own network, where a private mirror lives.
+OUTER_SUBNET = "198.51.100.0/24"
+PRIVATE, PRIVATE_SUBNET = "skald-atk-private", "10.250.250.0/24"
 REGISTRY, GATEWAY = "skald-atk-registry", "skald-atk-gateway"
 WORKER, VOLUME, SOCK = "skald-atk-worker", "skald-atk-ws", "skald-atk-sock"
 REGISTRY_PORT = 15021
@@ -78,7 +85,7 @@ def build_gateway(tmp):
         raise SystemExit("could not build the gateway image")
 
 
-def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None):
+def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None, private_mirrors=()):
     """(Re)starts the gateway with the shipped rule for these repository hosts. The
     registry is always allowed. `weaken`, `add_hosts` (name:ip entries in the gateway's
     /etc/hosts) and `resolver` (an IP the gateway uses as its only DNS server, standing in
@@ -87,7 +94,8 @@ def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None):
     docker(["rm", "-f", GATEWAY])
     conf_dir = pathlib.Path(state["tmp"]) / ("gateway-conf-%s" % (weaken or "shipped"))
     conf_dir.mkdir(parents=True, exist_ok=True)
-    conf = egress_gateway.write_conf(conf_dir, REGISTRY, list(repos), weaken)
+    conf = egress_gateway.write_conf(conf_dir, REGISTRY, list(repos), weaken,
+                                     private_mirrors=list(private_mirrors))
     mounts = ["-v", "%s:/etc/squid/squid.conf:ro" % conf]
     if resolver:
         rc = conf_dir / "resolv.conf"
@@ -97,6 +105,7 @@ def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None):
     docker(["run", "-d", "--name", GATEWAY, "--network", INNER, "--network-alias", GATEWAY]
            + mounts + ["--add-host=%s" % h for h in add_hosts] + [GATEWAY_IMAGE])
     docker(["network", "connect", OUTER, GATEWAY])
+    docker(["network", "connect", PRIVATE, GATEWAY])
     for _ in range(30):
         logs = sw.logs(GATEWAY)
         if "Accepting HTTP" in logs:
@@ -117,7 +126,8 @@ def setup(tmp):
     _htpasswd(tmp)
     cfg = _client_config(tmp)
     docker(["network", "create", "--internal", INNER])
-    docker(["network", "create", OUTER])
+    docker(["network", "create", "--subnet", OUTER_SUBNET, OUTER])
+    docker(["network", "create", "--internal", "--subnet", PRIVATE_SUBNET, PRIVATE])
     docker(["run", "-d", "--name", REGISTRY, "--network", OUTER, "--network-alias",
             REGISTRY, "-p", "%d:5000" % REGISTRY_PORT,
             "-v", "%s/htpasswd:/auth/htpasswd:ro" % tmp,
@@ -312,7 +322,7 @@ def teardown():
     for name in (GATEWAY, REGISTRY):
         docker(["rm", "-f", "-v", name])
     docker(["volume", "rm", SOCK])
-    for net in (INNER, OUTER):
+    for net in (INNER, OUTER, PRIVATE):
         for name in docker(["network", "inspect", net, "-f",
                             "{{range .Containers}}{{.Name}} {{end}}"]).stdout.split():
             docker(["rm", "-f", "-v", name])

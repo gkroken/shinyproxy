@@ -24,26 +24,35 @@ The rule, in the order squid evaluates it (first match wins):
      list is named here rather than described as "the metadata endpoint". Whole ranges
      were rejected where a mirror can legitimately live (100.64.0.0/10 also carries
      carrier-grade NAT and overlay networks such as Tailscale). An IP literal is refused
-     by rule 5 (because rule 4 matches with -n); this rule is for names.
+     by rules 5 and 7 (rule 6 matches with -n); this rule is for names.
   2. the gateway's own loopback (to_localhost) is refused: squid's cache manager and any
      sidecar listening there are not a build's business.
   3. CONNECT (how HTTPS crosses a proxy) only to port 443.
-  4. the registry, on its port; then each configured repository host, by EXACT name
-     (dstdomain without a leading dot: no subdomains, and not a regex, so
-     `allowed-repo.evil` does not match `allowed-repo`; and with -n, so squid matches the
-     URL's host AS WRITTEN and never looks up an IP literal's reverse DNS -- without -n an
-     address whose PTR names an allowlisted host is admitted, and the address's owner sets
-     its PTR: gate finding t5-f4f5f32-F1), and only on the repository ports
-     (80 and 443 by default). A mirror's other ports -- an admin API, a database, a
-     metrics endpoint -- are not a build's business (b3d129f-F1).
-  5. everything else is refused.
+  4. the registry, on its port, and then each host the operator marked as a PRIVATE MIRROR,
+     on the repository ports. Both are allowed to live at private addresses.
+  5. every private or non-public destination, PRIVATE_DESTINATIONS (RFC 1918, carrier-grade
+     NAT 100.64.0.0/10, this host, IPv6 ULA and loopback), is refused, whatever NAME it
+     was reached through. This is what refuses DNS rebinding: a PUBLIC repository name
+     (CRAN, PyPI) that resolves to an inside address -- through rebinding, a poisoned
+     resolver or a misconfiguration -- is not a repository but a path into the operator's
+     network. The plan names RFC 1918 and DNS rebinding outright; until this rule the
+     gateway allowed any configured name to resolve privately.
+  6. each configured PUBLIC repository host, by EXACT name (dstdomain without a leading
+     dot: no subdomains, and not a regex, so `allowed-repo.evil` does not match
+     `allowed-repo`; and with -n, so squid matches the URL's host AS WRITTEN and never
+     looks up an IP literal's reverse DNS -- without -n an address whose PTR names an
+     allowlisted host is admitted, and the address's owner sets its PTR: gate finding
+     t5-f4f5f32-F1), and only on the repository ports (80 and 443 by default). A mirror's
+     other ports -- an admin API, a database, a metrics endpoint -- are not a build's
+     business (b3d129f-F1).
+  7. everything else is refused.
 
-Private (RFC 1918) destinations are NOT refused by rule: an operator's own mirror (Nexus,
-Artifactory, Posit Package Manager) typically lives on one, and Q3 exists to let it work.
-A private IP LITERAL is refused by rule 5 like any unlisted destination (rule 4's -n is
-what makes that true for EVERY literal, whatever its reverse DNS says); a configured name
-that resolves privately is allowed, because configuring it is the operator's statement that
-it is a repository.
+A private mirror must therefore be DECLARED as one (T7's configuration: a repository entry
+marked private). Q3 said a private mirror should work "without special-casing"; it still
+needs nothing beyond its entry in the repository list, but that entry has to say private,
+because the alternative -- any configured name may resolve privately -- is exactly the
+rebinding hole the plan forbids. Decided 2026-10-01 by the user, on the coder's
+recommendation. A private IP LITERAL is refused by rule 5 as well as rule 7.
 
 Redirects are not followed by squid, a forward proxy: the client follows them, and each
 hop is a new request through these same rules.
@@ -59,13 +68,21 @@ PORT = 8888
 METADATA_ADDRESSES = ("fd00:ec2::254/128",      # AWS, IPv6 IMDS
                       "100.100.100.200/32")     # Alibaba Cloud
 REPO_PORTS = (80, 443)
+# Private and otherwise non-public destinations. A PUBLIC repository name that resolves into
+# one of these is refused (DNS rebinding, or a public name pointed inward); only a host the
+# operator marked as a private mirror may live here.
+PRIVATE_DESTINATIONS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
+                        "100.64.0.0/10",                                     # CGNAT, overlays
+                        "127.0.0.0/8", "0.0.0.0/8",                          # this host
+                        "fc00::/7", "::1/128")                               # IPv6 ULA, loopback
 WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
-              "any_repo_port", "reverse_lookup")
+              "any_repo_port", "reverse_lookup", "no_private_deny")
 
 
-def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
-    """The squid.conf text. `repos` are the configured repository host names, reachable
-    on `repo_ports`."""
+def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirrors=()):
+    """The squid.conf text. `repos` are the configured PUBLIC repository host names and
+    `private_mirrors` the ones the operator marked as living on a private network; both are
+    reachable on `repo_ports`."""
     if weaken not in (None,) + WEAKENINGS:
         raise ValueError("unknown weakening %r" % weaken)
     lines = ["http_port %d" % PORT,
@@ -79,7 +96,11 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
              # an address sets its PTR, so build code reached an attacker's server.
              "acl registry dstdomain %s%s" % (
                  "" if weaken == "reverse_lookup" else "-n ", registry),
-             "acl registry_port port 5000"]
+             "acl registry_port port 5000",
+             "acl private_dst dst %s" % " ".join(PRIVATE_DESTINATIONS)]
+    if private_mirrors:
+        lines.append("acl private_mirrors dstdomain %s%s" % (
+            "" if weaken == "reverse_lookup" else "-n ", " ".join(private_mirrors)))
     if repos:
         if weaken == "unanchored":
             # A regex with no anchors: matches any host CONTAINING the name.
@@ -96,6 +117,10 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
     if weaken == "allow_all":
         lines.append("http_access allow all")
     lines.append("http_access allow registry registry_port")
+    if private_mirrors:
+        lines.append("http_access allow private_mirrors repo_ports")
+    if weaken != "no_private_deny":
+        lines.append("http_access deny private_dst")
     if repos:
         lines.append("http_access allow repos" if weaken == "any_repo_port"
                      else "http_access allow repos repo_ports")
@@ -108,10 +133,10 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS):
     return "\n".join(lines) + "\n"
 
 
-def write_conf(directory, registry, repos, weaken=None):
+def write_conf(directory, registry, repos, weaken=None, private_mirrors=()):
     """Writes squid.conf under `directory`, world-readable (squid runs as its own user)."""
     path = pathlib.Path(directory) / "squid.conf"
-    path.write_text(squid_conf(registry, repos, weaken))
+    path.write_text(squid_conf(registry, repos, weaken, private_mirrors=private_mirrors))
     path.chmod(0o644)
     return str(path)
 

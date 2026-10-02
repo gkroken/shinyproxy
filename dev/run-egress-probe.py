@@ -20,6 +20,9 @@ The matrix, each row judged on what squid itself answered -- a refusal must be s
   metadata  169.254.169.254, by IP literal, and ALLOWLISTED names that resolve to it, to
             AWS's IPv6 endpoint and to Alibaba's (rebinding, or an operator's DNS)
   port      an allowlisted repository on a port that is not a repository port
+  private   a PUBLIC repository name that resolves to a private address (DNS rebinding,
+            or a public name pointed inward) is refused, while a host the operator DECLARED
+            a private mirror is fetched (the control)
   PTR       an IP literal whose REVERSE DNS names an allowlisted repository, and one whose
             PTR names the registry (gate finding t5-f4f5f32-F1): the gateway resolves
             through a resolver this probe controls, standing in for the internet's DNS,
@@ -66,8 +69,18 @@ METADATA = "169.254.169.254"
 # Allowlisted names the gateway's resolver points at each kind of metadata address: the
 # link-local one most clouds use, and the two outside link-local (b3d129f-F2).
 REBINDS = {REBIND: METADATA, "rebind-aws6": "fd00:ec2::254",
-           "rebind-alibaba": "100.100.100.200"}
-REPOS = [ALLOWED] + sorted(REBINDS)
+           "rebind-alibaba": "100.100.100.200",
+           # IPv6 link-local: refused by the metadata rule ALONE. The two above also sit in
+           # private ranges (ULA, CGNAT), so the private-destination rule refuses them too and
+           # removing the metadata rule no longer shows on their rows. With no route, squid
+           # fails a connect here at once (503 ERR_CONNECT_FAIL), which is positive evidence
+           # it tried; the IPv4 169.254 address only times out.
+           "rebind-linklocal6": "fe80::1"}
+# The operator's private mirror, declared as one, on the private network; and a PUBLIC
+# repository name the gateway's resolver points at that mirror's private address.
+MIRROR, REBIND_PRIVATE = "private-mirror", "rebind-private"
+PRIVATE_MIRRORS = [MIRROR]
+REPOS = [ALLOWED, REBIND_PRIVATE] + sorted(REBINDS)
 ADD_HOSTS = ["%s:%s" % (name, addr) for name, addr in sorted(REBINDS.items())]
 HOSTS = {ALLOWED: "ALLOWED-CONTENT", DENIED: "DENIED-CONTENT", SUFFIX: "EVIL-CONTENT"}
 
@@ -117,6 +130,23 @@ CANARIES = {"canary-repo": ("CANARY-REPO", "80", ALLOWED),
 RESOLVER, RESOLVER_IMAGE = "skald-egr-resolver", "skald-egr-resolver:local"
 
 
+def start_mirror(tmp):
+    """The operator's private mirror: on the private network only, reachable through the
+    gateway, which is attached there. Returns its private address."""
+    www = pathlib.Path(tmp) / "www-mirror"
+    www.mkdir(parents=True, exist_ok=True)
+    (www / "index.html").write_text("MIRROR-CONTENT\n")
+    os.chmod(www, 0o755)
+    os.chmod(www / "index.html", 0o644)
+    docker(["rm", "-f", "skald-egr-mirror"])
+    docker(["run", "-d", "--name", "skald-egr-mirror", "--network", h.PRIVATE,
+            "--network-alias", MIRROR, "-v", "%s:/www:ro" % www, sw.BUSYBOX_IMAGE,
+            "sh", "-c", "exec httpd -f -p 80 -h /www"])
+    return docker(["inspect", "-f",
+                   "{{(index .NetworkSettings.Networks \"%s\").IPAddress}}" % h.PRIVATE,
+                   "skald-egr-mirror"]).stdout.strip()
+
+
 def start_canaries(tmp):
     for name, (content, port, _) in CANARIES.items():
         www = pathlib.Path(tmp) / ("www-" + name)
@@ -148,6 +178,10 @@ def start_resolver(tmp):
     docker(["run", "-d", "--name", RESOLVER, "--network", h.OUTER, RESOLVER_IMAGE,
             "dnsmasq", "-k", "--no-resolv", "--no-hosts", "--server=127.0.0.11",
             "--log-queries", "--log-facility=-"] + ptrs)
+    # Also on the private network, so Docker's DNS behind it answers for the private
+    # mirror's name as the operator's resolver would; on the outer network alone the mirror
+    # was ERR_DNS_FAIL (measured).
+    docker(["network", "connect", h.PRIVATE, RESOLVER])
     return outer_ip("resolver")
 
 
@@ -222,7 +256,10 @@ get metadata http://%(metadata)s/latest/meta-data/
 get rebind http://%(rebind)s/
 get rebind_aws6 http://rebind-aws6/
 get rebind_alibaba http://rebind-alibaba/
+get rebind_linklocal6 http://rebind-linklocal6/
 get repo_badport http://%(allowed)s:6379/
+get mirror http://%(mirror)s/
+get rebind_private http://%(rebind_private)s/
 get ptr_repo "http://%(canary_repo)s/?exfil=build-secret"
 get ptr_registry http://%(canary_registry)s:5000/v2/
 connect ptr_connect %(canary_repo)s 443
@@ -308,8 +345,14 @@ def judge(report, ptr_ok=True):
         policy_denied(r, "rebind_aws6"), "rebind_aws6")
     row("allowlisted name resolving to Alibaba metadata refused",
         policy_denied(r, "rebind_alibaba"), "rebind_alibaba")
+    row("allowlisted name resolving to an IPv6 link-local address refused",
+        policy_denied(r, "rebind_linklocal6"), "rebind_linklocal6")
     row("allowlisted repository on another port refused", policy_denied(r, "repo_badport"),
         "repo_badport")
+    row("a declared private mirror is fetched (control)",
+        fetched(r, "mirror", "MIRROR-CONTENT"), "mirror")
+    row("public repository name resolving to a private address refused",
+        policy_denied(r, "rebind_private", "MIRROR-CONTENT"), "rebind_private")
     # Gated on the resolver control as well: without a PTR to follow, a refusal here proves
     # nothing about reverse lookups (t5-f4f5f32-F1).
     for key, label, ok in (
@@ -366,7 +409,8 @@ def run_matrix(tmp, label):
         "suffix": SUFFIX, "rebind": REBIND, "metadata": METADATA, "registry": h.REGISTRY,
         "denied_ip": outer_ip(DENIED), "allowed_ip": outer_ip(ALLOWED),
         "canary_repo": outer_ip("canary-repo"),
-        "canary_registry": outer_ip("canary-registry")}
+        "canary_registry": outer_ip("canary-registry"),
+        "mirror": MIRROR, "rebind_private": REBIND_PRIVATE}
     ptr_ok, ptr_detail = ptr_control()
     report, blob = h.run_local_step(tmp, "egress-" + label, script)
     lines = [l.strip() for l in report.strip().splitlines() if l.strip()]
@@ -380,10 +424,11 @@ def run_matrix(tmp, label):
 
 def shipped_gateway(weaken=None, repos=None):
     h.start_gateway(repos=REPOS if repos is None else repos, weaken=weaken,
-                    add_hosts=ADD_HOSTS, resolver=state["resolver"])
+                    add_hosts=ADD_HOSTS + ["%s:%s" % (REBIND_PRIVATE, state["mirror_ip"])],
+                    resolver=state["resolver"], private_mirrors=PRIVATE_MIRRORS)
 
 
-state = {"resolver": None, "report": {}, "ptr_ok": False}
+state = {"resolver": None, "report": {}, "ptr_ok": False, "mirror_ip": None}
 
 
 def main(argv):
@@ -394,6 +439,7 @@ def main(argv):
         h.setup(tmp)
         start_hosts(tmp)
         start_canaries(tmp)
+        state["mirror_ip"] = start_mirror(tmp)
         state["resolver"] = start_resolver(tmp)
         shipped_gateway()
         if "--self-test" in argv:
@@ -442,18 +488,19 @@ WEAKENINGS = [
       "private IP literal refused", "suffix of an allowed name refused"],
      lambda r, ptr: (fetched(r, "unlisted_ip", "DENIED-CONTENT")
                      and fetched(r, "suffix", "EVIL-CONTENT"))),
-    # Nothing answers at a metadata address here. The evidence that squid TRIED is the
-    # IPv6 one: with no IPv6 route squid fails the connect at once and says so
-    # (503 ERR_CONNECT_FAIL, measured in every live run), where the IPv4 ones only time
-    # out -- and a timeout alone is not evidence of anything (0b57894 review N1). None
-    # of the three may be refused by policy.
+    # Only link-local is this rule's alone: AWS's IPv6 and Alibaba's metadata addresses are
+    # in private ranges and stay refused without it (measured, 2026-10-02). The evidence that
+    # squid TRIED is the IPv6 link-local row: no route, so it fails the connect at once and
+    # says so (503 ERR_CONNECT_FAIL). The IPv4 169.254 row only times out, and a timeout
+    # alone is evidence of nothing (0b57894 review N1). Neither may be refused by policy.
     ("no metadata deny", dict(weaken="no_metadata_deny"),
      ["allowlisted name resolving to metadata refused",
-      "allowlisted name resolving to AWS IPv6 metadata refused",
-      "allowlisted name resolving to Alibaba metadata refused"],
-     lambda r, ptr: (_squid_tag(r, "rebind_aws6") == "ERR_CONNECT_FAIL"
-                     and all(_squid_tag(r, k) != "ERR_ACCESS_DENIED"
-                             for k in ("rebind", "rebind_aws6", "rebind_alibaba")))),
+      "allowlisted name resolving to an IPv6 link-local address refused"],
+     lambda r, ptr: (_squid_tag(r, "rebind_linklocal6") == "ERR_CONNECT_FAIL"
+                     and _squid_tag(r, "rebind") != "ERR_ACCESS_DENIED")),
+    ("no private-destination deny", dict(weaken="no_private_deny"),
+     ["public repository name resolving to a private address refused"],
+     lambda r, ptr: fetched(r, "rebind_private", "MIRROR-CONTENT")),
     ("repositories on any port", dict(weaken="any_repo_port"),
      ["allowlisted repository on another port refused"],
      lambda r, ptr: _squid_tag(r, "repo_badport") == "ERR_CONNECT_FAIL"),
@@ -507,7 +554,8 @@ def self_test(tmp):
     # the wrong reason (90a889d review N1).
     dead = {k: "first:none last:none squid:none body:none" for k in (
         "allowed", "unlisted", "unlisted_ip", "private_ip", "rebind", "rebind_aws6",
-        "rebind_alibaba", "repo_badport", "suffix", "ptr_repo", "ptr_registry")}
+        "rebind_alibaba", "rebind_linklocal6", "repo_badport", "suffix", "ptr_repo", "ptr_registry", "mirror",
+        "rebind_private")}
     dead.update(connect_badport="none", ptr_connect="none", direct_repo="refused")
     satisfied = [label for label, _, _, evidence in WEAKENINGS if evidence(dead, False)]
     if satisfied:
