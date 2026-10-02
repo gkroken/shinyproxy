@@ -130,6 +130,16 @@ public class DockerWorkerLauncherTest {
 
             // The rule the gateway runs is the one GatewayConfig writes (543ed35 N2's other
             // half: the conf the driver actually mounts).
+            // The gateway is hardened (9a2658d N1).
+            HostConfig gw = docker.inspectContainer(h.gateway()).hostConfig();
+            assertTrue(gw.readonlyRootfs(), "gateway root read-only");
+            assertEquals(List.of("ALL"), gw.capDrop());
+            assertEquals(List.of("no-new-privileges"), gw.securityOpt());
+            assertEquals(DockerWorkerLauncher.GATEWAY_MEMORY, gw.memory());
+            assertEquals(DockerWorkerLauncher.GATEWAY_MEMORY, gw.memorySwap());
+            assertEquals(128, gw.pidsLimit());
+            assertFalse(Boolean.TRUE.equals(gw.privileged()));
+
             String mounted = exec(h.gateway(), "cat", "/skald-conf/squid.conf");
             assertEquals(GatewayConfig.squidConf("registry", List.of("pypi.org"), List.of("forge")), mounted);
         } finally {
@@ -147,6 +157,79 @@ public class DockerWorkerLauncherTest {
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> broken.launch(request(id)));
         assertFalse(e.getMessage().contains("LEFT BEHIND"), e.getMessage());
         assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(id)));
+    }
+
+    @Test
+    public void aLaunchRefusesToAdoptAVolumeItDidNotMake() throws Exception {
+        // 9a2658d-F1's repro: a volume already holding the workspace's name, here a 1 MiB
+        // tmpfs with no labels. Docker's volume create would have returned it as is.
+        for (String role : List.of("ws", "conf")) {
+            String id = attempt();
+            Handle h = DockerWorkerLauncher.handle(id);
+            String name = role.equals("ws") ? h.workspaceVolume() : h.configVolume();
+            docker.createVolume(Volume.builder().name(name).driver("local")
+                    .driverOpts(Map.of("type", "tmpfs", "device", "tmpfs", "o", "size=1m")).build());
+            try {
+                IllegalStateException e = assertThrows(IllegalStateException.class,
+                        () -> launcher.launch(request(id)));
+                assertTrue(e.getMessage().contains("already taken"), e.getMessage());
+                // Not ours, so not removed, and not changed.
+                assertEquals("tmpfs", docker.inspectVolume(name).options().get("type"));
+                assertEquals(List.of(), launcher.leftovers(h), "nothing of the attempt was made");
+            } finally {
+                docker.removeVolume(name);
+            }
+        }
+    }
+
+    @Test
+    public void aVolumeTakenBetweenTheCheckAndTheCreateIsNotAdopted() throws Exception {
+        // The upfront name check refuses first in every launch, so the re-check after
+        // create (the race guard) is exercised on its own here: the name is taken, as it
+        // would be by a create racing this launch's.
+        String id = attempt();
+        String name = DockerWorkerLauncher.handle(id).configVolume();
+        Map<String, String> labels = Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, id);
+        docker.createVolume(Volume.builder().name(name).build());
+        try {
+            assertThrows(IllegalStateException.class, () -> launcher.createOwnedVolume(name, labels, null),
+                    "an unlabelled volume of the name is not this launch's");
+        } finally {
+            docker.removeVolume(name);
+        }
+        docker.createVolume(Volume.builder().name(name).labels(labels).driver("local")
+                .driverOpts(Map.of("type", "tmpfs", "device", "tmpfs", "o", "size=1m")).build());
+        try {
+            assertThrows(IllegalStateException.class, () -> launcher.createOwnedVolume(name, labels,
+                    Map.of("type", "ext4", "device", "/dev/loop9", "o", "nosuid,nodev")),
+                    "our label but other options is still not the volume asked for");
+        } finally {
+            docker.removeVolume(name);
+        }
+    }
+
+    @Test
+    public void disposalDetachesTheQuotaDeviceEvenWithNoVolumeToNameIt() throws Exception {
+        // 9a2658d-F2: a launch that stopped after losetup and before the workspace volume
+        // existed (a platform crash; reconciliation then disposes by attempt id). The image
+        // is attached exactly as makeWorkspace attaches it, and no volume records the device.
+        String id = attempt();
+        Handle h = DockerWorkerLauncher.handle(id);
+        String image = h.quotaImage();
+        String setup = docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
+                .image(Images.SETUP).labels(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, id))
+                .cmd("sh", "-c", "truncate -s 64M /s/" + image + " && mkfs.ext4 -q -F /s/" + image
+                        + " && losetup --find --show /s/" + image)
+                .hostConfig(HostConfig.builder().privileged(true).networkMode("none")
+                        .binds(DockerWorkerLauncher.QUOTA_IMAGES_VOLUME + ":/s").build()).build()).id();
+        docker.startContainer(setup);
+        assertEquals(0L, docker.waitContainer(setup).statusCode());
+        docker.removeContainer(setup);
+        List<String> before = launcher.leftovers(h);
+        assertTrue(before.stream().anyMatch(l -> l.startsWith("quota /sys/block/loop")),
+                "the device is attached before disposal: " + before);
+        assertEquals(List.of(), launcher.dispose(h));
+        assertEquals(List.of(), launcher.leftovers(h));
     }
 
     @Test

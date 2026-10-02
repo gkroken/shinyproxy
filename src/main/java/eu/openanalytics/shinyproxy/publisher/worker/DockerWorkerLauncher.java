@@ -33,6 +33,7 @@ import org.mandas.docker.client.DockerClient.RemoveContainerParam;
 import org.mandas.docker.client.LogStream;
 import org.mandas.docker.client.exceptions.DockerException;
 import org.mandas.docker.client.exceptions.NotFoundException;
+import org.mandas.docker.client.exceptions.VolumeNotFoundException;
 import org.mandas.docker.client.messages.ContainerConfig;
 import org.mandas.docker.client.messages.ContainerExit;
 import org.mandas.docker.client.messages.HostConfig;
@@ -87,6 +88,7 @@ public final class DockerWorkerLauncher {
     /** Where quota images live: one shared named volume, one file per attempt. */
     static final String QUOTA_IMAGES_VOLUME = "skald-quota-images";
     private static final Pattern ATTEMPT = Pattern.compile("[a-z0-9]{8,40}");
+    static final long GATEWAY_MEMORY = 256L << 20;
     private static final Pattern LOOP = Pattern.compile("/dev/loop[0-9]{1,4}");
 
     /** The images the launcher runs, each by digest: the derived worker and gateway, a
@@ -166,10 +168,11 @@ public final class DockerWorkerLauncher {
                     request.egress().repos(), request.egress().privateMirrors());
             Launch launch = profile.launch(request.settings(), h.network(), h.workspaceVolume());
 
+            refuseTakenNames(h);
             docker.createNetwork(NetworkConfig.builder().name(h.network()).internal(true)
                     .checkDuplicate(true).labels(labels).build());
             for (String v : List.of(h.socketVolume(), h.configVolume())) {
-                docker.createVolume(Volume.builder().name(v).labels(labels).build());
+                createOwnedVolume(v, labels, null);
             }
             writeConfig(h, squid, buildkitdToml(request.egress().registry()), labels);
             startGateway(h, request.egress(), labels);
@@ -184,6 +187,64 @@ public final class DockerWorkerLauncher {
             throw new IllegalStateException("could not launch the worker for attempt "
                     + request.attemptId() + ": " + e.getMessage()
                     + (left.isEmpty() ? "" : "; LEFT BEHIND: " + left), e);
+        }
+    }
+
+    /**
+     * Refuses to launch over an object that already carries one of the attempt's names.
+     * Docker's volume create is idempotent by name and returns an existing volume whatever
+     * its driver and options, so a stale or foreign volume would otherwise become the
+     * worker's workspace or the gateway's configuration (9a2658d-F1). Containers and the
+     * network would refuse a duplicate themselves; they are checked here too, so the
+     * refusal comes before anything is made.
+     */
+    private void refuseTakenNames(Handle h) throws DockerException, InterruptedException {
+        List<String> taken = new ArrayList<>();
+        for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume())) {
+            try {
+                docker.inspectVolume(v);
+                taken.add("volume " + v);
+            } catch (NotFoundException | VolumeNotFoundException e) {
+                // free
+            }
+        }
+        for (String c : List.of(h.worker(), h.gateway())) {
+            try {
+                docker.inspectContainer(c);
+                taken.add("container " + c);
+            } catch (NotFoundException | VolumeNotFoundException e) {
+                // free
+            }
+        }
+        try {
+            docker.inspectNetwork(h.network());
+            taken.add("network " + h.network());
+        } catch (NotFoundException | VolumeNotFoundException e) {
+            // free
+        }
+        if (!taken.isEmpty()) {
+            throw new IllegalStateException("the attempt's names are already taken, refusing to "
+                    + "adopt what is there: " + taken);
+        }
+    }
+
+    /**
+     * Creates a volume and then checks the daemon made THIS one: our labels, and when
+     * {@code options} is given, exactly those driver options. A name taken between the
+     * check above and this call would otherwise be adopted silently.
+     */
+    void createOwnedVolume(String name, Map<String, String> labels, Map<String, String> options)
+            throws DockerException, InterruptedException {
+        Volume.Builder b = Volume.builder().name(name).labels(labels);
+        if (options != null) {
+            b.driver("local").driverOpts(options);
+        }
+        docker.createVolume(b.build());
+        Volume made = docker.inspectVolume(name);
+        Map<String, String> got = made.labels() == null ? Map.of() : made.labels();
+        if (!labels.entrySet().stream().allMatch(e -> e.getValue().equals(got.get(e.getKey())))
+                || (options != null && !options.equals(made.options()))) {
+            throw new IllegalStateException("volume " + name + " is not the one this launch made");
         }
     }
 
@@ -207,10 +268,22 @@ public final class DockerWorkerLauncher {
 
     private void startGateway(Handle h, Egress egress, Map<String, String> labels)
             throws DockerException, InterruptedException {
+        // Hardened (9a2658d N1): squid parses every request build code sends and sits on the
+        // operator's outer networks. It runs as its own user already; it needs nothing
+        // writable but /tmp (measured: with pid_filename none, stdio logs and no cache_dir it
+        // starts read-only, all capabilities dropped, under no-new-privileges).
         HostConfig.Builder hc = HostConfig.builder()
                 .networkMode(h.network())
                 .binds(h.configVolume() + ":" + CONFIG_MOUNT + ":ro")
-                .readonlyRootfs(false);
+                .readonlyRootfs(true)
+                .tmpfs(Map.of("/tmp", "rw,noexec,nosuid,nodev,size=16m"))
+                .capDrop("ALL")
+                .securityOpt("no-new-privileges")
+                .memory(GATEWAY_MEMORY)
+                .memorySwap(GATEWAY_MEMORY)
+                .pidsLimit(128)
+                .nanoCpus(1_000_000_000L)
+                .privileged(false);
         if (!egress.gatewayDns().isEmpty()) {
             hc.dns(egress.gatewayDns());
         }
@@ -231,7 +304,9 @@ public final class DockerWorkerLauncher {
             throws DockerException, InterruptedException {
         try {
             docker.inspectVolume(QUOTA_IMAGES_VOLUME);
-        } catch (NotFoundException e) {
+        } catch (NotFoundException | VolumeNotFoundException e) {
+            // mandas reports a missing volume as VolumeNotFoundException, which is NOT a
+            // NotFoundException (it extends DockerException directly).
             docker.createVolume(Volume.builder().name(QUOTA_IMAGES_VOLUME).build());
         }
         String out = runHelper("quota-" + h.attemptId(), images.setup(), true,
@@ -245,9 +320,8 @@ public final class DockerWorkerLauncher {
         }
         Map<String, String> volumeLabels = new LinkedHashMap<>(labels);
         volumeLabels.put("eu.skald.loop-device", loop);
-        docker.createVolume(Volume.builder().name(h.workspaceVolume()).driver("local")
-                .driverOpts(Map.of("type", "ext4", "device", loop, "o", "nosuid,nodev"))
-                .labels(volumeLabels).build());
+        createOwnedVolume(h.workspaceVolume(), volumeLabels,
+                Map.of("type", "ext4", "device", loop, "o", "nosuid,nodev"));
         runHelper("chown-" + h.attemptId(), images.helper(), false,
                 List.of(h.workspaceVolume() + ":/w"), List.of(),
                 List.of("chown", WORKER_UID + ":" + WORKER_UID, "/w"), labels);
@@ -287,38 +361,50 @@ public final class DockerWorkerLauncher {
      * attempted whatever an earlier one did.
      */
     public List<String> dispose(Handle h) throws InterruptedException {
+        // Only what carries THIS attempt's label is removed: an object that merely has one
+        // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
         List<String> errors = new ArrayList<>();
         for (String c : List.of(h.worker(), h.gateway(), "skald-helper-conf-" + h.attemptId(),
                 "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
-            quietly(errors, () -> docker.removeContainer(c, RemoveContainerParam.forceKill(),
-                    RemoveContainerParam.removeVolumes()));
-        }
-        String loop = null;
-        try {
-            Volume ws = docker.inspectVolume(h.workspaceVolume());
-            loop = ws.labels() == null ? null : ws.labels().get("eu.skald.loop-device");
-        } catch (NotFoundException e) {
-            // never made, or already removed
-        } catch (DockerException e) {
-            errors.add(e.getMessage());
+            quietly(errors, () -> {
+                if (ours(docker.inspectContainer(c).config().labels(), h)) {
+                    docker.removeContainer(c, RemoveContainerParam.forceKill(),
+                            RemoveContainerParam.removeVolumes());
+                }
+            });
         }
         for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume())) {
-            quietly(errors, () -> docker.removeVolume(v));
+            quietly(errors, () -> {
+                if (ours(docker.inspectVolume(v).labels(), h)) {
+                    docker.removeVolume(v);
+                }
+            });
         }
-        // Detach only if the device is still backed by THIS attempt's image: a device number
-        // may since have been reused (dev/quota_volume.py's guard). Then delete the image.
-        String detach = loop != null && LOOP.matcher(loop).matches()
-                ? "case \"$(cat /sys/block/" + loop.substring(5) + "/loop/backing_file 2>/dev/null)\" in "
-                + "*/" + h.quotaImage() + "|*/" + h.quotaImage() + "\" (deleted)\") losetup -d " + loop
-                + " ;; esac; " : "";
+        // Detach EVERY device still backed by this attempt's image, found by its backing file
+        // as leftovers() finds it -- not through the volume's label, which is missing when
+        // the launch failed before the volume existed (9a2658d-F2). The file-name match is the
+        // guard against a reused device number (dev/quota_volume.py). Then delete the image.
+        String image = h.quotaImage();
         quietly(errors, () -> runHelper("cleanup-" + h.attemptId(), images.setup(), true,
                 List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
-                List.of("sh", "-c", detach + "rm -f /s/" + h.quotaImage()), Map.of()));
-        quietly(errors, () -> docker.removeNetwork(h.network()));
+                List.of("sh", "-c", "for f in /sys/block/loop*/loop/backing_file; do"
+                        + " case \"$(cat \"$f\" 2>/dev/null)\" in"
+                        + " */" + image + "|*/" + image + "\" (deleted)\")"
+                        + " d=${f#/sys/block/}; losetup -d /dev/${d%%/*} ;; esac; done;"
+                        + " rm -f /s/" + image), Map.of(ATTEMPT_LABEL, h.attemptId())));
+        quietly(errors, () -> {
+            if (ours(docker.inspectNetwork(h.network()).labels(), h)) {
+                docker.removeNetwork(h.network());
+            }
+        });
         List<String> left = leftovers(h);
         left.addAll(errors.stream().filter(e -> !e.contains("No such") && !e.contains("not found"))
                 .map(e -> "error: " + e).toList());
         return left;
+    }
+
+    private static boolean ours(Map<String, String> labels, Handle h) {
+        return labels != null && h.attemptId().equals(labels.get(ATTEMPT_LABEL));
     }
 
     /** What still exists for this attempt: containers, volumes, network, attached image. */
@@ -338,7 +424,8 @@ public final class DockerWorkerLauncher {
             String attached = runHelper("check-" + h.attemptId(), images.setup(), true,
                     List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
                     List.of("sh", "-c", "grep -l '" + h.quotaImage() + "' /sys/block/loop*/loop/backing_file"
-                            + " 2>/dev/null; ls /s/" + h.quotaImage() + " 2>/dev/null; true"), Map.of());
+                            + " 2>/dev/null; ls /s/" + h.quotaImage() + " 2>/dev/null; true"),
+                    Map.of(ATTEMPT_LABEL, h.attemptId()));
             attached.strip().lines().filter(l -> !l.isBlank()).forEach(l -> left.add("quota " + l));
         } catch (DockerException e) {
             left.add("could not list: " + e.getMessage());
@@ -412,7 +499,7 @@ public final class DockerWorkerLauncher {
             step.run();
         } catch (InterruptedException e) {
             throw e;
-        } catch (NotFoundException e) {
+        } catch (NotFoundException | VolumeNotFoundException e) {
             // already gone
         } catch (Exception e) {
             errors.add(String.valueOf(e.getMessage()));
