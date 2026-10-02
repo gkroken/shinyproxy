@@ -21,9 +21,9 @@ The rule, in the order squid evaluates it (first match wins):
      never lives at one, and an allowlisted name the operator's DNS points there (or
      rebinding) must not become a path to instance credentials. This is a LIST, not a
      guarantee: a provider whose endpoint is not on it is not covered, which is why the
-     list is named here rather than described as "the metadata endpoint". Whole ranges
-     were rejected where a mirror can legitimately live (100.64.0.0/10 also carries
-     carrier-grade NAT and overlay networks such as Tailscale). An IP literal is refused
+     list is named here rather than described as "the metadata endpoint". (Alibaba's
+     address and AWS's IPv6 one also fall inside rule 5's ranges, so they are refused
+     twice; link-local is this rule's alone.) An IP literal is refused
      by rules 5 and 7 (rule 6 matches with -n); this rule is for names.
   2. the gateway's own loopback (to_localhost) is refused: squid's cache manager and any
      sidecar listening there are not a build's business.
@@ -31,8 +31,10 @@ The rule, in the order squid evaluates it (first match wins):
   4. the registry, on its port, and then each host the operator marked as a PRIVATE MIRROR,
      on the repository ports. Both are allowed to live at private addresses.
   5. every private or non-public destination, PRIVATE_DESTINATIONS (RFC 1918, carrier-grade
-     NAT 100.64.0.0/10, this host, IPv6 ULA and loopback), is refused, whatever NAME it
-     was reached through. This is what refuses DNS rebinding: a PUBLIC repository name
+     NAT 100.64.0.0/10, this host, benchmarking, multicast and reserved space, IPv6 ULA,
+     site-local and loopback) and the IPv6 prefixes that embed an IPv4 address
+     (EMBEDDED_IPV4_PREFIXES: NAT64 and 6to4), is refused, whatever NAME it was reached
+     through. This is what refuses DNS rebinding: a PUBLIC repository name
      (CRAN, PyPI) that resolves to an inside address -- through rebinding, a poisoned
      resolver or a misconfiguration -- is not a repository but a path into the operator's
      network. The plan names RFC 1918 and DNS rebinding outright; until this rule the
@@ -71,12 +73,21 @@ REPO_PORTS = (80, 443)
 # Private and otherwise non-public destinations. A PUBLIC repository name that resolves into
 # one of these is refused (DNS rebinding, or a public name pointed inward); only a host the
 # operator marked as a private mirror may live here.
+# IPv6 prefixes that EMBED an IPv4 address, which a translator turns back into it: on a
+# NAT64 host 64:ff9b::<10.x> reaches 10.x, and 64:ff9b::a9fe:a9fe reaches the metadata
+# service. Refused whole -- a repository is not reached through a translator by name
+# (d8aaa14-F1). Kept as their own tuple so a self-test can drop exactly these.
+EMBEDDED_IPV4_PREFIXES = ("64:ff9b::/96",       # RFC 6052 well-known NAT64
+                          "64:ff9b:1::/48",     # RFC 8215 local-use NAT64
+                          "2002::/16")          # 6to4
 PRIVATE_DESTINATIONS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
                         "100.64.0.0/10",                                     # CGNAT, overlays
                         "127.0.0.0/8", "0.0.0.0/8",                          # this host
-                        "fc00::/7", "::1/128")                               # IPv6 ULA, loopback
+                        "198.18.0.0/15",                                     # benchmarking
+                        "224.0.0.0/4", "240.0.0.0/4",                        # multicast, reserved
+                        "fc00::/7", "fec0::/10", "::1/128")                  # ULA, site-local, lo
 WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
-              "any_repo_port", "reverse_lookup", "no_private_deny")
+              "any_repo_port", "reverse_lookup", "no_private_deny", "no_embedded_ipv4_deny")
 
 
 def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirrors=()):
@@ -97,7 +108,9 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirr
              "acl registry dstdomain %s%s" % (
                  "" if weaken == "reverse_lookup" else "-n ", registry),
              "acl registry_port port 5000",
-             "acl private_dst dst %s" % " ".join(PRIVATE_DESTINATIONS)]
+             "acl private_dst dst %s" % " ".join(
+                 PRIVATE_DESTINATIONS + (() if weaken == "no_embedded_ipv4_deny"
+                                         else EMBEDDED_IPV4_PREFIXES))]
     if private_mirrors:
         lines.append("acl private_mirrors dstdomain %s%s" % (
             "" if weaken == "reverse_lookup" else "-n ", " ".join(private_mirrors)))

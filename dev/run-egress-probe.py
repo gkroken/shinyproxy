@@ -79,8 +79,19 @@ REBINDS = {REBIND: METADATA, "rebind-aws6": "fd00:ec2::254",
 # The operator's private mirror, declared as one, on the private network; and a PUBLIC
 # repository name the gateway's resolver points at that mirror's private address.
 MIRROR, REBIND_PRIVATE = "private-mirror", "rebind-private"
+# Public names whose IPv6 address EMBEDS the mirror's private IPv4: NAT64 and 6to4
+# (d8aaa14-F1). There is no translator here, so a policy that admitted them shows as squid
+# trying (503 ERR_CONNECT_FAIL) and a policy that refuses them as ERR_ACCESS_DENIED.
+REBIND_NAT64, REBIND_6TO4 = "rebind-nat64", "rebind-6to4"
 PRIVATE_MIRRORS = [MIRROR]
-REPOS = [ALLOWED, REBIND_PRIVATE] + sorted(REBINDS)
+REPOS = [ALLOWED, REBIND_PRIVATE, REBIND_NAT64, REBIND_6TO4] + sorted(REBINDS)
+
+
+def _embedded(ipv4, prefix):
+    """The IPv6 address that embeds `ipv4` under NAT64's 64:ff9b::/96 or 6to4's 2002::/16."""
+    a, b, c, d = (int(x) for x in ipv4.split("."))
+    v4 = "%02x%02x:%02x%02x" % (a, b, c, d)
+    return "64:ff9b::%s" % v4 if prefix == "nat64" else "2002:%s::1" % v4
 ADD_HOSTS = ["%s:%s" % (name, addr) for name, addr in sorted(REBINDS.items())]
 HOSTS = {ALLOWED: "ALLOWED-CONTENT", DENIED: "DENIED-CONTENT", SUFFIX: "EVIL-CONTENT"}
 
@@ -260,6 +271,8 @@ get rebind_linklocal6 http://rebind-linklocal6/
 get repo_badport http://%(allowed)s:6379/
 get mirror http://%(mirror)s/
 get rebind_private http://%(rebind_private)s/
+get rebind_nat64 http://%(rebind_nat64)s/
+get rebind_6to4 http://%(rebind_6to4)s/
 get ptr_repo "http://%(canary_repo)s/?exfil=build-secret"
 get ptr_registry http://%(canary_registry)s:5000/v2/
 connect ptr_connect %(canary_repo)s 443
@@ -353,6 +366,10 @@ def judge(report, ptr_ok=True):
         fetched(r, "mirror", "MIRROR-CONTENT"), "mirror")
     row("public repository name resolving to a private address refused",
         policy_denied(r, "rebind_private", "MIRROR-CONTENT"), "rebind_private")
+    row("public repository name resolving to NAT64-embedded private IPv4 refused",
+        policy_denied(r, "rebind_nat64"), "rebind_nat64")
+    row("public repository name resolving to 6to4-embedded private IPv4 refused",
+        policy_denied(r, "rebind_6to4"), "rebind_6to4")
     # Gated on the resolver control as well: without a PTR to follow, a refusal here proves
     # nothing about reverse lookups (t5-f4f5f32-F1).
     for key, label, ok in (
@@ -410,7 +427,8 @@ def run_matrix(tmp, label):
         "denied_ip": outer_ip(DENIED), "allowed_ip": outer_ip(ALLOWED),
         "canary_repo": outer_ip("canary-repo"),
         "canary_registry": outer_ip("canary-registry"),
-        "mirror": MIRROR, "rebind_private": REBIND_PRIVATE}
+        "mirror": MIRROR, "rebind_private": REBIND_PRIVATE,
+        "rebind_nat64": REBIND_NAT64, "rebind_6to4": REBIND_6TO4}
     ptr_ok, ptr_detail = ptr_control()
     report, blob = h.run_local_step(tmp, "egress-" + label, script)
     lines = [l.strip() for l in report.strip().splitlines() if l.strip()]
@@ -424,7 +442,10 @@ def run_matrix(tmp, label):
 
 def shipped_gateway(weaken=None, repos=None):
     h.start_gateway(repos=REPOS if repos is None else repos, weaken=weaken,
-                    add_hosts=ADD_HOSTS + ["%s:%s" % (REBIND_PRIVATE, state["mirror_ip"])],
+                    add_hosts=ADD_HOSTS + [
+                        "%s:%s" % (REBIND_PRIVATE, state["mirror_ip"]),
+                        "%s:%s" % (REBIND_NAT64, _embedded(state["mirror_ip"], "nat64")),
+                        "%s:%s" % (REBIND_6TO4, _embedded(state["mirror_ip"], "6to4"))],
                     resolver=state["resolver"], private_mirrors=PRIVATE_MIRRORS)
 
 
@@ -501,6 +522,13 @@ WEAKENINGS = [
     ("no private-destination deny", dict(weaken="no_private_deny"),
      ["public repository name resolving to a private address refused"],
      lambda r, ptr: fetched(r, "rebind_private", "MIRROR-CONTENT")),
+    # No translator here: without the prefixes squid admits the request and fails the
+    # connect, and says so -- the evidence that policy let it through (d8aaa14-F1).
+    ("no NAT64/6to4 deny", dict(weaken="no_embedded_ipv4_deny"),
+     ["public repository name resolving to NAT64-embedded private IPv4 refused",
+      "public repository name resolving to 6to4-embedded private IPv4 refused"],
+     lambda r, ptr: (_squid_tag(r, "rebind_nat64") == "ERR_CONNECT_FAIL"
+                     and _squid_tag(r, "rebind_6to4") == "ERR_CONNECT_FAIL")),
     ("repositories on any port", dict(weaken="any_repo_port"),
      ["allowlisted repository on another port refused"],
      lambda r, ptr: _squid_tag(r, "repo_badport") == "ERR_CONNECT_FAIL"),
@@ -555,7 +583,7 @@ def self_test(tmp):
     dead = {k: "first:none last:none squid:none body:none" for k in (
         "allowed", "unlisted", "unlisted_ip", "private_ip", "rebind", "rebind_aws6",
         "rebind_alibaba", "rebind_linklocal6", "repo_badport", "suffix", "ptr_repo", "ptr_registry", "mirror",
-        "rebind_private")}
+        "rebind_private", "rebind_nat64", "rebind_6to4")}
     dead.update(connect_badport="none", ptr_connect="none", direct_repo="refused")
     satisfied = [label for label, _, _, evidence in WEAKENINGS if evidence(dead, False)]
     if satisfied:
