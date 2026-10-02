@@ -1643,7 +1643,7 @@ below are marked passed by this planning document.
       real S3 depends on whether the caller holds `s3:ListBucket`, and that is unverified
       here.
 
-- [ ] **T5. Extractor plus mandatory independent mid-track security review.** Depends
+- [x] **T5. Extractor plus mandatory independent mid-track security review.** Depends
       T1–T4. Implement bounded extraction, validation and private workspace handling,
       including rules S1–S11 of "Semantic validation" above — S10 and S11 in particular,
       which no earlier task can prove because they need real extracted bytes.
@@ -1654,6 +1654,16 @@ below are marked passed by this planning document.
       finding resolved, the five conditions below satisfied and recorded, and no skipped
       isolation probe; same corpus through the upload pipeline once T8 exists.
       Driver/log plumbing may proceed only against reviewed boundaries after this gate.
+
+      **Closed 2026-10-02.** Gate Phase 2 (e5e3071, 8 findings) and two re-verification
+      rounds (f4f5f32, 4 findings; 67b4ef5, the final gate round by the user's 2026-10-01
+      decision, 1 finding) are all resolved through per-commit-reviewed fixes, the last of
+      them 39e8c37, 264efb9, d8aaa14 and 4c5101d (the egress rule's private-destination
+      tightening and its IPv4-embedding follow-up). The gate reports are in `code_review/`.
+      Decision 6's driver gate is open: F1 (P1) was re-verified by the gate itself. What it
+      does NOT provide, as every gate report says: a human security review of the
+      deployment profile and the extractor, before untrusted bundles from real users are
+      accepted, is still owed to the operator.
 
       **T3's blocked nested-`RUN` item is T5's to close (user decision 2026-09-24).** The
       launcher-contract probe asserts only that the build reaches stage 2, because the
@@ -1883,6 +1893,23 @@ below are marked passed by this planning document.
       deletion vs queued/finalizing work; same-key/different-input 409. **Pass:** no failed
       build produces a version, exactly one version per success, no accidental activation,
       no orphan artifacts whose ledger record was cascaded away.
+
+      **Decisions, taken 2026-10-01 by the user on the coder's recommendations** (and the V2
+      schema delegated to the coder, recorded in the commit that writes it):
+      1. A new build request for content that already has a QUEUED build supersedes it:
+         the queued one becomes CANCELLED with `superseded_by` set (nothing ran, so this is
+         the frozen machine's QUEUED -> CANCELLED edge). A RUNNING build continues.
+         Activation stays explicit, so a late finisher never goes live by itself.
+      2. Admission: one running build globally and a queue of 10 (as above), plus at most 3
+         non-terminal builds per publisher. Operator-configurable and stricter-only; no
+         manifest can raise them.
+      3. The coordinator runs in-process in ShinyProxy, with its leases in PostgreSQL and a
+         fencing generation per build, which stays correct with several instances.
+      4. A lease that expires makes the build INTERRUPTED. No automatic retry: retries are
+         new attempts a user starts (decision 4). Lease 60 s, renewed every 20 s,
+         configurable.
+      5. Idempotency keys are kept for the life of the build row (unique per content), never
+         expired, so a late HTTP retry behaves exactly like an early one.
 
 - [ ] **T7. Trusted bases, recipes, BuildKit driver and cache.** Depends T3/T5/T6.
       Add `images/` catalog and selected language/type bases, fixed non-root launchers,
