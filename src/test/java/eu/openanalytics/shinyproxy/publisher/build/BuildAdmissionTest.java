@@ -247,6 +247,26 @@ public class BuildAdmissionTest {
     }
 
     @Test
+    public void theSupersedeCreditIsOnlyForTheSupersedersOwnBuild() {
+        // 5c39c0b-F1: bob, at his limit, must not get alice's queued build as HIS credit by
+        // superseding it -- or he holds limit+1 unfinished builds, one more per shared item.
+        BuildAdmission admit = admission(10, 1);
+        UUID shared = content();
+        UUID bobs = content();
+        UUID alices = admit.request(shared, "alice", "a1", inputs(bundle(shared, "VALIDATED"))).buildId();
+        admit.request(bobs, "bob", "b1", inputs(bundle(bobs, "VALIDATED")));
+        assertEquals(AdmissionRefusal.Reason.PUBLISHER_LIMIT,
+            refusal(() -> admit.request(shared, "bob", "b2", inputs(bundle(shared, "VALIDATED")))));
+        assertEquals("QUEUED", state(alices), "the refused request still superseded alice's build");
+        assertNull(jdbc.queryForObject("SELECT superseded_by FROM skald.build WHERE id = ?",
+            UUID.class, alices));
+        // The control: alice, in the same position, supersedes her own.
+        BuildAdmission.Admitted hers = admit.request(shared, "alice", "a2",
+            inputs(bundle(shared, "VALIDATED")));
+        assertEquals(alices, hers.superseded());
+    }
+
+    @Test
     public void theQueueCapacityIsGlobalAndASupersedeDoesNotConsumeIt() {
         BuildAdmission admit = admission(2, 10);
         UUID a = content();
