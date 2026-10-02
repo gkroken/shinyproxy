@@ -1984,7 +1984,13 @@ below are marked passed by this planning document.
       while RUNNING does not stop a driver that finishes first: the attempt goes on to
       PUBLISHING with `cancel_requested_at` set, which is the machine's rule (no
       RUNNING -> CANCELLED without a confirmed stop). Show it as "cancel requested; the
-      build had already finished", not as an ignored request (071ef50 review N3).
+      build had already finished", not as an ignored request (071ef50 review N3). (5) The
+      plan's "Simulate crashes at each boundary, including after DB commit before HTTP
+      reply" has its database half in T6 (BuildFinalizationTest, BuildCoordinatorTest,
+      ContentDeletionTest); the HTTP half is this track's: a client whose reply was lost after
+      the commit retries and gets the same attempt (idempotency key), the same bundle state
+      (PUT replay is 409 with the current state), or the same cancellation outcome
+      (8808b29 review N2).
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.
