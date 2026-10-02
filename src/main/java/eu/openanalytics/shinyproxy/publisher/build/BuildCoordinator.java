@@ -156,10 +156,23 @@ public final class BuildCoordinator {
 
     // ------------------------------------------------------------------ fenced worker transitions
 
-    /** RUNNING -> PUBLISHING: the driver produced an image (a digest reference). */
+    /**
+     * RUNNING -> PUBLISHING: the driver produced an image (a digest reference). The image is
+     * recorded in the artifact ledger in the same transaction, so from this moment it can
+     * never become an orphan nobody knows about: if the attempt is then interrupted, times
+     * out or its content is deleted, the record survives and cleanup can find the image (the
+     * plan: "Crash after push but before the transaction leaves an orphan image" -- an
+     * orphan in the registry, never one missing from the ledger).
+     */
     public void toPublishing(Lease lease, String image) {
-        fenced(lease, "RUNNING", "state = 'PUBLISHING', publishing_at = now(), output_image = ?",
-                List.of(image), "build.publishing");
+        tx.executeWithoutResult(status -> {
+            fenced(lease, "RUNNING", "state = 'PUBLISHING', publishing_at = now(), output_image = ?",
+                    List.of(image), "build.publishing");
+            jdbc.update("INSERT INTO skald.artifact (kind, ref, subject_content_id, subject_bundle_id,"
+                    + " subject_build_id) SELECT 'image', ?, content_id, bundle_id, id"
+                    + " FROM skald.build WHERE id = ? ON CONFLICT (ref) DO NOTHING",
+                    image, lease.buildId());
+        });
     }
 
     /** RUNNING or PUBLISHING -> FAILED. */
@@ -242,6 +255,10 @@ public final class BuildCoordinator {
                     + lease.buildId() + " is gone"));
             jdbc.update("UPDATE skald.build SET state = 'SUCCEEDED', finished_at = now(),"
                     + " updated_at = now() WHERE id = ?", lease.buildId());
+            // A published version's image is pinned until its content is deleted (Q3's
+            // retention, "Status, logs, admin transport and cleanup").
+            jdbc.update("UPDATE skald.artifact SET subject_version_id = ?, pinned = true"
+                    + " WHERE kind = 'image' AND subject_build_id = ?", version.id(), lease.buildId());
             audit(lease.owner(), "build.succeeded", lease.buildId(),
                     Map.of("version", String.valueOf(version.version())));
             return version;

@@ -27,6 +27,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import eu.openanalytics.containerproxy.model.runtime.Proxy;
 import eu.openanalytics.containerproxy.service.ProxyService;
 import eu.openanalytics.containerproxy.service.UserService;
+import eu.openanalytics.shinyproxy.publisher.build.ContentDeletionGuard;
 import eu.openanalytics.shinyproxy.publisher.registry.AccessControlProjector;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentPath;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
@@ -276,6 +277,17 @@ public class ContentAdminService {
     @Transactional
     public void delete(UUID contentId) {
         ContentSummary existing = requireContent(contentId);
+
+        // The build side first, in this transaction: the content row's coordination lock (so
+        // an admission waiting on it is refused once this commits), refusal while builds are
+        // unfinished, and artifact cleanup enqueued before the cascade (T6).
+        try {
+            if (!new ContentDeletionGuard(jdbc).prepare(contentId)) {
+                throw notFound("no content with id " + contentId);
+            }
+        } catch (ContentDeletionGuard.BuildsInProgress inProgress) {
+            throw conflict(inProgress.getMessage());
+        }
 
         List<String> live = liveSpecIds(contentId);
         if (!live.isEmpty()) {
