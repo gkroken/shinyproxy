@@ -293,6 +293,10 @@
                 <targetPath>skald/spec</targetPath>
                 <includes>
                     <include>extraction-limits-v1.json</include>
+                    <!-- The build worker's launch profile and its seccomp profile: the
+                         Java launcher reads both (publisher.worker.WorkerProfile). -->
+                    <include>isolation-profile-v1.json</include>
+                    <include>build-worker-seccomp-v1.json</include>
                 </includes>
             </resource>
             <!-- Skald: the manifest schema and the version index that selects it, shipped
