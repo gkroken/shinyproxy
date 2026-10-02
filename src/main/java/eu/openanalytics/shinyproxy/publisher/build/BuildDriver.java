@@ -50,8 +50,18 @@ public interface BuildDriver {
     record Stopped() implements Outcome { }
 
     /**
-     * Runs the attempt. {@code cancelRequested} reads the attempt's cancel flag; a driver that
-     * sees it true stops the worker and returns {@link Stopped}.
+     * Runs the attempt. {@code cancelRequested} is the attempt's stop signal: true on a
+     * requested cancellation AND when the lease is lost. It is answered from memory and never
+     * blocks.
+     *
+     * <p>The bound every driver must keep (cab64b9 review N1): poll the signal at least every
+     * renew_every / 2 (10 s at the defaults), INCLUDING while waiting on a long call -- the
+     * runner declares the lease lost half a period before the database could expire it, and
+     * from that expiry another coordinator may claim the slot. On a true signal the driver
+     * must stop the WHOLE worker (worker_disposal: the container, its descendants and its
+     * volumes), not merely stop reading it, and then return {@link Stopped} (for a
+     * cancellation) or anything (for a lost lease -- it is not written). T7 tests this with a
+     * driver blocked in a long call.
      */
     Outcome run(Claimed build, java.util.function.BooleanSupplier cancelRequested) throws Exception;
 }

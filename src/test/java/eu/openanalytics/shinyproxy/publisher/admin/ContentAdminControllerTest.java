@@ -340,12 +340,27 @@ public class ContentAdminControllerTest {
      * own owner's list.
      */
     @Test
+    public void theBuildPackageIsWiredWhenADatabaseIsConfigured() {
+        // T6 part 5b: with spring.datasource.url set, admission, the coordinator and a running
+        // reaper exist as beans in the real application, not only in unit tests.
+        Assertions.assertNotNull(app.getBean(eu.openanalytics.shinyproxy.publisher.build.BuildAdmission.class));
+        Assertions.assertNotNull(app.getBean(eu.openanalytics.shinyproxy.publisher.build.BuildCoordinator.class));
+        eu.openanalytics.shinyproxy.publisher.build.BuildReaper reaper =
+            app.getBean(eu.openanalytics.shinyproxy.publisher.build.BuildReaper.class);
+        Assertions.assertEquals(0, reaper.failures(), "the reaper's reaps are failing in the real context");
+    }
+
+    @Test
     public void deletingContentWithARunningAppIsRefused() throws IOException {
         String id = createContent("busy");
         addVersion(id);
 
         String proxyId = admin.startProxy(specIdOf(id, 1));
         Assertions.assertNotNull(proxyId, "precondition: the container started");
+        // A ledger record of this content: the deletion's guard marks it DELETE_PENDING before
+        // the live-proxy check refuses, so the refusal must roll that back (6ae3868 review N1).
+        jdbc.update("INSERT INTO skald.artifact (kind, ref, subject_content_id)"
+            + " VALUES ('image', ?, ?::uuid)", "test/busy:build-" + id, id);
         try {
             try (Response r = delete(admin, "/admin/content/" + id)) {
                 Assertions.assertEquals(409, r.code(),
@@ -354,6 +369,9 @@ public class ContentAdminControllerTest {
                     "the refusal should name what is still running");
             }
             Assertions.assertTrue(paths().contains("busy"), "the content should still be there");
+            Assertions.assertEquals("LIVE", jdbc.queryForObject("SELECT state FROM skald.artifact"
+                + " WHERE subject_content_id = ?::uuid", String.class, id),
+                "a refused deletion left its cleanup enqueued");
         } finally {
             admin.stopProxy(proxyId);
         }

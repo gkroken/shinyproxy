@@ -1888,7 +1888,7 @@ below are marked passed by this planning document.
       Not covered, and stated in the checker: listing a directory (`getdents`) takes no
       path, so learning a target's *name* by listing the parent is not seen.
 
-- [ ] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
+- [x] **T6. V2, admission and durable coordinator.** Depends T1/T4/T5. Apply V2 to fresh
       and populated V1 PostgreSQL, preserve V1 checksum/rows/IDs/paths, test NOT NULL and
       uniqueness constraints. Add idempotency, leases/fencing, cancellation and admission
       quotas. Use a fake driver for deterministic crash/concurrency tests **only here**.
@@ -1914,6 +1914,26 @@ below are marked passed by this planning document.
       5. Idempotency keys are kept for the life of the build row (unique per content), never
          expired, so a late HTTP retry behaves exactly like an early one.
 
+      **Done 2026-10-02**, every part per-commit reviewed (a00a190 .. this commit):
+      `V2__bundles_and_builds.sql` (fresh and populated-V1 migration tests, same-content
+      composite keys); `BuildAdmission` (idempotent, 409 on a reused key, supersede, queue
+      and per-publisher limits, all race-tested); `BuildCoordinator` + `BuildRunner` (leased
+      claims fenced by generation, owner, lease and deadline; a heartbeat whose stop signal
+      is a function of time, so neither a throwing nor a hanging renewal lets a lost worker
+      run on; cancellation per the machine; reaping with no retry); `succeed()` (the version
+      and SUCCEEDED in one transaction through the shared `VersionAllocator`, log required,
+      nothing activated, a crash inside it leaving no half-version); `ContentDeletionGuard`
+      (refused while builds are unfinished, cleanup enqueued before the cascade, admission
+      fenced by the content lock); the artifact ledger (one image record per attempt, pinned
+      on success, a success it cannot pin refused); `BuildsConfig` + `BuildReaper` (wired
+      when a database is configured, reaping on a timer that cannot die). The Pass line's
+      four properties each have tests that go red under the matching mutant.
+      **Deferred to T7, by design:** finishing a PUBLISHING attempt after a restart "if safe"
+      needs the pushed digest verified in the registry, which is the driver's. Until T7
+      provides that, a PUBLISHING attempt whose lease expires is reaped INTERRUPTED; its
+      image is in the ledger, and a retry that reproduces the digest gets its own pinned
+      record (6ae3868-F1).
+
 - [ ] **T7. Trusted bases, recipes, BuildKit driver and cache.** Depends T3/T5/T6.
       Add `images/` catalog and selected language/type bases, fixed non-root launchers,
       dependency restore for both languages, scoped cache import/export and digest publication. Test source-only
@@ -1923,6 +1943,14 @@ below are marked passed by this planning document.
       and worker death. **Pass:** actual built image with recorded digest/provenance, useful
       failed-build log, bounded teardown, and cold runtime pull from the chosen registry
       authority. No mocked “build succeeded” counts toward this task.
+      **Carried from T6, for this track:** (a) implement `BuildDriver` within its documented
+      bound: poll the stop signal at least every renew_every / 2, including while blocked in
+      a long call, and on stop dispose of the WHOLE worker (`worker_disposal`), with a test
+      driving a driver blocked in a long call (cab64b9 review N1); (b) restart reconciliation
+      of PUBLISHING attempts: verify the pushed digest and the complete log, then finish
+      exactly once through `succeed()` if both hold; until then the reaper interrupts them;
+      (c) wire a `BuildRunner` loop around the real driver that logs and continues on
+      anything `runOnce` throws.
       **Carried from T5's gate finding F6 (part 3), for this track:** (1) when a RUN step is
       OOM-killed inside the worker, `docker inspect` reports the WORKER as
       `State.OOMKilled=true` though it keeps running and building; the driver must not read

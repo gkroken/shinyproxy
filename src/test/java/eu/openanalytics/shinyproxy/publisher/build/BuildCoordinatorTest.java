@@ -594,6 +594,67 @@ public class BuildCoordinatorTest {
         assertEquals("RUNNING", state(build));
     }
 
+    private static void awaitState(UUID build, String expected, long millis) throws InterruptedException {
+        long until = System.currentTimeMillis() + millis;
+        while (!expected.equals(state(build)) && System.currentTimeMillis() < until) {
+            Thread.sleep(50);
+        }
+        assertEquals(expected, state(build));
+    }
+
+    @Test
+    public void aStuckBuildTimesOutWithNobodyCallingReap() throws Exception {
+        // 071ef50 review N1: the timer, not a test, settles a passed deadline.
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        UUID build = queued("alice");
+        coordinator.claim("n1");
+        BuildReaper reaper = new BuildReaper(coordinator, Duration.ofMillis(200));
+        reaper.start();
+        try {
+            jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second' WHERE id = ?", build);
+            awaitState(build, "TIMED_OUT", 5000);
+            assertEquals(1, reaper.reaped());
+        } finally {
+            reaper.stop();
+        }
+    }
+
+    @Test
+    public void theReaperOutlivesReapsThatFail() throws Exception {
+        // A reaper whose reaps throw (the database is unreachable at first) must keep its
+        // timer: a scheduled task that throws is never run again (the 071ef50-F1 lesson), and
+        // a silently stopped reaper holds every later lost worker's slot forever.
+        FlakyDataSource flaky = new FlakyDataSource(jdbc.getDataSource());
+        BuildCoordinator coordinator = new BuildCoordinator(new JdbcTemplate(flaky), ONE);
+        UUID build = queued("alice");
+        new BuildCoordinator(jdbc, ONE).claim("n1");
+        flaky.failing = true;
+        BuildReaper reaper = new BuildReaper(coordinator, Duration.ofMillis(100));
+        reaper.start();
+        try {
+            Thread.sleep(600);
+            assertTrue(reaper.failures() > 0, "the outage was not even seen");
+            flaky.failing = false;
+            expireLease(build);
+            awaitState(build, "INTERRUPTED", 5000);
+        } finally {
+            reaper.stop();
+        }
+    }
+
+    @Test
+    public void aDriverReturningATagInsteadOfADigestFailsTheAttempt() {
+        // 25d3a98 review N1: a driver bug becomes the attempt's FAILED, not an exception that
+        // leaves it RUNNING until reaped.
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        UUID build = queued("alice");
+        assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE).runOnce("n1",
+            (b, stop) -> new BuildDriver.Built("registry:5000/c:latest")));
+        assertEquals("FAILED", state(build));
+        assertEquals("DRIVER_ERROR", jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?",
+            String.class, build));
+    }
+
     @Test
     public void aCrashedWorkerIsReapedAndTheQueueMovesOn() {
         // The crash, as the database sees it: a claim, then silence.

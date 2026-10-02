@@ -142,7 +142,15 @@ public final class BuildRunner {
                 return Result.FENCED;
             }
             if (outcome instanceof BuildDriver.Built built) {
-                coordinator.toPublishing(lease, built.image());
+                try {
+                    coordinator.toPublishing(lease, built.image());
+                } catch (IllegalArgumentException notADigest) {
+                    // A driver bug (a tag where a digest belongs) is the attempt's failure,
+                    // not an exception for the caller: the attempt would otherwise sit RUNNING
+                    // until reaped (25d3a98 review N1).
+                    coordinator.fail(lease, "DRIVER_ERROR", notADigest.getMessage());
+                    return Result.FAILED;
+                }
                 return Result.PUBLISHING;
             }
             if (outcome instanceof BuildDriver.Stopped) {
