@@ -1943,6 +1943,17 @@ below are marked passed by this planning document.
       and worker death. **Pass:** actual built image with recorded digest/provenance, useful
       failed-build log, bounded teardown, and cold runtime pull from the chosen registry
       authority. No mocked “build succeeded” counts toward this task.
+      **Decisions, 2026-10-02 (user):** bases are `rocker/r-ver` and the official
+      `python:*-slim`, digest-pinned; an oversized build log keeps head AND tail; NO Posit
+      Package Manager -- R and Python packages resolve through forge (the user's own
+      repository manager, github.com/gkroken/forge) in front of CRAN and PyPI, declared as a
+      private mirror; cold R builds compile from source and warm ones hit decision 7's cache.
+      User-experienced forge problems met on the way go to `code_review/forge-issues/`.
+      **Part 1 (2026-10-02):** `images/catalog.json` with R 4.6.1 and Python 3.13.16 (T1 was to
+      pin exact versions and never did; T7 pinned them), the reviewed Dockerfiles under
+      `images/`, forge in the dev stack, and `dev/validate-bases.sh`, which builds every base
+      through forge and checks each recorded fact inside the built image. rocker defaults R to
+      PPM (p3m.dev) with PPM's user agent; the R base removes both.
       **Carried from T6, for this track:** (a) implement `BuildDriver` within its documented
       bound: poll the stop signal at least every renew_every / 2, including while blocked in
       a long call, and on stop dispose of the WHOLE worker (`worker_disposal`), with a test

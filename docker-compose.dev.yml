@@ -13,6 +13,7 @@ volumes:
   postgres-data:
   minio-data:
   registry-data:
+  forge-data:
 
 services:
   skald:
@@ -105,6 +106,27 @@ services:
       echo 'buckets ready'
       "
     restart: "no"
+
+  # The CRAN/PyPI mirror builds resolve through (T7; user decision 2026-10-02: forge, the
+  # user's own repository manager, in front of CRAN and PyPI -- not Posit Package Manager).
+  # Eval mode seeds cran-public and pypi-public. Declared to the build gateway as a PRIVATE
+  # mirror, since it lives on this private network (dev/egress_gateway.py).
+  forge:
+    image: ghcr.io/gkroken/forge@sha256:fe3a82e5d96084238de8c6871193a1d0af8659eb5f80c22a5f35c223628a3757
+    networks: [skald-dev]
+    ports:
+      - "8082:8080"
+    volumes:
+      # A named volume inherits the image's /data ownership (uid 65532); a tmpfs or bind
+      # mount must be given that uid explicitly (code_review/forge-issues/001).
+      - forge-data:/data
+    read_only: true
+    healthcheck:
+      test: ["CMD", "/forge", "-healthcheck", "-addr", ":8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
   registry:
     image: registry:2
