@@ -156,5 +156,10 @@ def write_conf(directory, registry, repos, weaken=None, private_mirrors=()):
 
 # The image: alpine's squid, the configuration mounted at run time so a self-test can
 # restart the gateway weakened without rebuilding.
-DOCKERFILE = ("FROM alpine:3.20\nRUN apk add --no-cache squid\nUSER squid\n"
+# alpine:3.20, pinned to the index digest the probes have been building from (T7 ships this
+# Dockerfile as images/egress-gateway/Dockerfile). squid's own package is not pinned: Alpine
+# drops superseded package versions, so a pin would only make the image unbuildable later,
+# the same reasoning as the R base's system packages.
+GATEWAY_BASE = "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+DOCKERFILE = ("FROM " + GATEWAY_BASE + "\nRUN apk add --no-cache squid\nUSER squid\n"
               'CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]\n')
