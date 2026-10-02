@@ -15,10 +15,10 @@ image, not against the Dockerfile's text. A catalog that says renv 1.3.0 over an
 has 1.2.x is the kind of record this project keeps catching.
 
 Two kinds of check:
-  static  the catalog and the Dockerfiles agree (upstream digest, renv version), and every
-          upstream is digest-pinned
+  static  the catalog and the Dockerfiles agree (upstream digest, renv version and hash, the
+          system packages apt installs), and every upstream is digest-pinned
   live    inside each built image: exact language version, package-manager version, OS, the
-          uid 10001 user, and for R that NO repository is configured -- rocker defaults to
+          uid 10001 user, every recorded system package installed, and for R that NO repository is configured -- rocker defaults to
           Posit Package Manager (p3m.dev), which the user does not want, and a default baked
           into the base is one a build could silently resolve against
 
@@ -88,7 +88,19 @@ def judge_static(entry, dockerfile_text):
         elif arg_default(dockerfile_text, "RENV_SHA256") != sha:
             problems.append("Dockerfile RENV_SHA256 %s != catalog %s"
                             % (arg_default(dockerfile_text, "RENV_SHA256"), sha))
+    installed = apt_installed(dockerfile_text)
+    if installed != sorted(entry["system_packages"]):
+        problems.append("Dockerfile apt-installs %s != catalog system_packages %s"
+                        % (installed, sorted(entry["system_packages"])))
     return not problems, "; ".join(problems) or "Dockerfile and catalog agree"
+
+
+def apt_installed(dockerfile_text):
+    """The package names every `apt-get install` in the Dockerfile names, sorted."""
+    names = []
+    for m in re.finditer(r"apt-get install((?:\s+(?:\\\n)?\s*[^\s&\\]+)+)", dockerfile_text):
+        names += [w for w in m.group(1).split() if not w.startswith("-") and w != "\\"]
+    return sorted(names)
 
 
 def judge_live(entry, facts):
@@ -102,6 +114,10 @@ def judge_live(entry, facts):
             problems.append("%s %s, catalog %s" % (tool, facts.get(tool), want))
     if not str(facts.get("os", "")).startswith(entry["os"]):
         problems.append("os %s, catalog %s" % (facts.get("os"), entry["os"]))
+    have = set(facts.get("dpkg", "").split())
+    for pkg in entry["system_packages"]:
+        if pkg not in have:
+            problems.append("system package %s is not installed" % pkg)
     if facts.get("uid") != entry["user"].split(":")[0]:
         problems.append("user skald has uid %s, catalog %s" % (facts.get("uid"), entry["user"]))
     if entry["language"] == "r":
@@ -127,12 +143,15 @@ FACTS = {
     "python": ("python -c 'import platform; print(\"version=\" + platform.python_version())';"
                " pip --version | awk '{print \"pip=\"$2}';"),
 }
-COMMON = ". /etc/os-release; echo os=$NAME $VERSION_ID; echo uid=$(id -u skald)"
+COMMON = ". /etc/os-release; echo os=$NAME $VERSION_ID; echo uid=$(id -u skald);"
+# Names of the packages dpkg reports fully installed (not merely known or config-files).
+DPKG = (" echo dpkg=$(dpkg-query -W -f='${db:Status-Status} ${Package}\\n'"
+        " | awk '$1 == \"installed\" {print $2}' | tr '\\n' ' ')")
 
 
 def facts_of(image, language):
     out = docker(["run", "--rm", "--network", "none", "--entrypoint", "sh", image, "-c",
-                  FACTS[language] + COMMON], timeout=300)
+                  FACTS[language] + COMMON + DPKG], timeout=300)
     facts = {}
     for line in out.stdout.splitlines():
         if "=" in line:
@@ -207,7 +226,8 @@ def self_test():
     missed = []
     r = next(e for e in catalog()["bases"] if e["language"] == "r")
     good = {"version": r["version"], "renv": "1.3.0", "os": "Ubuntu 24.04", "uid": "10001",
-            "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)"}
+            "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)",
+            "dpkg": "base-files libuv1-dev pkg-config zlib1g-dev"}
 
     def expect(label, judged, want):
         ok, detail = judged
@@ -225,6 +245,8 @@ def self_test():
     expect("a wrong renv is caught", judge_live(r, dict(clean, renv="1.2.0")), False)
     expect("a wrong R is caught", judge_live(r, dict(clean, version="4.6.0")), False)
     expect("a root or missing user is caught", judge_live(r, dict(clean, uid="")), False)
+    expect("a missing system package is caught", judge_live(r, dict(clean, dpkg=
+           "base-files libuv1-dev pkg-config")), False)
     expect("the clean facts pass", judge_live(r, clean), True)
     text = (REPO / r["dockerfile"]).read_text()
     expect("an unpinned upstream is caught", judge_static(dict(r, upstream="rocker/r-ver:4.6.1"),
@@ -233,6 +255,12 @@ def self_test():
            judge_static(r, text.replace("RENV_VERSION=1.3.0", "RENV_VERSION=1.2.0")), False)
     expect("a Dockerfile/catalog renv hash mismatch is caught",
            judge_static(r, text.replace(r["package_manager_sha256"]["renv"], "0" * 64)), False)
+    expect("a Dockerfile installing less than the catalog records is caught",
+           judge_static(r, text.replace(" libuv1-dev pkg-config", " pkg-config")), False)
+    expect("a Dockerfile installing more than the catalog records is caught",
+           judge_static(r, text.replace(" zlib1g-dev", " zlib1g-dev libcurl4-openssl-dev")),
+           False)
+    expect("the shipped Dockerfile and catalog agree", judge_static(r, text), True)
     expect("a catalog with no renv hash is caught",
            judge_static(dict(r, package_manager_sha256={}), text), False)
 

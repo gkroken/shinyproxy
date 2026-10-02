@@ -21,7 +21,8 @@
       "port": 3838,
       "package_manager_sha256": {
         "renv": "c6dd55e6ad50e846bb91e2d2ced99b32c08a110dc9f5337cb7ea29749f049c5f"
-      }
+      },
+      "system_packages": ["libuv1-dev", "pkg-config", "zlib1g-dev"]
     },
     {
       "id": "python-shiny-3.13.16-amd64-r1",
@@ -39,7 +40,8 @@
         "pip": "26.2.1"
       },
       "user": "10001:10001",
-      "port": 3838
+      "port": 3838,
+      "system_packages": []
     }
   ]
 }
