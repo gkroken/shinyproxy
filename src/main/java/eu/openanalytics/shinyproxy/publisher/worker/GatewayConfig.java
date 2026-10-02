@@ -55,18 +55,43 @@ public final class GatewayConfig {
             "(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
             + "(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*");
 
+    private static final Pattern IPV4 = Pattern.compile(
+            "(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])");
+    /** Hex groups and colons only: no zone index, no brackets, no port. */
+    private static final Pattern IPV6 = Pattern.compile("(?=.*:)[0-9a-fA-F:]{2,39}");
+
     private GatewayConfig() {
     }
 
     /** The squid.conf text for this registry and these public repositories and private mirrors. */
     public static String squidConf(String registry, List<String> repos, List<String> privateMirrors) {
+        return squidConf(registry, repos, privateMirrors, List.of());
+    }
+
+    /**
+     * As above, with {@code dnsNameservers} as the only DNS servers squid asks (its own
+     * {@code dns_nameservers} directive, which overrides /etc/resolv.conf; the gateway's
+     * root, resolv.conf included, is read-only). Empty means Docker's embedded resolver,
+     * which is how the gateway finds the registry's and mirrors' container names. Each
+     * server must be an IP literal.
+     */
+    public static String squidConf(String registry, List<String> repos, List<String> privateMirrors,
+                                   List<String> dnsNameservers) {
         for (String host : concat(List.of(registry), repos, privateMirrors)) {
             if (!HOST.matcher(host).matches()) {
                 throw new IllegalArgumentException("not a host name: " + host);
             }
         }
+        for (String ip : dnsNameservers) {
+            if (!IPV4.matcher(ip).matches() && !IPV6.matcher(ip).matches()) {
+                throw new IllegalArgumentException("not an IP literal: " + ip);
+            }
+        }
         List<String> lines = new ArrayList<>();
         lines.add("http_port " + PORT);
+        if (!dnsNameservers.isEmpty()) {
+            lines.add("dns_nameservers " + String.join(" ", dnsNameservers));
+        }
         lines.add("acl metadata dst 169.254.0.0/16 fe80::/10 " + String.join(" ", METADATA_ADDRESSES));
         lines.add("acl repo_ports port " + String.join(" ", REPO_PORTS.stream().map(String::valueOf).toList()));
         lines.add("acl SSL_ports port 443");

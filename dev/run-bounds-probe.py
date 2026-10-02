@@ -40,7 +40,11 @@ MEASURES_RUNTIME = "runc-rootless"
 docker = h.docker
 results = []
 
-# The limits the shipping launch applies, from the same values it is started with.
+# The limits the shipping launch applies, from the same values it is started with. The
+# memory, PID and CPU limits are then re-read from the LAUNCHED worker (adopt_launched_limits):
+# with SKALD_LAUNCHER=java the platform's launcher starts it at production values (4 GiB, not
+# the probe launch's 2g), and a probe judging against its own constant reported a 2560 MiB
+# attempt that fit under 4 GiB as "not held" -- the right verdict for the wrong limit.
 MEMORY_MB = 2048                                    # memory_limit "2g"
 PID_LIMIT = int(sw.PLACEHOLDER_VALUES["pid_limit"])
 CPU_QUOTA = float(sw.PLACEHOLDER_VALUES["cpu_quota"])
@@ -181,7 +185,19 @@ def judge_mounts(report, workspace_opts):
         workspace_opts or "not read", _value(report, "run_root_opts") or "not read")
 
 
-def judge_memory(report, limit_mb=MEMORY_MB):
+def adopt_launched_limits():
+    """Take the memory, PID and CPU limits from the worker as the daemon records it."""
+    global MEMORY_MB, MEMORY_TARGET_MB, PID_LIMIT, CPU_QUOTA
+    hc = json.loads(docker(["inspect", "-f", "{{json .HostConfig}}", h.WORKER]).stdout)
+    MEMORY_MB = hc["Memory"] // (1024 * 1024)
+    MEMORY_TARGET_MB = MEMORY_MB + 512
+    PID_LIMIT = hc["PidsLimit"]
+    CPU_QUOTA = hc["NanoCpus"] / 1e9
+    return "memory %d MiB, pids %d, cpus %g" % (MEMORY_MB, PID_LIMIT, CPU_QUOTA)
+
+
+def judge_memory(report, limit_mb=None):
+    limit_mb = MEMORY_MB if limit_mb is None else limit_mb
     c_rc, c_mb = _value(report, "control_rc"), _int(_value(report, "control_mb"))
     a_rc, a_mb = _value(report, "attempt_rc"), _int(_value(report, "attempt_mb"))
     control = c_rc == "0" and c_mb == 256
@@ -192,7 +208,8 @@ def judge_memory(report, limit_mb=MEMORY_MB):
                                                        a_mb, limit_mb, note))
 
 
-def judge_pids(report, limit=PID_LIMIT, target=FORK_TARGET):
+def judge_pids(report, limit=None, target=FORK_TARGET):
+    limit = PID_LIMIT if limit is None else limit
     control = _int(_value(report, "control_forked")) == 50
     forked = _int(_value(report, "attempt_forked"))
     rc = _value(report, "attempt_rc")
@@ -206,7 +223,8 @@ def judge_pids(report, limit=PID_LIMIT, target=FORK_TARGET):
                                  rc or "?", limit, note))
 
 
-def judge_cpu(report, quota=CPU_QUOTA, loops=BURN_LOOPS, seconds=5, hz=100):
+def judge_cpu(report, quota=None, loops=BURN_LOOPS, seconds=5, hz=100):
+    quota = CPU_QUOTA if quota is None else quota
     visible = _int(_value(report, "cpus_visible"))
     control = _int(_value(report, "control_ticks")) / float(seconds * hz)
     attempt = _int(_value(report, "attempt_ticks")) / float(seconds * hz)
@@ -351,6 +369,7 @@ def main(argv):
     tmp = tempfile.mkdtemp(prefix="skald-bounds-")
     try:
         h.setup(tmp)
+        print("  launched with %s" % adopt_launched_limits())
         if "--self-test" in argv:
             return self_test(tmp)
         env = worker_env()
@@ -392,8 +411,7 @@ def main(argv):
         # leaked a loop device per run until this check existed.
         loop = h.state["loop"]
         h.stop_worker()
-        still = quota_volume.attached(loop, h.VOLUME)
-        gone = h.VOLUME not in docker(["volume", "ls", "-q"]).stdout.split()
+        still, gone = h.workspace_released(loop)
         record("the workspace's loop device is released",
                "teardown detaches the device and removes the volume",
                "%s: %s; volume %s" % (loop, "STILL ATTACHED" if still else "detached",

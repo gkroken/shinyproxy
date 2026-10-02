@@ -90,13 +90,19 @@ WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
               "any_repo_port", "reverse_lookup", "no_private_deny", "no_embedded_ipv4_deny")
 
 
-def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirrors=()):
+def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirrors=(),
+               dns_nameservers=()):
     """The squid.conf text. `repos` are the configured PUBLIC repository host names and
     `private_mirrors` the ones the operator marked as living on a private network; both are
-    reachable on `repo_ports`."""
+    reachable on `repo_ports`. `dns_nameservers`, when given, are the only DNS servers squid
+    asks (squid's own directive, which overrides /etc/resolv.conf): the egress probe's
+    stand-in for the internet's DNS. The platform's launcher writes this conf too
+    (GatewayConfig), and its gateway's root, resolv.conf included, is read-only, so this is
+    how a resolver reaches it; mounting a resolv.conf is the Python harness's way."""
     if weaken not in (None,) + WEAKENINGS:
         raise ValueError("unknown weakening %r" % weaken)
-    lines = ["http_port %d" % PORT,
+    lines = ["http_port %d" % PORT] + (
+        ["dns_nameservers %s" % " ".join(dns_nameservers)] if dns_nameservers else []) + [
              "acl metadata dst 169.254.0.0/16 fe80::/10 %s" % " ".join(METADATA_ADDRESSES),
              "acl repo_ports port %s" % " ".join(str(p) for p in repo_ports),
              "acl SSL_ports port 443",

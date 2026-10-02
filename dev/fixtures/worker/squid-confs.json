@@ -5,6 +5,7 @@
       "registry": "registry",
       "repos": [],
       "private_mirrors": [],
+      "dns_nameservers": [],
       "conf": "http_port 8888\nacl metadata dst 169.254.0.0/16 fe80::/10 fd00:ec2::254/128 100.100.100.200/32\nacl repo_ports port 80 443\nacl SSL_ports port 443\nacl CONNECT method CONNECT\nacl registry dstdomain -n registry\nacl registry_port port 5000\nacl private_dst dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 127.0.0.0/8 0.0.0.0/8 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 fc00::/7 fec0::/10 ::1/128 64:ff9b::/96 64:ff9b:1::/48 2002::/16\nhttp_access deny metadata\nhttp_access deny to_localhost\nhttp_access deny CONNECT !SSL_ports\nhttp_access allow registry registry_port\nhttp_access deny private_dst\nhttp_access deny all\ncache deny all\naccess_log stdio:/dev/stdout\ncache_log stdio:/dev/stderr\npid_filename none\ncoredump_dir /tmp\n"
     },
     {
@@ -15,6 +16,7 @@
         "files.pythonhosted.org"
       ],
       "private_mirrors": [],
+      "dns_nameservers": [],
       "conf": "http_port 8888\nacl metadata dst 169.254.0.0/16 fe80::/10 fd00:ec2::254/128 100.100.100.200/32\nacl repo_ports port 80 443\nacl SSL_ports port 443\nacl CONNECT method CONNECT\nacl registry dstdomain -n skald-registry\nacl registry_port port 5000\nacl private_dst dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 127.0.0.0/8 0.0.0.0/8 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 fc00::/7 fec0::/10 ::1/128 64:ff9b::/96 64:ff9b:1::/48 2002::/16\nacl repos dstdomain -n cloud.r-project.org pypi.org files.pythonhosted.org\nhttp_access deny metadata\nhttp_access deny to_localhost\nhttp_access deny CONNECT !SSL_ports\nhttp_access allow registry registry_port\nhttp_access deny private_dst\nhttp_access allow repos repo_ports\nhttp_access deny all\ncache deny all\naccess_log stdio:/dev/stdout\ncache_log stdio:/dev/stderr\npid_filename none\ncoredump_dir /tmp\n"
     },
     {
@@ -25,7 +27,20 @@
       "private_mirrors": [
         "forge"
       ],
+      "dns_nameservers": [],
       "conf": "http_port 8888\nacl metadata dst 169.254.0.0/16 fe80::/10 fd00:ec2::254/128 100.100.100.200/32\nacl repo_ports port 80 443\nacl SSL_ports port 443\nacl CONNECT method CONNECT\nacl registry dstdomain -n registry\nacl registry_port port 5000\nacl private_dst dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 127.0.0.0/8 0.0.0.0/8 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 fc00::/7 fec0::/10 ::1/128 64:ff9b::/96 64:ff9b:1::/48 2002::/16\nacl private_mirrors dstdomain -n forge\nacl repos dstdomain -n pypi.org\nhttp_access deny metadata\nhttp_access deny to_localhost\nhttp_access deny CONNECT !SSL_ports\nhttp_access allow registry registry_port\nhttp_access allow private_mirrors repo_ports\nhttp_access deny private_dst\nhttp_access allow repos repo_ports\nhttp_access deny all\ncache deny all\naccess_log stdio:/dev/stdout\ncache_log stdio:/dev/stderr\npid_filename none\ncoredump_dir /tmp\n"
+    },
+    {
+      "registry": "registry",
+      "repos": [
+        "pypi.org"
+      ],
+      "private_mirrors": [],
+      "dns_nameservers": [
+        "10.250.250.53",
+        "fd00::53"
+      ],
+      "conf": "http_port 8888\ndns_nameservers 10.250.250.53 fd00::53\nacl metadata dst 169.254.0.0/16 fe80::/10 fd00:ec2::254/128 100.100.100.200/32\nacl repo_ports port 80 443\nacl SSL_ports port 443\nacl CONNECT method CONNECT\nacl registry dstdomain -n registry\nacl registry_port port 5000\nacl private_dst dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 127.0.0.0/8 0.0.0.0/8 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 fc00::/7 fec0::/10 ::1/128 64:ff9b::/96 64:ff9b:1::/48 2002::/16\nacl repos dstdomain -n pypi.org\nhttp_access deny metadata\nhttp_access deny to_localhost\nhttp_access deny CONNECT !SSL_ports\nhttp_access allow registry registry_port\nhttp_access deny private_dst\nhttp_access allow repos repo_ports\nhttp_access deny all\ncache deny all\naccess_log stdio:/dev/stdout\ncache_log stdio:/dev/stderr\npid_filename none\ncoredump_dir /tmp\n"
     }
   ]
 }

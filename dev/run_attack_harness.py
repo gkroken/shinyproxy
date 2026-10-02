@@ -15,7 +15,15 @@ saw. The attempts themselves, and the assertion that each was contained, live in
 dev/run-attack-probe.py.
 
 Nothing here weakens anything: the launch is dev/shipping_worker's, read from the profile;
-the gateway is the same squid the launcher-contract probe uses. The point is to demonstrate
+the gateway is the same squid the launcher-contract probe uses.
+
+SKALD_LAUNCHER=java launches the gateway and worker through the platform's own launcher
+(publisher.worker.DockerWorkerLauncher, via dev/java_launcher.py) instead, so a probe's
+SHIPPED matrix measures exactly what the build driver creates (T7 part 3c-2b; reviews
+18553b8 N1, 543ed35 N2). The names below (INNER, GATEWAY, WORKER, SOCK, VOLUME) are then
+repointed at that launch's objects. A self-test weakens or strips the launch to see a check
+fail, and only the Python launch can be weakened, so Java mode refuses those calls rather
+than quietly running them unweakened. The point is to demonstrate
 the boundary holds, with an allow control beside each attempt so a probe cannot pass by the
 attempt silently not happening.
 """
@@ -28,8 +36,11 @@ import subprocess
 import uuid
 
 import egress_gateway
+import java_launcher
 import quota_volume
 import shipping_worker as sw
+
+JAVA = os.environ.get("SKALD_LAUNCHER") == "java"
 
 INNER, OUTER = "skald-atk-inner", "skald-atk-outer"
 # The outer network stands in for the internet, so it takes a public-looking range -- a
@@ -55,7 +66,45 @@ QUOTA_MB = 768
 docker = sw.docker
 # What the current worker was started with, so a probe can restart it weakened for a
 # self-test and teardown can release the loop device.
-state = {"loop": None, "tmp": None, "profile": None, "toml": None}
+state = {"loop": None, "tmp": None, "profile": None, "toml": None, "attempt": None,
+         "egress": {}, "java_left": None}
+
+
+def _java_relaunch(**egress):
+    """Java mode: dispose of the current attempt (if any) and launch a new one with this
+    egress, then point the module's names at the new objects."""
+    global INNER, GATEWAY, WORKER, SOCK, VOLUME
+    if state["attempt"]:
+        state["java_left"] = java_launcher.dispose(state["attempt"])
+        if state["java_left"]:
+            raise SystemExit("the Java launcher left %s" % state["java_left"])
+    state["egress"] = egress
+    state["attempt"] = uuid.uuid4().hex[:16]
+    handle = java_launcher.launch(state["attempt"], REGISTRY, outer_networks=[OUTER, PRIVATE],
+                                  quota_mb=QUOTA_MB, **egress)
+    INNER, GATEWAY, WORKER = handle["network"], handle["gateway"], handle["worker"]
+    SOCK, VOLUME = handle["socketVolume"], handle["workspaceVolume"]
+    found = docker(["volume", "inspect", "-f", "{{index .Options \"device\"}}", VOLUME])
+    state["loop"] = found.stdout.strip() or None
+
+
+def _java_only_shipped(what):
+    raise SystemExit("%s is a self-test's weakened launch; the Java launcher ships one "
+                     "launch and cannot be weakened. Run self-tests without SKALD_LAUNCHER=java."
+                     % what)
+
+
+def workspace_released(loop):
+    """(still attached, volume gone) after stop_worker(), judged the way each launcher
+    names its quota image: the Python one by quota_volume's file name, the Java one by
+    what its own disposal reports left (which reads the loop devices' backing files)."""
+    if JAVA:
+        left = state["java_left"] or []
+        return any(l.startswith("quota") for l in left), not any(
+            l.startswith("volume") for l in left) and VOLUME not in docker(
+            ["volume", "ls", "-q"]).stdout.split()
+    return quota_volume.attached(loop, VOLUME), VOLUME not in docker(
+        ["volume", "ls", "-q"]).stdout.split()
 
 
 def _htpasswd(directory):
@@ -91,6 +140,12 @@ def start_gateway(repos=(), weaken=None, add_hosts=(), resolver=None, private_mi
     /etc/hosts) and `resolver` (an IP the gateway uses as its only DNS server, standing in
     for the internet's DNS, where an attacker controls the reverse zone of an address the
     attacker owns) are for the egress probe; the defaults are what every probe runs."""
+    if JAVA:
+        if weaken:
+            _java_only_shipped("start_gateway(weaken=%r)" % weaken)
+        _java_relaunch(repos=list(repos), private_mirrors=list(private_mirrors),
+                       add_hosts=list(add_hosts), dns=[resolver] if resolver else [])
+        return
     docker(["rm", "-f", GATEWAY])
     conf_dir = pathlib.Path(state["tmp"]) / ("gateway-conf-%s" % (weaken or "shipped"))
     conf_dir.mkdir(parents=True, exist_ok=True)
@@ -119,10 +174,14 @@ def setup(tmp):
     Returns the seccomp profile path the worker was started with."""
     import buildkit_worker_profile as worker_profile
     teardown()
-    profile = worker_profile.write(tmp, worker_profile.fetch_default(tmp))
-    if not sw.build_worker_image(pathlib.Path(tmp) / "image"):
-        raise SystemExit("could not build the worker image")
-    build_gateway(tmp)
+    if JAVA:
+        profile = None
+        java_launcher.prepare()
+    else:
+        profile = worker_profile.write(tmp, worker_profile.fetch_default(tmp))
+        if not sw.build_worker_image(pathlib.Path(tmp) / "image"):
+            raise SystemExit("could not build the worker image")
+        build_gateway(tmp)
     _htpasswd(tmp)
     cfg = _client_config(tmp)
     docker(["network", "create", "--internal", INNER])
@@ -134,7 +193,8 @@ def setup(tmp):
             "-e", "REGISTRY_AUTH=htpasswd", "-e", "REGISTRY_AUTH_HTPASSWD_REALM=skald",
             "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd", "registry:2"])
     state["tmp"] = tmp
-    start_gateway()
+    if not JAVA:
+        start_gateway()
     subprocess.run(["sleep", "5"])
     # The launcher seeds a base image; the worker reaches it only through the gateway. The
     # seed push is authenticated, from the host side (docker login to the published port).
@@ -147,6 +207,10 @@ def setup(tmp):
               timeout=600).returncode != 0:
         raise SystemExit("could not seed the base image")
     setup.client_config = cfg   # host stays logged in for the run; teardown logs out
+    if JAVA:
+        state.update(tmp=tmp, profile=None)
+        _java_relaunch()
+        return None
     if not sw.prepare_volume(SOCK):
         raise SystemExit("could not prepare the socket volume")
     # The registry speaks plain HTTP and is reachable only through the gateway, so the
@@ -169,6 +233,11 @@ def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTI
     (placed after the profile's, so a later --env overrides an earlier one), `quota=False`
     gives a plain Docker volume instead of the loop-backed one, and `volume_options`
     changes the quota volume's mount options."""
+    if JAVA:
+        if omit or extra or not quota or volume_options != quota_volume.OPTIONS:
+            _java_only_shipped("start_worker(omit=%r, extra=%r, quota=%r)" % (omit, extra, quota))
+        _java_relaunch(**state["egress"])
+        return
     stop_worker()
     if quota:
         state["loop"] = quota_volume.create(VOLUME, state["tmp"], QUOTA_MB,
@@ -190,6 +259,11 @@ def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTI
 
 def stop_worker():
     """Removes the worker and its workspace, and releases the loop device."""
+    if JAVA:
+        if state["attempt"]:
+            state["java_left"] = java_launcher.dispose(state["attempt"])
+            state["attempt"] = None
+        return
     docker(["rm", "-f", "-v", WORKER])
     quota_volume.destroy(VOLUME, state.get("loop"), state.get("tmp"))
     state["loop"] = None

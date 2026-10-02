@@ -46,10 +46,11 @@ public class GatewayConfigTest {
     public void everyConfigurationIsByteForByteThePythonRule() throws IOException {
         JsonNode cases = new ObjectMapper().readTree(Path.of("dev/fixtures/worker/squid-confs.json").toFile())
                 .path("cases");
-        assertEquals(3, cases.size());
+        assertEquals(4, cases.size());
         for (JsonNode c : cases) {
             assertEquals(c.path("conf").asText(), GatewayConfig.squidConf(c.path("registry").asText(),
-                    strings(c.path("repos")), strings(c.path("private_mirrors"))), c.toString());
+                    strings(c.path("repos")), strings(c.path("private_mirrors")),
+                    strings(c.path("dns_nameservers"))), c.toString());
         }
     }
 
@@ -67,6 +68,11 @@ public class GatewayConfigTest {
                     () -> GatewayConfig.squidConf("registry", List.of(), List.of(h)), h);
             assertThrows(IllegalArgumentException.class,
                     () -> GatewayConfig.squidConf(h, List.of(), List.of()), h);
+        }
+        for (String dns : List.of("10.0.0.1\nhttp_access allow all", "10.0.0.1 10.0.0.2", "resolver",
+                "256.1.1.1", "10.0.0.1:53", "[::1]", "fe80::1%eth0", "", "1.2.3")) {
+            assertThrows(IllegalArgumentException.class, () -> GatewayConfig.squidConf("registry",
+                    List.of(), List.of(), List.of(dns)), dns);
         }
         String conf = GatewayConfig.squidConf("registry", List.of("cloud.r-project.org", "pypi.org"),
                 List.of("forge"));

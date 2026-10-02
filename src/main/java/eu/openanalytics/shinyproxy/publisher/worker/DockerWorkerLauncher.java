@@ -176,7 +176,8 @@ public final class DockerWorkerLauncher {
         }
         try {
             String squid = GatewayConfig.squidConf(request.egress().registry(),
-                    request.egress().repos(), request.egress().privateMirrors());
+                    request.egress().repos(), request.egress().privateMirrors(),
+                    request.egress().gatewayDns());
             Launch launch = profile.launch(request.settings(), h.network(), h.workspaceVolume());
 
             docker.createNetwork(NetworkConfig.builder().name(h.network()).internal(true)
@@ -294,9 +295,6 @@ public final class DockerWorkerLauncher {
                 .pidsLimit(128)
                 .nanoCpus(1_000_000_000L)
                 .privileged(false);
-        if (!egress.gatewayDns().isEmpty()) {
-            hc.dns(egress.gatewayDns());
-        }
         if (!egress.gatewayExtraHosts().isEmpty()) {
             hc.extraHosts(egress.gatewayExtraHosts());
         }

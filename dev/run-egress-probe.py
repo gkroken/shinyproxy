@@ -200,8 +200,14 @@ def ptr_control():
     """(ok, detail): does the gateway's own resolver answer each canary's PTR with the
     allowlisted name? Asked from inside the gateway, through the resolver it uses."""
     seen = []
+    # The resolver squid asks: in the Python launch the gateway's resolv.conf IS the probe's
+    # resolver; the Java launcher's gateway keeps Docker's embedded resolver in resolv.conf
+    # (its root is read-only) and points squid at the probe's resolver with dns_nameservers,
+    # so the control must ask that server by address, or it checks a resolver squid never
+    # uses (measured: "NO PTR" for both canaries while squid had the PTRs).
+    server = [state["resolver"]] if h.JAVA else []
     for name, (_, _, points_at) in CANARIES.items():
-        out = docker(["exec", h.GATEWAY, "nslookup", outer_ip(name)])
+        out = docker(["exec", h.GATEWAY, "nslookup", outer_ip(name)] + server)
         seen.append((points_at in out.stdout, "%s -> %s" % (
             outer_ip(name), points_at if points_at in out.stdout else "NO PTR")))
     return all(ok for ok, _ in seen), "; ".join(d for _, d in seen)
