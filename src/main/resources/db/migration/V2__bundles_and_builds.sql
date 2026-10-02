@@ -38,6 +38,9 @@ CREATE TABLE skald.bundle (
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     finished_at      timestamptz,
+    -- What build's composite foreign key references, so a build can only use a bundle of
+    -- its OWN content item (a00a190-F1).
+    CONSTRAINT bundle_id_content UNIQUE (id, content_id),
     CONSTRAINT bundle_state_known CHECK (state IN (
         'UPLOADING', 'VALIDATING', 'VALIDATED', 'REJECTED')),
     CONSTRAINT bundle_terminal_has_time CHECK (
@@ -61,8 +64,8 @@ CREATE INDEX bundle_content_idx ON skald.bundle (content_id);
 CREATE TABLE skald.build (
     id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     content_id         uuid        NOT NULL REFERENCES skald.content (id) ON DELETE CASCADE,
-    bundle_id          uuid        NOT NULL REFERENCES skald.bundle (id) ON DELETE CASCADE,
-    retry_of           uuid        REFERENCES skald.build (id) ON DELETE SET NULL,
+    bundle_id          uuid        NOT NULL,
+    retry_of           uuid,
     created_by         text        NOT NULL,
     -- Scoped to one content item; kept for the life of the row (decision 2026-10-01: keys
     -- are never expired, so a late HTTP retry behaves exactly as an early one).
@@ -73,7 +76,7 @@ CREATE TABLE skald.build (
     state              text        NOT NULL DEFAULT 'QUEUED',
     -- Set when a newer request for the same content cancelled this one while QUEUED
     -- (decision 2026-10-01: a new request supersedes the queued one).
-    superseded_by      uuid        REFERENCES skald.build (id) ON DELETE SET NULL,
+    superseded_by      uuid,
     cancel_requested_at timestamptz,
     recipe             jsonb       NOT NULL DEFAULT '{}'::jsonb,
     effective_limits   jsonb       NOT NULL DEFAULT '{}'::jsonb,
@@ -96,6 +99,18 @@ CREATE TABLE skald.build (
     publishing_at      timestamptz,
     finished_at        timestamptz,
     CONSTRAINT build_idempotency UNIQUE (content_id, idempotency_key),
+    -- Every reference from a build -- its bundle, the attempt it retries, the attempt that
+    -- superseded it -- is to the SAME content item, held by composite foreign keys rather
+    -- than trusted to the service. Without them a build of A from B's bundle was a valid row:
+    -- B's source built under A's name and ACL (a00a190-F1). SET NULL names only the
+    -- reference column (PostgreSQL 15+), so content_id is never nulled with it.
+    CONSTRAINT build_id_content UNIQUE (id, content_id),
+    CONSTRAINT build_bundle_same_content FOREIGN KEY (bundle_id, content_id)
+        REFERENCES skald.bundle (id, content_id) ON DELETE CASCADE,
+    CONSTRAINT build_retry_same_content FOREIGN KEY (retry_of, content_id)
+        REFERENCES skald.build (id, content_id) ON DELETE SET NULL (retry_of),
+    CONSTRAINT build_supersede_same_content FOREIGN KEY (superseded_by, content_id)
+        REFERENCES skald.build (id, content_id) ON DELETE SET NULL (superseded_by),
     CONSTRAINT build_state_known CHECK (state IN (
         'QUEUED', 'RUNNING', 'PUBLISHING',
         'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'INTERRUPTED')),
@@ -107,6 +122,9 @@ CREATE TABLE skald.build (
             OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL
                 AND lease_generation > 0)),
     CONSTRAINT build_succeeded_has_image CHECK (state <> 'SUCCEEDED' OR output_image IS NOT NULL),
+    -- Images are digest-pinned (decision 5): an output is a digest reference or nothing.
+    CONSTRAINT build_output_is_digest CHECK (
+        output_image IS NULL OR output_image ~ '@sha256:[0-9a-f]{64}$'),
     CONSTRAINT build_key_bounded CHECK (
         length(idempotency_key) BETWEEN 1 AND 200 AND idempotency_key ~ '^[\x21-\x7e]+$'),
     CONSTRAINT build_fingerprint_hex CHECK (input_fingerprint ~ '^[0-9a-f]{64}$'),
@@ -123,8 +141,12 @@ CREATE INDEX build_active_by_actor ON skald.build (created_by)
 CREATE INDEX build_content_idx ON skald.build (content_id);
 
 -- A managed version names the build that produced it. Old direct-image rows keep NULL.
+-- The link is to a build of the SAME content item (a00a190-F1): a version of A linked to
+-- B's build satisfied "one version per build" in form and broke it in meaning.
 ALTER TABLE skald.content_version
-    ADD COLUMN build_id uuid UNIQUE REFERENCES skald.build (id);
+    ADD COLUMN build_id uuid UNIQUE,
+    ADD CONSTRAINT content_version_build_same_content FOREIGN KEY (build_id, content_id)
+        REFERENCES skald.build (id, content_id);
 
 -- The ledger and outbox of everything the platform put into object storage or a registry.
 -- Not foreign keys on purpose: a record must SURVIVE the deletion of its content so that

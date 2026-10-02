@@ -521,8 +521,11 @@ A lost worker lease fences subsequent updates and publication from the old gener
 1. Admin admission checks authorization, quotas, media type and idempotency before reading
    significant bytes. A bounded upload/validation step stores a durable bundle or rejects
    it without scheduling execution. HTTP disconnect aborts partial upload work.
-2. A short transaction creates/returns a build request. Same actor/content/idempotency key
-   plus same inputs returns the existing attempt; different inputs give 409.
+2. A short transaction creates/returns a build request. Same content/idempotency key plus
+   same inputs returns the existing attempt; different inputs give 409. The key is scoped
+   to the content item, as `spec/lifecycle-v1.json` (frozen in T1) defines it, not to the
+   actor: anyone who may build that content may see its builds, so two of its publishers
+   sharing a key get the same attempt or a 409, never a second execution.
 3. A coordinator claims with a DB lease and fenced state transition. One running build
    globally initially; bounded queue. Enforced admission limits cannot wait until #9.
 4. The driver restores verified input into a private workspace, runs the trusted recipe,

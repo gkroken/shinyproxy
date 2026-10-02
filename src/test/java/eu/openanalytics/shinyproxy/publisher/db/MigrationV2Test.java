@@ -285,6 +285,59 @@ public class MigrationV2Test {
             + " VALUES (?, 3, 'img', 'alice')", c);
     }
 
+    /** The statement must be refused BY the named constraint, not merely refused. */
+    private static void refusedBy(String constraint, Runnable statement) {
+        DataIntegrityViolationException ex =
+            assertThrows(DataIntegrityViolationException.class, statement::run, constraint);
+        assertTrue(String.valueOf(ex.getMessage()).contains(constraint),
+            "refused, but not by " + constraint + ": " + ex.getMessage());
+    }
+
+    @Test
+    public void everyReferenceFromABuildStaysWithinItsContentItem() {
+        // a00a190-F1: a build of A from B's bundle would build B's source under A's name and
+        // ACL; a version of A linked to B's build breaks one-version-per-build in meaning.
+        JdbcTemplate jdbc = database(null);
+        UUID a = content(jdbc);
+        UUID bundleA = bundle(jdbc, a);
+        UUID b = content(jdbc);
+        UUID bundleB = bundle(jdbc, b);
+        UUID buildB = build(jdbc, b, bundleB, "kb", "SUCCEEDED");
+
+        refusedBy("build_bundle_same_content", () -> build(jdbc, a, bundleB, "x1", "FAILED"));
+        UUID buildA = build(jdbc, a, bundleA, "ka", "FAILED");
+        refusedBy("build_retry_same_content", () -> jdbc.update(
+            "UPDATE skald.build SET retry_of = ? WHERE id = ?", buildB, buildA));
+        refusedBy("build_supersede_same_content", () -> jdbc.update(
+            "UPDATE skald.build SET state = 'CANCELLED', superseded_by = ? WHERE id = ?",
+            buildB, buildA));
+        refusedBy("content_version_build_same_content", () -> jdbc.update(
+            "INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
+                + " VALUES (?, 1, 'img', 'alice', ?)", a, buildB));
+
+        // The controls: the same references within one content item are accepted.
+        UUID retry = build(jdbc, a, bundleA, "ka2", "FAILED");
+        jdbc.update("UPDATE skald.build SET retry_of = ? WHERE id = ?", buildA, retry);
+        jdbc.update("UPDATE skald.build SET state = 'CANCELLED', superseded_by = ? WHERE id = ?",
+            retry, buildA);
+        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
+            + " VALUES (?, 1, 'img', 'alice', ?)", b, buildB);
+        // And deleting the retried attempt clears only the reference, never content_id.
+        jdbc.update("UPDATE skald.build SET superseded_by = NULL WHERE id = ?", buildA);
+        jdbc.update("DELETE FROM skald.build WHERE id = ?", buildA);
+        assertNull(jdbc.queryForObject("SELECT retry_of FROM skald.build WHERE id = ?", Object.class, retry));
+        assertEquals(a, jdbc.queryForObject("SELECT content_id FROM skald.build WHERE id = ?", UUID.class, retry));
+    }
+
+    @Test
+    public void anOutputImageIsADigestReference() {
+        JdbcTemplate jdbc = database(null);
+        UUID c = content(jdbc);
+        UUID built = build(jdbc, c, bundle(jdbc, c), "s", "SUCCEEDED");
+        refusedBy("build_output_is_digest", () -> jdbc.update(
+            "UPDATE skald.build SET output_image = 'registry:5000/x:latest' WHERE id = ?", built));
+    }
+
     @Test
     public void artifactRecordsSurviveTheDeletionOfTheirContent() {
         JdbcTemplate jdbc = database(null);
