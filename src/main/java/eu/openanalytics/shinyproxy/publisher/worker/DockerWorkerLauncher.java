@@ -110,7 +110,11 @@ public final class DockerWorkerLauncher {
         }
     }
 
-    /** Where the gateway may let the worker go. */
+    /**
+     * Where the gateway may let the worker go. {@code gatewayDns}, when non-empty, REPLACES
+     * Docker's embedded resolver for squid, so those servers must also serve the registry's
+     * and mirrors' names; production passes none (f5015b6 N2).
+     */
     public record Egress(List<String> outerNetworks, String registry, List<String> repos,
                          List<String> privateMirrors, List<String> gatewayDns,
                          List<String> gatewayExtraHosts) {

@@ -57,10 +57,39 @@ public final class GatewayConfig {
 
     private static final Pattern IPV4 = Pattern.compile(
             "(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])");
-    /** Hex groups and colons only: no zone index, no brackets, no port. */
-    private static final Pattern IPV6 = Pattern.compile("(?=.*:)[0-9a-fA-F:]{2,39}");
+    private static final Pattern HEX_GROUP = Pattern.compile("[0-9a-fA-F]{1,4}");
 
     private GatewayConfig() {
+    }
+
+    /**
+     * An RFC 4291 text address in hex groups only: eight groups of 1-4 hex digits, or fewer
+     * with exactly one "::" standing for at least one zero group. No zone index, brackets,
+     * port or dotted-quad tail. Parsed here rather than by InetAddress, so nothing can ever
+     * reach a resolver (f5015b6-F2: the old pattern accepted "::::" and "1::2::3").
+     */
+    static boolean isIpv6Literal(String ip) {
+        int gap = ip.indexOf("::");
+        if (gap < 0) {
+            return groups(ip) == 8;
+        }
+        // A second "::" needs no check of its own: it leaves an empty group in `right`.
+        String left = ip.substring(0, gap);
+        String right = ip.substring(gap + 2);
+        int l = left.isEmpty() ? 0 : groups(left);
+        int r = right.isEmpty() ? 0 : groups(right);
+        return l >= 0 && r >= 0 && l + r <= 7;
+    }
+
+    /** The number of colon-separated hex groups, or -1 if any group is not 1-4 hex digits. */
+    private static int groups(String part) {
+        String[] g = part.split(":", -1);
+        for (String group : g) {
+            if (!HEX_GROUP.matcher(group).matches()) {
+                return -1;
+            }
+        }
+        return g.length;
     }
 
     /** The squid.conf text for this registry and these public repositories and private mirrors. */
@@ -83,7 +112,7 @@ public final class GatewayConfig {
             }
         }
         for (String ip : dnsNameservers) {
-            if (!IPV4.matcher(ip).matches() && !IPV6.matcher(ip).matches()) {
+            if (!IPV4.matcher(ip).matches() && !isIpv6Literal(ip)) {
                 throw new IllegalArgumentException("not an IP literal: " + ip);
             }
         }

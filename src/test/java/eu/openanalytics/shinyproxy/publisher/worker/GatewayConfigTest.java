@@ -70,9 +70,17 @@ public class GatewayConfigTest {
                     () -> GatewayConfig.squidConf(h, List.of(), List.of()), h);
         }
         for (String dns : List.of("10.0.0.1\nhttp_access allow all", "10.0.0.1 10.0.0.2", "resolver",
-                "256.1.1.1", "10.0.0.1:53", "[::1]", "fe80::1%eth0", "", "1.2.3")) {
+                "256.1.1.1", "10.0.0.1:53", "[::1]", "fe80::1%eth0", "", "1.2.3",
+                // f5015b6-F2: hex digits and colons that are not an address
+                "::::", ":".repeat(23), "fffff::1", "1::2::3", ":::", ":1::", "1::2:",
+                "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::8", "::ffff:1.2.3.4")) {
             assertThrows(IllegalArgumentException.class, () -> GatewayConfig.squidConf("registry",
                     List.of(), List.of(), List.of(dns)), dns);
+        }
+        for (String dns : List.of("::", "::1", "fd00::53", "2001:db8::", "1:2:3:4:5:6:7:8",
+                "1::8", "FE80:0:0:0:0:0:0:1", "1:2:3:4:5:6::8")) {
+            assertTrue(GatewayConfig.squidConf("registry", List.of(), List.of(), List.of(dns))
+                    .contains("dns_nameservers " + dns + "\n"), dns);
         }
         String conf = GatewayConfig.squidConf("registry", List.of("cloud.r-project.org", "pypi.org"),
                 List.of("forge"));

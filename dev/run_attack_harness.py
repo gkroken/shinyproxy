@@ -52,6 +52,12 @@ OUTER_SUBNET = "198.51.100.0/24"
 PRIVATE, PRIVATE_SUBNET = "skald-atk-private", "10.250.250.0/24"
 REGISTRY, GATEWAY = "skald-atk-registry", "skald-atk-gateway"
 WORKER, VOLUME, SOCK = "skald-atk-worker", "skald-atk-ws", "skald-atk-sock"
+# The harness's own names, before Java mode repoints INNER/GATEWAY/WORKER/SOCK/VOLUME at a
+# launch's objects: teardown sweeps these as well, so nothing the harness ever made under
+# them is left behind whichever mode made it (f5015b6-F1).
+# VOLUME is not swept by name: it is loop-backed, and stop_worker() releases it with its
+# device (removing only the volume would lose track of the device).
+HARNESS_NAMES = {"networks": (INNER,), "containers": (GATEWAY, WORKER), "volumes": (SOCK,)}
 REGISTRY_PORT = 15021
 GATEWAY_IMAGE = "skald-atk-gateway:local"
 # The registry requires a credential to read or write. The trusted client (the daemon's
@@ -67,7 +73,7 @@ docker = sw.docker
 # What the current worker was started with, so a probe can restart it weakened for a
 # self-test and teardown can release the loop device.
 state = {"loop": None, "tmp": None, "profile": None, "toml": None, "attempt": None,
-         "egress": {}, "java_left": None}
+         "egress": {}, "java_left": None, "disposed_image": None}
 
 
 def _java_relaunch(**egress):
@@ -94,14 +100,29 @@ def _java_only_shipped(what):
                      % what)
 
 
+def _backed_by(image):
+    """Every loop device whose backing file names `image`, read on the host from sysfs --
+    not from the launcher's report, so the launcher does not grade its own disposal."""
+    found = []
+    for f in pathlib.Path("/sys/block").glob("loop*/loop/backing_file"):
+        try:
+            if ("/" + image) in f.read_text():
+                found.append(f.parts[3])
+        except OSError:
+            pass
+    return found
+
+
 def workspace_released(loop):
     """(still attached, volume gone) after stop_worker(), judged the way each launcher
-    names its quota image: the Python one by quota_volume's file name, the Java one by
-    what its own disposal reports left (which reads the loop devices' backing files)."""
+    names its quota image: the Python one by quota_volume's file name, the Java one by the
+    launch's quota image name, read from the host's sysfs (f5015b6 N1). In Java mode a
+    disposal that could not list what it left also counts as not released."""
     if JAVA:
         left = state["java_left"] or []
-        return any(l.startswith("quota") for l in left), not any(
-            l.startswith("volume") for l in left) and VOLUME not in docker(
+        still = bool(_backed_by(state["disposed_image"])) or any(
+            l.startswith(("quota", "could not list")) for l in left)
+        return still, not any(l.startswith("volume") for l in left) and VOLUME not in docker(
             ["volume", "ls", "-q"]).stdout.split()
     return quota_volume.attached(loop, VOLUME), VOLUME not in docker(
         ["volume", "ls", "-q"]).stdout.split()
@@ -184,7 +205,9 @@ def setup(tmp):
         build_gateway(tmp)
     _htpasswd(tmp)
     cfg = _client_config(tmp)
-    docker(["network", "create", "--internal", INNER])
+    if not JAVA:
+        # Java mode's inner network is the launch's own; creating this one leaked it.
+        docker(["network", "create", "--internal", INNER])
     docker(["network", "create", "--subnet", OUTER_SUBNET, OUTER])
     docker(["network", "create", "--internal", "--subnet", PRIVATE_SUBNET, PRIVATE])
     docker(["run", "-d", "--name", REGISTRY, "--network", OUTER, "--network-alias",
@@ -262,6 +285,7 @@ def stop_worker():
     if JAVA:
         if state["attempt"]:
             state["java_left"] = java_launcher.dispose(state["attempt"])
+            state["disposed_image"] = "skald-quota-%s.img" % state["attempt"]
             state["attempt"] = None
         return
     docker(["rm", "-f", "-v", WORKER])
@@ -393,10 +417,11 @@ def registry_catalog_via_host():
 def teardown():
     docker(["logout", "localhost:%d" % REGISTRY_PORT])
     stop_worker()
-    for name in (GATEWAY, REGISTRY):
+    for name in dict.fromkeys((GATEWAY, REGISTRY) + HARNESS_NAMES["containers"]):
         docker(["rm", "-f", "-v", name])
-    docker(["volume", "rm", SOCK])
-    for net in (INNER, OUTER, PRIVATE):
+    for vol in dict.fromkeys((SOCK,) + HARNESS_NAMES["volumes"]):
+        docker(["volume", "rm", vol])
+    for net in dict.fromkeys((INNER,) + HARNESS_NAMES["networks"] + (OUTER, PRIVATE)):
         for name in docker(["network", "inspect", net, "-f",
                             "{{range .Containers}}{{.Name}} {{end}}"]).stdout.split():
             docker(["rm", "-f", "-v", name])
