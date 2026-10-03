@@ -162,7 +162,7 @@ public final class BuildKitDriver implements BuildDriver {
                     aborted.set(true);
                     stopEverything(h, work);
                     buildLog.line("[skald] stopped", false);
-                    buildLog.finish("stopped");
+                    buildLog.finish("STOPPED");
                     return new Stopped();
                 }
                 work.join(poll);
@@ -193,8 +193,8 @@ public final class BuildKitDriver implements BuildDriver {
      * the build and report a storage/log failure").
      */
     private Outcome withLog(HeadTailLog buildLog, Outcome outcome) {
-        String label = outcome instanceof Built ? "built"
-                : outcome instanceof Failed f ? "failed:" + f.code() : "stopped";
+        String label = outcome instanceof Built ? "BUILT"
+                : outcome instanceof Failed f ? "FAILED:" + f.code() : "STOPPED";
         if (outcome instanceof Failed f) {
             buildLog.line("[skald] failed: " + f.code() + " " + f.detail(), false);
         }

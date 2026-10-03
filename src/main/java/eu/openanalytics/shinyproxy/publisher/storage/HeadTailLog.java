@@ -191,6 +191,9 @@ public final class HeadTailLog {
      * not be written (another writer finished it, or a newer generation published).
      */
     public synchronized Optional<LogFinal> finish(String outcome) {
+        // A bad outcome is the caller's bug, not a storage failure: refused before anything
+        // is written, and never turned into failed().
+        LogFinal.requireOutcome(outcome);
         if (finished) {
             throw new IllegalStateException("the log is already finished");
         }

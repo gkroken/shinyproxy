@@ -1984,7 +1984,8 @@ below are marked passed by this planning document.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
-      10.9 and 18.4 s during make test; once 14.2 s while the shared host was busy). At the defaults the runner flips the stop 10 s
+      10.9, 14.8, 18.4, 38.0 and 52.5 s during make test, always the stop-during-RUN case;
+      once 14.2 s while the shared host was busy). At the defaults the runner flips the stop 10 s
       (renew_every / 2) before the database could expire the lease, so on a slow daemon a
       next claim can start while the old worker is still dying. The margin is the
       operator's (lease and renew_every are configurable); T10 measures it on the target

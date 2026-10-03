@@ -117,10 +117,10 @@ class HeadTailLogTest {
         for (int i = 1; i <= 10; i++) {
             log.line("line " + i, false);
         }
-        LogFinal fin = log.finish("built").orElseThrow();
+        LogFinal fin = log.finish("BUILT").orElseThrow();
         assertTrue(fin.complete());
         assertFalse(fin.truncated());
-        assertEquals("built", fin.outcome());
+        assertEquals("BUILT", fin.outcome());
         List<JsonNode> r = records(c, b);
         assertEquals(10, r.size());
         for (int i = 0; i < 10; i++) {
@@ -146,7 +146,7 @@ class HeadTailLogTest {
         for (int i = 1; i <= 1000; i++) {
             log.line("line " + i, false);
         }
-        LogFinal fin = log.finish("failed:BUILD_FAILED").orElseThrow();
+        LogFinal fin = log.finish("FAILED:BUILD_FAILED").orElseThrow();
         assertTrue(fin.complete());
         assertTrue(fin.truncated());
         List<JsonNode> r = records(c, b);
@@ -205,7 +205,7 @@ class HeadTailLogTest {
             log.line("x".repeat(60), false);
         }
         assertTrue(chunks(c, b) >= 2, "due by size");
-        assertTrue(log.finish("built").orElseThrow().complete());
+        assertTrue(log.finish("BUILT").orElseThrow().complete());
     }
 
     @Test
@@ -214,7 +214,7 @@ class HeadTailLogTest {
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(store, BUCKET), c, b, 1, SMALL);
         log.line("short", true);
         log.line("esc " + (char) 0x1b + "[31m", false);
-        log.finish("built").orElseThrow();
+        log.finish("BUILT").orElseThrow();
         List<JsonNode> r = records(c, b);
         assertTrue(r.get(0).path("cut").asBoolean());
         assertEquals("esc " + (char) 0x1b + "[31m", r.get(1).path("t").asText());
@@ -239,7 +239,7 @@ class HeadTailLogTest {
         };
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(flaky, BUCKET), c, b, 1, SMALL);
         log.line("survives", false);
-        LogFinal fin = log.finish("built").orElseThrow();
+        LogFinal fin = log.finish("BUILT").orElseThrow();
         assertFalse(log.failed());
         assertTrue(fin.complete());
         assertEquals("survives", records(c, b).get(0).path("t").asText());
@@ -268,7 +268,7 @@ class HeadTailLogTest {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(landsThenThrows(store, () -> { }), BUCKET), c, b, 1, SMALL);
         log.line("written once", false);
-        LogFinal fin = log.finish("built").orElseThrow(() -> new AssertionError(log.failure()));
+        LogFinal fin = log.finish("BUILT").orElseThrow(() -> new AssertionError(log.failure()));
         assertFalse(log.failed(), log.failure());
         assertTrue(fin.complete());
         assertEquals(1, chunks(c, b));
@@ -287,7 +287,7 @@ class HeadTailLogTest {
         });
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(swapped, BUCKET), c, b, 1, SMALL);
         log.line("mine", false);
-        assertEquals(Optional.empty(), log.finish("built"));
+        assertEquals(Optional.empty(), log.finish("BUILT"));
         assertTrue(log.failure().contains("not this writer's"), log.failure());
     }
 
@@ -313,7 +313,7 @@ class HeadTailLogTest {
         };
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(unreadable, BUCKET), c, b, 1, SMALL);
         log.line("mine", false);
-        assertEquals(Optional.empty(), log.finish("built"));
+        assertEquals(Optional.empty(), log.finish("BUILT"));
         assertTrue(log.failure().contains("outcome unknown") && log.failure().contains("could not be read back"),
                 log.failure());
     }
@@ -341,7 +341,7 @@ class HeadTailLogTest {
         assertEquals(3, tries.get(), "bounded: writeAttempts tries");
         assertTrue(log.failure().contains("simulated outage"), log.failure());
         log.line("more", false);
-        assertEquals(Optional.empty(), log.finish("built"), "no final.json for a log that failed");
+        assertEquals(Optional.empty(), log.finish("BUILT"), "no final.json for a log that failed");
         assertEquals(3, tries.get(), "nothing more is tried once failed");
         assertTrue(new BuildLogWriter(store, BUCKET).readFinal(c, b).isEmpty());
     }
@@ -352,7 +352,7 @@ class HeadTailLogTest {
         new BuildLogWriter(store, BUCKET).appendChunk(c, b, 1, "{\"n\":1,\"t\":\"theirs\"}\n".getBytes(StandardCharsets.UTF_8));
         HeadTailLog log = new HeadTailLog(new BuildLogWriter(store, BUCKET), c, b, 1, SMALL);
         log.line("mine", false);
-        assertEquals(Optional.empty(), log.finish("built"));
+        assertEquals(Optional.empty(), log.finish("BUILT"));
         assertTrue(log.failure().contains("already exists"), log.failure());
     }
 
@@ -364,7 +364,30 @@ class HeadTailLogTest {
         old.line("old", false);
         old.tick();
         writer.publishIndex(c, b, 2);
-        assertEquals(Optional.empty(), old.finish("built"), "final.json refused to generation 1");
+        assertEquals(Optional.empty(), old.finish("BUILT"), "final.json refused to generation 1");
+    }
+
+    @Test
+    void finalJsonSpeaksOnlyTheAttemptsOutcomeVocabulary() throws Exception {
+        // e4306c6-F1: final.json's outcome is the attempt's, BUILT | STOPPED | FAILED:<CODE>,
+        // never a lifecycle state the writer cannot know. Anything else is refused before a
+        // byte is written, and is the caller's bug, not a log failure.
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        BuildLogWriter writer = new BuildLogWriter(store, BUCKET);
+        for (String bad : List.of("built", "SUCCEEDED", "FAILED", "FAILED:", "FAILED:build", "FAILED:BUILD FAILED",
+                "FAILED:_X", "BUILT\n", "STOPPED ", "INTERRUPTED", "FAILED:" + "X".repeat(33))) {
+            assertThrows(IllegalArgumentException.class, () -> writer.finalise(c, b, 1, bad, false), bad);
+        }
+        assertTrue(writer.readFinal(c, b).isEmpty(), "nothing was written");
+        HeadTailLog log = new HeadTailLog(writer, c, b, 1, SMALL);
+        log.line("one", false);
+        assertThrows(IllegalArgumentException.class, () -> log.finish("built"));
+        assertFalse(log.failed(), "a bad outcome is not a storage failure");
+        assertEquals(0, chunks(c, b), "and nothing was flushed for it");
+        for (String good : List.of("BUILT", "STOPPED", "FAILED:BUILD_FAILED", "FAILED:X", "FAILED:" + "X".repeat(32))) {
+            assertEquals(good, LogFinal.requireOutcome(good));
+        }
+        assertEquals("FAILED:LOG_STORAGE", log.finish("FAILED:LOG_STORAGE").orElseThrow().outcome());
     }
 
     @Test

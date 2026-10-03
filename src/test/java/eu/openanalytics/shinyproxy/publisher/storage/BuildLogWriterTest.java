@@ -134,13 +134,13 @@ class BuildLogWriterTest {
         logs.appendChunk(c, b, 1, line(1));
         logs.appendChunk(c, b, 3, line(3));
 
-        LogFinal record = logs.finalise(c, b, 1, "FAILED", false).orElseThrow();
+        LogFinal record = logs.finalise(c, b, 1, "FAILED:BUILD_FAILED", false).orElseThrow();
         assertEquals(1, record.lastSequence(),
                 "completion must not advertise chunk 3 across the hole at 2");
         assertFalse(record.complete(),
                 "a gap means the LOG is incomplete, which is not the same as the build "
                         + "having failed");
-        assertEquals("FAILED", record.outcome());
+        assertEquals("FAILED:BUILD_FAILED", record.outcome());
         assertFalse(record.truncated(), "a hole is a loss, not a decision to stop");
 
         // And the index agrees: a reader arriving after completion is not sent further.
@@ -154,7 +154,7 @@ class BuildLogWriterTest {
         for (long n = 1; n <= 4; n++) {
             logs.appendChunk(c, b, n, line(n));
         }
-        LogFinal record = logs.finalise(c, b, 1, "SUCCEEDED", true).orElseThrow();
+        LogFinal record = logs.finalise(c, b, 1, "BUILT", true).orElseThrow();
         assertEquals(4, record.lastSequence());
         assertTrue(record.complete(), "no gaps, so the log is complete");
         assertTrue(record.truncated(),
@@ -193,12 +193,12 @@ class BuildLogWriterTest {
                 "the published index must still belong to the current generation");
         assertEquals(2, logs.readIndex(c, b).orElseThrow().lastSequence());
 
-        assertTrue(logs.finalise(c, b, 3, "SUCCEEDED", false).isEmpty(),
+        assertTrue(logs.finalise(c, b, 3, "BUILT", false).isEmpty(),
                 "a stale generation must not publish completion");
         assertTrue(logs.readFinal(c, b).isEmpty(), "nothing was finalised");
 
         // The current generation still can, and sees the chunk the old one left behind.
-        LogFinal record = logs.finalise(c, b, 5, "SUCCEEDED", false).orElseThrow();
+        LogFinal record = logs.finalise(c, b, 5, "BUILT", false).orElseThrow();
         assertEquals(3, record.lastSequence());
         assertTrue(record.complete());
     }
@@ -297,8 +297,8 @@ class BuildLogWriterTest {
     void finalIsWrittenOnce() {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();
         logs.appendChunk(c, b, 1, line(1));
-        LogFinal first = logs.finalise(c, b, 1, "SUCCEEDED", false).orElseThrow();
-        assertTrue(logs.finalise(c, b, 1, "FAILED", false).isEmpty(),
+        LogFinal first = logs.finalise(c, b, 1, "BUILT", false).orElseThrow();
+        assertTrue(logs.finalise(c, b, 1, "FAILED:BUILD_FAILED", false).isEmpty(),
                 "a second completion must be refused, not overwrite the outcome");
         assertEquals(first, logs.readFinal(c, b).orElseThrow(),
                 "the first outcome stands");

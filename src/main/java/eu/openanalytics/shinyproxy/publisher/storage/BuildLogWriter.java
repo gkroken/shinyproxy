@@ -188,6 +188,7 @@ public class BuildLogWriter {
      */
     public Optional<LogFinal> finalise(UUID contentId, UUID buildId, long generation,
                                        String outcome, boolean truncated) {
+        LogFinal.requireOutcome(outcome);
         Optional<LogIndex> current = readIndex(contentId, buildId);
         if (current.isPresent() && current.get().generation() > generation) {
             return Optional.empty();
