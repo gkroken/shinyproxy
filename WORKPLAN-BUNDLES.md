@@ -2009,7 +2009,8 @@ below are marked passed by this planning document.
       contract that T9 defines ("Consume only the server-generated `spec_json` contract"), and
       step 5's version transaction is T6/T9 evidence. So the `succeed()` call moves to T9
       with that contract. T7 verifies the pushed digest and finishes the log; a PUBLISHING
-      attempt whose lease expires is reaped INTERRUPTED until T9.
+      attempt whose lease expires is reaped INTERRUPTED until T9. **Approved by the user
+      2026-10-03** (raised by the reviewer as 4b8c6f8 N1).
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

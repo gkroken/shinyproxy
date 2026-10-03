@@ -59,8 +59,9 @@ public class WorkerConfigTest {
         c.setRegistryPassword("secret");
         c.setRepos(List.of("pypi.org"));
         c.setPrivateMirrors(List.of("forge"));
-        c.setCranMirror("http://forge:8080/repository/cran-public/");
-        c.setPypiMirror("http://forge:8080/repository/pypi-public/simple/");
+        // Port 80: the gateway serves repositories on 80 and 443 only (4b8c6f8-F1).
+        c.setCranMirror("http://forge/repository/cran-public/");
+        c.setPypiMirror("http://forge:80/repository/pypi-public/simple/");
         c.setPublishedBases(workspace.resolve("published-bases.json").toString());
         c.setWorkspace(workspace.toString());
         return c;
@@ -91,8 +92,20 @@ public class WorkerConfigTest {
         assertTrue(only(unreachableMirror).contains("not in repos or private-mirrors"), only(unreachableMirror));
 
         WorkerConfig badMirror = valid(dir);
-        badMirror.setPypiMirror("http://forge:8080/simple");
+        badMirror.setPypiMirror("http://forge/simple");
         assertTrue(only(badMirror).contains("plain http(s) URL ending in '/'"), only(badMirror));
+
+        // 4b8c6f8-F1: the dev stack's forge on :8080 is a port the gateway refuses.
+        WorkerConfig mirrorPort = valid(dir);
+        mirrorPort.setCranMirror("http://forge:8080/repository/cran-public/");
+        assertTrue(only(mirrorPort).contains("port 8080, but the gateway serves http repositories on [80, 443] only"),
+                only(mirrorPort));
+        WorkerConfig httpsOn80 = valid(dir);
+        httpsOn80.setPypiMirror("https://forge:80/repository/pypi-public/simple/");
+        assertTrue(only(httpsOn80).contains("https repositories on [443] only"), only(httpsOn80));
+        WorkerConfig httpsDefault = valid(dir);
+        httpsDefault.setPypiMirror("https://forge/repository/pypi-public/simple/");
+        assertEquals(List.of(), httpsDefault.problems(DEFAULTS), "https on its default port is served");
 
         WorkerConfig noWorkspace = valid(dir);
         noWorkspace.setWorkspace(dir.resolve("absent").toString());

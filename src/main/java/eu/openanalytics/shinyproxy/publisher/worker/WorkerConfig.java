@@ -187,10 +187,22 @@ public class WorkerConfig {
                 continue;
             }
             try {
-                String host = URI.create(mirror).getHost();
+                URI uri = URI.create(mirror);
+                String host = uri.getHost();
                 if (host == null || !allowed.contains(host)) {
                     problems.add("mirror " + mirror + ": its host is not in repos or private-mirrors, so the"
                             + " gateway would refuse every restore");
+                }
+                // What the gateway the launcher ships lets through (4b8c6f8-F1): plain http to a
+                // repository or private mirror on GatewayConfig.REPO_PORTS ("acl repo_ports"),
+                // and https only by CONNECT to 443 ("deny CONNECT !SSL_ports"). A mirror on any
+                // other port would be refused at every restore.
+                boolean https = "https".equals(uri.getScheme());
+                int port = uri.getPort() >= 0 ? uri.getPort() : https ? 443 : 80;
+                List<Integer> served = https ? List.of(443) : GatewayConfig.REPO_PORTS;
+                if (!served.contains(port)) {
+                    problems.add("mirror " + mirror + ": port " + port + ", but the gateway serves "
+                            + uri.getScheme() + " repositories on " + served + " only");
                 }
                 new Mirrors(URI.create(mirror), URI.create(mirror));
             } catch (IllegalArgumentException e) {

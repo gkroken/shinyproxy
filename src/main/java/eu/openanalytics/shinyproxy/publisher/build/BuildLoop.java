@@ -82,7 +82,9 @@ public final class BuildLoop {
                 }
             } catch (Throwable failure) {
                 failures.incrementAndGet();
-                log.warn("the build loop's attempt failed; going on after {}", idlePause, failure);
+                // ERROR: whatever it was (an Error included) is caught so the loop survives,
+                // and a looping failure must be visible (4b8c6f8 review N2).
+                log.error("the build loop's attempt failed; going on after {}", idlePause, failure);
                 idle = true;
             }
             if (idle) {
