@@ -163,10 +163,14 @@ public class DockerWorkerLauncherTest {
     public void aLaunchRefusesToAdoptAVolumeItDidNotMake() throws Exception {
         // 9a2658d-F1's repro: a volume already holding the workspace's name, here a 1 MiB
         // tmpfs with no labels. Docker's volume create would have returned it as is.
-        for (String role : List.of("ws", "conf")) {
+        for (String role : List.of("ws", "conf", "ctx")) {
             String id = attempt();
             Handle h = DockerWorkerLauncher.handle(id);
-            String name = role.equals("ws") ? h.workspaceVolume() : h.configVolume();
+            String name = switch (role) {
+                case "ws" -> h.workspaceVolume();
+                case "conf" -> h.configVolume();
+                default -> h.contextVolume();
+            };
             docker.createVolume(Volume.builder().name(name).driver("local")
                     .driverOpts(Map.of("type", "tmpfs", "device", "tmpfs", "o", "size=1m")).build());
             try {

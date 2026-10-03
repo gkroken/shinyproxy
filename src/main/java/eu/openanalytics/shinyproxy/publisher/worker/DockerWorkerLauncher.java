@@ -143,7 +143,7 @@ public final class DockerWorkerLauncher {
     /** One launched worker, by the names of everything it owns. Opaque to callers. */
     public record Handle(String attemptId, String network, String gateway, String worker,
                          String socketVolume, String configVolume, String workspaceVolume,
-                         String quotaImage) {
+                         String quotaImage, String client, String contextVolume) {
     }
 
     private final DockerClient docker;
@@ -159,7 +159,7 @@ public final class DockerWorkerLauncher {
     static Handle handle(String attemptId) {
         String p = "skald-b-" + attemptId;
         return new Handle(attemptId, p + "-net", p + "-gw", p + "-worker", p + "-sock",
-                p + "-conf", p + "-ws", "skald-quota-" + attemptId + ".img");
+                p + "-conf", p + "-ws", "skald-quota-" + attemptId + ".img", p + "-client", p + "-ctx");
     }
 
     /**
@@ -215,7 +215,8 @@ public final class DockerWorkerLauncher {
      */
     private void refuseTakenNames(Handle h) throws DockerException, InterruptedException {
         List<String> taken = new ArrayList<>();
-        for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume())) {
+        for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume(),
+                h.contextVolume())) {
             try {
                 docker.inspectVolume(v);
                 taken.add("volume " + v);
@@ -223,7 +224,7 @@ public final class DockerWorkerLauncher {
                 // free
             }
         }
-        for (String c : List.of(h.worker(), h.gateway())) {
+        for (String c : List.of(h.worker(), h.gateway(), h.client())) {
             try {
                 docker.inspectContainer(c);
                 taken.add("container " + c);
@@ -378,7 +379,9 @@ public final class DockerWorkerLauncher {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
         List<String> errors = new ArrayList<>();
-        for (String c : List.of(h.worker(), h.gateway(), "skald-helper-conf-" + h.attemptId(),
+        // The client first: it holds the socket and context volumes (BuildKitClient).
+        for (String c : List.of(h.client(), BuildKitClient.stageHelper(h), h.worker(), h.gateway(),
+                "skald-helper-conf-" + h.attemptId(),
                 "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
             quietly(errors, () -> {
                 if (ours(docker.inspectContainer(c).config().labels(), h)) {
@@ -387,7 +390,8 @@ public final class DockerWorkerLauncher {
                 }
             });
         }
-        for (String v : List.of(h.workspaceVolume(), h.socketVolume(), h.configVolume())) {
+        for (String v : List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(),
+                h.configVolume())) {
             quietly(errors, () -> {
                 if (ours(docker.inspectVolume(v).labels(), h)) {
                     retrying(() -> docker.removeVolume(v));

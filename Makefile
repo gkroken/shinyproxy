@@ -44,6 +44,8 @@ test:                         ## Run the test suite (starts real containers)
 	@docker build -q -t skald-egress-gateway:test images/egress-gateway >/dev/null
 	@docker pull -q busybox@sha256:ea2b9914a16a4ac1981994af97b318f7c7d4db76b580c56177f08bf76f4a0be8 >/dev/null
 	@docker pull -q debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 >/dev/null
+	@# BuildKitBuildTest's registry (registry:2, pinned).
+	@docker pull -q registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
 	$(MVN_DOCKER) test
 
 # Coverage-guided fuzzing of the bundle parser (BundleFuzzTest). `make test` already runs
