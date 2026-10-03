@@ -29,6 +29,12 @@ import eu.openanalytics.shinyproxy.publisher.build.BuildDriver.Outcome;
 import eu.openanalytics.shinyproxy.publisher.build.BuildDriver.Stopped;
 import eu.openanalytics.shinyproxy.publisher.build.Lease;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator.Recipe;
+import eu.openanalytics.shinyproxy.publisher.storage.BuildLogWriter;
+import eu.openanalytics.shinyproxy.publisher.storage.HeadTailLog;
+import eu.openanalytics.shinyproxy.publisher.storage.LogFinal;
+import eu.openanalytics.shinyproxy.publisher.storage.ObjectKeys;
+import eu.openanalytics.shinyproxy.publisher.storage.ObjectStoreException;
+import eu.openanalytics.shinyproxy.publisher.storage.TestObjectStore;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitDriver.Config;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitDriver.ContextSource;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitDriver.Prepared;
@@ -42,10 +48,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.mandas.docker.client.DockerClient;
+import org.mandas.docker.client.LogStream;
 import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
 import org.mandas.docker.client.exceptions.NotFoundException;
 import org.mandas.docker.client.messages.Volume;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -81,6 +90,12 @@ public class BuildKitDriverTest {
     private static DockerWorkerLauncher launcher;
     private static BuildKitClient client;
     private static TestRegistry registry;
+    private static TestObjectStore logStore;
+    /** Swapped by a case that needs a failing store; reset after each case. */
+    private static BuildLogWriter logWriter;
+    /** Small, so a modest build overflows the head and exercises the tail. */
+    private static final HeadTailLog.Limits LOG_LIMITS = new HeadTailLog.Limits(16 << 10, 16 << 10, 1024,
+            Duration.ofSeconds(2), 64 << 10, 3, Duration.ofMillis(200));
 
     @BeforeAll
     public static void start() throws Exception {
@@ -92,6 +107,15 @@ public class BuildKitDriverTest {
         launcher = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"), images);
         client = new BuildKitClient(docker, launcher, images);
         registry = new TestRegistry(docker, "skald-bkd", 15032);
+        logStore = new TestObjectStore("skald-bkd-logs");
+        logWriter = new BuildLogWriter(logStore.store, logStore.bucket);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    public void resetLogWriter() {
+        if (logStore != null) {
+            logWriter = new BuildLogWriter(logStore.store, logStore.bucket);
+        }
     }
 
     @AfterAll
@@ -100,6 +124,9 @@ public class BuildKitDriverTest {
             try {
                 if (registry != null) {
                     registry.close();
+                }
+                if (logStore != null) {
+                    logStore.close();
                 }
             } finally {
                 docker.close();
@@ -111,9 +138,9 @@ public class BuildKitDriverTest {
     private static volatile BuildKitDriver lastDriver;
 
     private static BuildKitDriver driver(Settings settings, ContextSource source) {
-        return lastDriver = new BuildKitDriver(docker, launcher, client, source, new Config(settings, 256,
+        return lastDriver = new BuildKitDriver(docker, launcher, client, source, logWriter, new Config(settings, 256,
                 new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of()),
-                TestRegistry.CRED, POLL, Duration.ofSeconds(30)));
+                TestRegistry.CRED, POLL, Duration.ofSeconds(30), LOG_LIMITS));
     }
 
     private static Claimed claimed() {
@@ -276,6 +303,8 @@ public class BuildKitDriverTest {
         final AtomicBoolean armed = new AtomicBoolean();
         /** When the driver called killContainer, and when that call returned (nanoTime). */
         final long[] kill = new long[2];
+        /** When positive: every frame of a followed log stream arrives this many ms late. */
+        volatile long logFrameDelayMillis;
         /** When set: the work thread's first removeContainer of this name fails, as a daemon 500 would. */
         volatile String failRemoveOnce;
         /** Every method the work thread called, in order. */
@@ -318,7 +347,11 @@ public class BuildKitDriverTest {
                             kill[0] = System.nanoTime();
                         }
                         try {
-                            return m.invoke(docker, args);
+                            Object result = m.invoke(docker, args);
+                            if (m.getName().equals("logs") && logFrameDelayMillis > 0) {
+                                return slow((LogStream) result, logFrameDelayMillis);
+                            }
+                            return result;
                         } catch (InvocationTargetException e) {
                             throw e.getCause();
                         } finally {
@@ -333,12 +366,28 @@ public class BuildKitDriverTest {
         }
     }
 
+    /** A log stream whose every frame arrives {@code millis} late: a follower that falls behind. */
+    private static LogStream slow(LogStream real, long millis) {
+        return (LogStream) Proxy.newProxyInstance(LogStream.class.getClassLoader(), new Class<?>[] {LogStream.class},
+                (proxy, m, args) -> {
+                    if (m.getName().equals("next")) {
+                        Thread.sleep(millis);
+                    }
+                    try {
+                        return m.invoke(real, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
     private static BuildKitDriver driverOn(DockerClient d, ContextSource source) {
         Images images = Images.of(WORKER, GATEWAY);
         DockerWorkerLauncher l = new DockerWorkerLauncher(d, WorkerProfile.load("runc-rootless"), images);
-        return lastDriver = new BuildKitDriver(d, l, new BuildKitClient(d, l, images), source, new Config(Settings.defaults(), 256,
+        return lastDriver = new BuildKitDriver(d, l, new BuildKitClient(d, l, images), source, logWriter,
+                new Config(Settings.defaults(), 256,
                 new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of()),
-                TestRegistry.CRED, POLL, Duration.ofSeconds(30)));
+                TestRegistry.CRED, POLL, Duration.ofSeconds(30), LOG_LIMITS));
     }
 
     /**
@@ -611,8 +660,157 @@ public class BuildKitDriverTest {
         assertTrue(failed.detail().startsWith("exit 1: "), failed.detail());
         assertTrue(failed.detail().chars().allMatch(ch -> ch >= 0x20 && ch < 0x7f), failed.detail());
         assertTrue(failed.detail().length() <= BuildKitDriver.DETAIL_MAX);
+        assertTrue(failed.detail().contains("did not complete successfully"),
+                "the detail is buildctl's own last line: " + failed.detail());
         assertEquals(1, released.get());
         assertNothingLeft(c);
+        // The log: finished with the outcome, and it ends with the step's own output and
+        // the failure, where an admin looks first.
+        LogFinal fin = logWriter.readFinal(c.contentId(), c.buildId()).orElseThrow();
+        assertEquals("failed:BUILD_FAILED", fin.outcome());
+        assertTrue(fin.complete());
+        List<String> texts = texts(c);
+        assertTrue(texts.stream().anyMatch(l -> l.contains("the step says " + (char) 0xe9 + " goodbye")), texts.toString());
+        assertTrue(texts.get(texts.size() - 1).startsWith("[skald] failed: BUILD_FAILED exit 1: "),
+                texts.get(texts.size() - 1));
+    }
+
+    /** Every record of the attempt's log, read back from the store, in order. */
+    private static List<JsonNode> records(Claimed c) throws Exception {
+        List<JsonNode> out = new java.util.ArrayList<>();
+        for (long seq = 1; ; seq++) {
+            String key = ObjectKeys.logChunk(c.contentId(), c.buildId(), seq);
+            if (logStore.store.head(logStore.bucket, key).isEmpty()) {
+                return out;
+            }
+            try (var in = logStore.store.open(logStore.bucket, key)) {
+                for (String line : new String(in.readAllBytes(), StandardCharsets.UTF_8).split("\n")) {
+                    out.add(new ObjectMapper().readTree(line));
+                }
+            }
+        }
+    }
+
+    private static List<String> texts(Claimed c) throws Exception {
+        return records(c).stream().filter(r -> r.has("t")).map(r -> r.path("t").asText()).toList();
+    }
+
+    @Test
+    public void aBuildLogKeepsItsHeadAndItsTailAndEndsWithTheOutcome(@TempDir Path dir) throws Exception {
+        // About 50 KiB of RUN output against a 16 KiB head and a 16 KiB tail: the head holds
+        // the driver's own lines and the build's start, the middle is dropped and marked, and
+        // the tail holds the end, the push included.
+        Claimed c = claimed();
+        Outcome outcome = driver(Settings.defaults(), source(dir,
+                "RUN [\"sh\", \"-c\", \"i=0; while [ $i -lt 2000 ]; do echo flood-line-$i; i=$((i+1)); done\"]\n",
+                new AtomicInteger())).run(c, () -> false);
+        assertInstanceOf(Built.class, outcome, outcome.toString());
+        assertNothingLeft(c);
+        LogFinal fin = logWriter.readFinal(c.contentId(), c.buildId()).orElseThrow();
+        assertEquals("built", fin.outcome());
+        assertTrue(fin.complete());
+        assertTrue(fin.truncated(), "the middle was dropped");
+        List<JsonNode> r = records(c);
+        long markers = r.stream().filter(x -> x.path("cut").isObject()).count();
+        assertEquals(1, markers);
+        assertTrue(r.get(0).path("t").asText().startsWith("[skald] attempt "), r.get(0).toString());
+        int marker = 0;
+        while (!r.get(marker).path("cut").isObject()) {
+            marker++;
+        }
+        // Line numbers: contiguous on each side, and the marker counts the gap exactly.
+        for (int i = 1; i < marker; i++) {
+            assertEquals(r.get(i - 1).path("n").asLong() + 1, r.get(i).path("n").asLong());
+        }
+        assertEquals(r.get(marker - 1).path("n").asLong() + r.get(marker).path("cut").path("lines").asLong() + 1,
+                r.get(marker + 1).path("n").asLong());
+        List<String> tail = r.subList(marker + 1, r.size()).stream().map(x -> x.path("t").asText()).toList();
+        assertTrue(tail.stream().anyMatch(l -> l.contains("pushing manifest")), "the push is in the tail");
+        // buildctl prints a RUN's line as "#<step> <seconds> <text>".
+        assertTrue(r.subList(0, marker).stream().anyMatch(x -> x.path("t").asText().endsWith(" flood-line-0")),
+                "the flood began in the head");
+        assertTrue(r.stream().noneMatch(x -> x.path("t").asText().endsWith(" flood-line-1000")),
+                "the middle is gone");
+        assertTrue(r.subList(marker + 1, r.size()).stream().anyMatch(x -> x.path("t").asText().endsWith(" flood-line-1999")),
+                "the flood's end is in the tail");
+    }
+
+    @Test
+    public void aFollowerThatLagsIsDrainedBeforeTheFailureIsDecided(@TempDir Path dir) throws Exception {
+        // Every log frame arrives 100 ms late, so the follower is behind when the client
+        // exits. The decision must wait for the rest of the output: a failure's detail is
+        // its last line, and without the wait it would be a stale one.
+        Claimed c = claimed();
+        Hold slowLogs = new Hold();
+        slowLogs.logFrameDelayMillis = 100;
+        Outcome outcome = driverOn(slowLogs.wrap("none", "none"), source(dir,
+                "RUN [\"sh\", \"-c\", \"i=0; while [ $i -lt 40 ]; do echo step-line-$i; i=$((i+1)); done; exit 3\"]\n",
+                new AtomicInteger())).run(c, () -> false);
+        assertInstanceOf(Failed.class, outcome, outcome.toString());
+        assertEquals("BUILD_FAILED", ((Failed) outcome).code());
+        assertTrue(((Failed) outcome).detail().contains("did not complete successfully"),
+                "the detail is buildctl's real last line: " + ((Failed) outcome).detail());
+        assertNothingLeft(c);
+    }
+
+    @Test
+    public void aSuccessWhoseLogCannotBeFinishedIsALogFailure(@TempDir Path dir) throws Exception {
+        // Every chunk persists, but final.json cannot be written: the image was pushed, yet
+        // a success without a complete log is not one.
+        var real = logStore.store;
+        var noFinal = (eu.openanalytics.shinyproxy.publisher.storage.ObjectStore) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {eu.openanalytics.shinyproxy.publisher.storage.ObjectStore.class},
+                (proxy, m, args) -> {
+                    if (m.getName().equals("putIfAbsent") && String.valueOf(args[1]).endsWith("/final.json")) {
+                        throw new ObjectStoreException("simulated outage at the end");
+                    }
+                    try {
+                        return m.invoke(real, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        logWriter = new BuildLogWriter(noFinal, logStore.bucket);
+        Claimed c = claimed();
+        Outcome outcome = driver(Settings.defaults(), source(dir, "RUN [\"true\"]\n", new AtomicInteger()))
+                .run(c, () -> false);
+        assertInstanceOf(Failed.class, outcome, outcome.toString());
+        assertEquals("LOG_STORAGE", ((Failed) outcome).code(), outcome.toString());
+        assertTrue(((Failed) outcome).detail().contains("simulated outage at the end"), outcome.toString());
+        assertNothingLeft(c);
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aLogStoreThatGoesDownStopsTheBuild(@TempDir Path dir) throws Exception {
+        // "If durability cannot be recovered, stop the build and report a storage/log
+        // failure rather than mark a silent success." Every chunk write fails; the build
+        // (a RUN that sleeps) is stopped and the attempt fails as LOG_STORAGE.
+        var real = logStore.store;
+        var down = (eu.openanalytics.shinyproxy.publisher.storage.ObjectStore) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {eu.openanalytics.shinyproxy.publisher.storage.ObjectStore.class},
+                (proxy, m, args) -> {
+                    if (m.getName().equals("putIfAbsent") && String.valueOf(args[1]).contains("/chunks/")) {
+                        throw new ObjectStoreException("simulated outage");
+                    }
+                    try {
+                        return m.invoke(real, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        logWriter = new BuildLogWriter(down, logStore.bucket);
+        Claimed c = claimed();
+        long started = System.nanoTime();
+        Outcome outcome = driver(Settings.defaults(), source(dir, "RUN [\"sleep\", \"300\"]\n", new AtomicInteger()))
+                .run(c, () -> false);
+        assertInstanceOf(Failed.class, outcome, outcome.toString());
+        assertEquals("LOG_STORAGE", ((Failed) outcome).code(), outcome.toString());
+        assertTrue(((Failed) outcome).detail().contains("simulated outage"), outcome.toString());
+        assertTrue(System.nanoTime() - started < Duration.ofMinutes(4).toNanos(), "it did not wait for the sleep");
+        assertNothingLeft(c);
+        assertTrue(new BuildLogWriter(real, logStore.bucket).readFinal(c.contentId(), c.buildId()).isEmpty(),
+                "no final.json for a log that failed");
     }
 
     @Test
@@ -630,7 +828,5 @@ public class BuildKitDriverTest {
         assertEquals("a?b??c", BuildKitDriver.detail("a" + (char) 0xe9 + "b\n" + (char) 0x1b + "c"));
         assertEquals(BuildKitDriver.DETAIL_MAX, BuildKitDriver.detail("x".repeat(500)).length());
         assertEquals("", BuildKitDriver.detail(null));
-        assertEquals("last", BuildKitDriver.lastLine("first\nlast\n\n  \n"));
-        assertEquals("", BuildKitDriver.lastLine(""));
     }
 }

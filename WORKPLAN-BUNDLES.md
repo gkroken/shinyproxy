@@ -826,7 +826,9 @@ neutralize terminal controls in viewers, and do not interpolate them into HTML. 
 MinIO outage use only bounded scratch buffering and bounded retry; if durability cannot
 be recovered, stop the build and report a storage/log failure rather than mark a silent
 success. Reaching the log cap stops execution with a typed limit error and a truncation
-marker. Do not expose registry/S3 credentials in process arguments, audit details or logs.
+marker. **Superseded for build logs by the user's T7 decision (2026-10-02): an oversized
+build log keeps its head AND its tail, with a cut marker between, and the build goes on;
+see T7, part 3d-2b.** Do not expose registry/S3 credentials in process arguments, audit details or logs.
 
 Cleanup uses the artifact ledger, grace periods and repeatable mark/recheck/delete steps.
 
@@ -1971,6 +1973,14 @@ below are marked passed by this planning document.
       production values, are this track's. (3) The workspace is the loop-backed quota volume
       `dev/quota_volume.py` makes, mounted `nosuid,nodev`; its attach step is the launcher's
       privilege, and the production size is this track's.
+      **Part 3d-2b (build logs):** `storage.HeadTailLog` keeps the head live (a chunk per 2 s
+      or 256 KiB) and the newest tail in memory, written at the end after a cut marker;
+      1 MiB each, 4 KiB lines, by default. The driver follows the client's stderr into it,
+      and finishes it with the outcome. A chunk that cannot persist after bounded retries
+      stops the build as `LOG_STORAGE`, and a success whose log cannot be finished complete
+      is a `LOG_STORAGE` failure, never a silent success. While the tail is in use a reader
+      sees nothing new until the end (T8), and a crash loses the in-memory tail: part 4's
+      reconciliation must finish such a log as interrupted (0adc78e N2).
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

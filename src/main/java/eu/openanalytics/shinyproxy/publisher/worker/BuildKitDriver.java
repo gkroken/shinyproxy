@@ -24,6 +24,10 @@ package eu.openanalytics.shinyproxy.publisher.worker;
 
 import eu.openanalytics.shinyproxy.publisher.build.BuildDriver;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator.Recipe;
+import eu.openanalytics.shinyproxy.publisher.storage.BuildLogWriter;
+import eu.openanalytics.shinyproxy.publisher.storage.HeadTailLog;
+import eu.openanalytics.shinyproxy.publisher.storage.LogFinal;
+import eu.openanalytics.shinyproxy.publisher.storage.LogLines;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitClient.Credential;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitClient.Push;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Egress;
@@ -31,6 +35,8 @@ import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Handle;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Request;
 import eu.openanalytics.shinyproxy.publisher.worker.WorkerProfile.Settings;
 import org.mandas.docker.client.DockerClient;
+import org.mandas.docker.client.DockerClient.LogsParam;
+import org.mandas.docker.client.LogStream;
 import org.mandas.docker.client.exceptions.NotFoundException;
 import org.mandas.docker.client.messages.ContainerState;
 import org.slf4j.Logger;
@@ -39,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -80,7 +87,7 @@ public final class BuildKitDriver implements BuildDriver {
 
     /** The deployment's choices for every attempt. */
     public record Config(Settings settings, int quotaMegabytes, Egress egress, Credential credential,
-                         Duration poll, Duration settle) {
+                         Duration poll, Duration settle, HeadTailLog.Limits logLimits) {
 
         public Config {
             if (poll.isNegative() || poll.isZero() || settle.isNegative()) {
@@ -90,22 +97,26 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     static final int DETAIL_MAX = 200;
+    /** How long the decision waits for the rest of an exited client's output. */
+    static final long FOLLOW_SETTLE_MILLIS = 30_000;
     private static final Logger log = LoggerFactory.getLogger(BuildKitDriver.class);
 
     private final DockerClient docker;
     private final DockerWorkerLauncher launcher;
     private final BuildKitClient client;
     private final ContextSource source;
+    private final BuildLogWriter logs;
     private final Config config;
     /** The last attempt's work thread, so a test can wait for its own disposal. */
     volatile Thread lastWork;
 
     public BuildKitDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
-                          ContextSource source, Config config) {
+                          ContextSource source, BuildLogWriter logs, Config config) {
         this.docker = docker;
         this.launcher = launcher;
         this.client = client;
         this.source = source;
+        this.logs = logs;
         this.config = config;
     }
 
@@ -117,12 +128,14 @@ public final class BuildKitDriver implements BuildDriver {
     @Override
     public Outcome run(Claimed build, BooleanSupplier cancelRequested) throws Exception {
         Handle h = DockerWorkerLauncher.handle(attemptId(build));
+        HeadTailLog buildLog = new HeadTailLog(logs, build.contentId(), build.buildId(), build.lease().generation(),
+                config.logLimits());
         AtomicBoolean aborted = new AtomicBoolean();
         AtomicReference<Outcome> result = new AtomicReference<>();
         AtomicReference<Throwable> crashed = new AtomicReference<>();
         Thread work = new Thread(() -> {
             try {
-                result.set(attempt(build, h, aborted));
+                result.set(attempt(build, h, aborted, buildLog));
             } catch (Throwable t) {
                 crashed.set(t);
             } finally {
@@ -148,6 +161,8 @@ public final class BuildKitDriver implements BuildDriver {
                 if (cancelRequested.getAsBoolean()) {
                     aborted.set(true);
                     stopEverything(h, work);
+                    buildLog.line("[skald] stopped", false);
+                    buildLog.finish("stopped");
                     return new Stopped();
                 }
                 work.join(poll);
@@ -165,10 +180,30 @@ public final class BuildKitDriver implements BuildDriver {
         // A stop that arrives after the work ended stopped nothing, so the outcome is what
         // happened: Stopped would claim a stop that never occurred (T8 carry (4): the
         // attempt goes on to PUBLISHING with its cancel request recorded).
-        if (crashed.get() != null) {
-            return new Failed("DRIVER_ERROR", detail(crashed.get().getClass().getSimpleName()));
+        Outcome outcome = crashed.get() != null
+                ? new Failed("DRIVER_ERROR", detail(crashed.get().getClass().getSimpleName()))
+                : result.get();
+        return withLog(buildLog, outcome);
+    }
+
+    /**
+     * Ends the attempt's log with its outcome. A success is a success only with a complete
+     * log: if the log failed or could not be finished, the attempt is a log failure instead,
+     * never a silent success (WORKPLAN-BUNDLES.md: "if durability cannot be recovered, stop
+     * the build and report a storage/log failure").
+     */
+    private Outcome withLog(HeadTailLog buildLog, Outcome outcome) {
+        String label = outcome instanceof Built ? "built"
+                : outcome instanceof Failed f ? "failed:" + f.code() : "stopped";
+        if (outcome instanceof Failed f) {
+            buildLog.line("[skald] failed: " + f.code() + " " + f.detail(), false);
         }
-        return result.get();
+        Optional<LogFinal> fin = buildLog.finish(label);
+        if (outcome instanceof Built && (fin.isEmpty() || !fin.get().complete())) {
+            return new Failed("LOG_STORAGE", detail(buildLog.failure() != null ? buildLog.failure()
+                    : "the build log could not be finished complete"));
+        }
+        return outcome;
     }
 
     /**
@@ -206,7 +241,8 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     /** The work thread: every Docker call of the attempt. */
-    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted) throws Exception {
+    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog) throws Exception {
+        buildLog.line("[skald] attempt " + h.attemptId() + ": preparing the build context", false);
         Prepared prepared;
         try {
             prepared = source.prepare(build);
@@ -221,6 +257,7 @@ public final class BuildKitDriver implements BuildDriver {
             }
             Push push = new Push(config.egress().registry(), prepared.repository(), build.buildId(),
                     config.credential());
+            buildLog.line("[skald] launching the build worker", false);
             try {
                 launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(),
                         config.egress()));
@@ -235,13 +272,25 @@ public final class BuildKitDriver implements BuildDriver {
                 if (aborted.get()) {
                     return new Stopped();
                 }
+                buildLog.line("[skald] building", false);
                 client.start(h, push);
             } catch (java.io.IOException | IllegalStateException
                      | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("STAGE", detail(e.getMessage()));
             }
+            Thread follower = follow(h, buildLog);
             while (!aborted.get()) {
+                buildLog.tick();
+                if (buildLog.failed()) {
+                    // The log could not be persisted: the build stops, and says why.
+                    return new Failed("LOG_STORAGE", detail(buildLog.failure()));
+                }
                 var exit = client.exitCode(h);
+                if (exit.isPresent()) {
+                    // The client exited, so its output is ending: take all of it before
+                    // deciding, since a failure's detail is its last line.
+                    follower.join(FOLLOW_SETTLE_MILLIS);
+                }
                 // A push that completed is the outcome, whatever happens to the worker after.
                 if (exit.isPresent() && exit.get() == 0) {
                     try {
@@ -257,8 +306,7 @@ public final class BuildKitDriver implements BuildDriver {
                     return new Failed("WORKER_DIED", detail(workerState(h)));
                 }
                 if (exit.isPresent()) {
-                    return new Failed("BUILD_FAILED", detail("exit " + exit.get() + ": "
-                            + lastLine(client.log(h))));
+                    return new Failed("BUILD_FAILED", detail("exit " + exit.get() + ": " + buildLog.lastLine()));
                 }
                 Thread.sleep(config.poll().toMillis());
             }
@@ -266,6 +314,29 @@ public final class BuildKitDriver implements BuildDriver {
         } finally {
             prepared.release().run();
         }
+    }
+
+    /**
+     * Follows the client's stderr (buildctl's progress, every RUN step's output included)
+     * into the log, on its own thread, until the client's output ends. Its stdout is the
+     * metadata and is not followed.
+     */
+    private Thread follow(Handle h, HeadTailLog buildLog) {
+        Thread t = new Thread(() -> {
+            LogLines lines = new LogLines(config.logLimits().lineBytes(), buildLog::line);
+            try (LogStream stream = docker.logs(h.client(), LogsParam.follow(), LogsParam.stderr())) {
+                while (stream.hasNext()) {
+                    lines.feed(stream.next().content());
+                }
+            } catch (Exception e) {
+                buildLog.line("[skald] the build log stream ended: " + detail(e.getMessage()), false);
+            } finally {
+                lines.end();
+            }
+        }, "skald-log-" + h.attemptId());
+        t.setDaemon(true);
+        t.start();
+        return t;
     }
 
     private boolean workerRunning(Handle h) throws Exception {
@@ -284,11 +355,6 @@ public final class BuildKitDriver implements BuildDriver {
         } catch (NotFoundException e) {
             return "the worker is gone";
         }
-    }
-
-    static String lastLine(String log) {
-        List<String> lines = log.strip().lines().filter(l -> !l.isBlank()).toList();
-        return lines.isEmpty() ? "" : lines.get(lines.size() - 1);
     }
 
     /** Printable ASCII, at most {@link #DETAIL_MAX} characters; anything else becomes '?'. */
