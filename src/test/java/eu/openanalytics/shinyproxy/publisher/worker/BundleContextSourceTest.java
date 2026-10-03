@@ -186,10 +186,39 @@ public class BundleContextSourceTest {
             for (String k : expected.files().keySet()) {
                 assertTrue(java.util.Arrays.equals(expected.files().get(k), p.recipe().files().get(k)), k);
             }
+            // Decision 7: the dependency cache key, from the catalog entry, the base, the
+            // mirrors and the rendered lock.
+            var resolved = catalog.resolveEntry("shiny", "python", "3.13.16", "amd64").orElseThrow();
+            assertEquals(eu.openanalytics.shinyproxy.publisher.recipe.DependencyCacheKey.of(resolved.entry(),
+                    resolved.base(), MIRRORS, expected), p.cacheKey());
         } finally {
             p.release().run();
         }
         assertFalse(Files.exists(p.payload().resolve("app.py")), "release deleted the payload");
+    }
+
+    @Test
+    public void aSourceOnlyEditKeepsTheCacheKeyAndOtherMirrorsMoveIt(@TempDir Path workspace) throws Exception {
+        Map<String, byte[]> app = pythonApp();
+        byte[] manifest = manifest(app, "3.13.16");
+        Map<String, byte[]> edited = new LinkedHashMap<>(app);
+        edited.put("app.py", "from shiny import App, ui\napp = App(ui.page_fluid('edited'), None)\n"
+                .getBytes(StandardCharsets.UTF_8));
+        byte[] editedManifest = manifest(edited, "3.13.16");
+        Prepared first = source(workspace).prepare(store(manifest, archive(manifest, app), null));
+        Prepared second = source(workspace).prepare(store(editedManifest, archive(editedManifest, edited), null));
+        Prepared otherMirrors = new BundleContextSource(bundles, objects.store, objects.bucket, ExtractionLimits.defaults(),
+                workspace, catalog, new Mirrors(URI.create("http://elsewhere:8080/cran/"),
+                URI.create("http://elsewhere:8080/pypi/simple/")), "amd64")
+                .prepare(store(manifest, archive(manifest, app), null));
+        try {
+            assertEquals(first.cacheKey(), second.cacheKey(), "an app-source edit is a cache hit");
+            assertFalse(first.cacheKey().equals(otherMirrors.cacheKey()), "another mirror policy is a miss");
+        } finally {
+            first.release().run();
+            second.release().run();
+            otherMirrors.release().run();
+        }
     }
 
     @Test

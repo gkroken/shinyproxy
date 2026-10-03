@@ -71,7 +71,15 @@ public final class BaseCatalog {
 
     /** One catalog entry, as far as a build needs it. */
     public record Entry(String id, String type, String language, String version, String architecture,
-                        int recipeRevision, String uid, String gid) { }
+                        int recipeRevision, String uid, String gid, Map<String, String> packageManager) {
+
+        public Entry {
+            packageManager = Map.copyOf(packageManager);
+        }
+    }
+
+    /** A resolved base: its catalog entry and the digest-pinned base a recipe is written on. */
+    public record Resolved(Entry entry, Base base) { }
 
     private static final ObjectMapper JSON = new ObjectMapper();
     /** host[:port], lower case: the same name the build worker's gateway allows. */
@@ -113,8 +121,11 @@ public final class BaseCatalog {
             if (!user.matches()) {
                 throw new IllegalArgumentException("catalog: base " + b.path("id").asText() + " has no non-root user");
             }
+            Map<String, String> packageManager = new java.util.TreeMap<>();
+            b.path("package_manager").fields().forEachRemaining(f -> packageManager.put(f.getKey(), f.getValue().asText()));
             entries.add(new Entry(text(b, "id"), text(b, "type"), text(b, "language"), text(b, "version"),
-                    text(b, "architecture"), b.path("recipe_revision").asInt(0), user.group(1), user.group(2)));
+                    text(b, "architecture"), b.path("recipe_revision").asInt(0), user.group(1), user.group(2),
+                    packageManager));
         }
         Set<String> ids = new java.util.HashSet<>();
         for (Entry e : entries) {
@@ -172,6 +183,11 @@ public final class BaseCatalog {
      * has no such base; an IllegalStateException if it has one that was not published.
      */
     public Optional<Base> resolve(String type, String language, String version, String architecture) {
+        return resolveEntry(type, language, version, architecture).map(Resolved::base);
+    }
+
+    /** As {@link #resolve}, with the catalog entry the base came from. */
+    public Optional<Resolved> resolveEntry(String type, String language, String version, String architecture) {
         Optional<Entry> entry = entries.stream()
                 .filter(e -> e.type().equals(type) && e.language().equals(language)
                         && e.version().equals(version) && e.architecture().equals(architecture))
@@ -184,7 +200,7 @@ public final class BaseCatalog {
             throw new IllegalStateException("base " + entry.get().id() + " is in the catalog but was not published");
         }
         Entry e = entry.get();
-        return Optional.of(new Base(ref, e.language(), e.version(), e.uid(), e.gid()));
+        return Optional.of(new Resolved(e, new Base(ref, e.language(), e.version(), e.uid(), e.gid())));
     }
 
     /** The catalog's entries, in order. */

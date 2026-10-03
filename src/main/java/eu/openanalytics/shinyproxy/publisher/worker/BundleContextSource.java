@@ -27,6 +27,7 @@ import eu.openanalytics.shinyproxy.publisher.bundle.BundleExtractor;
 import eu.openanalytics.shinyproxy.publisher.bundle.ExtractionLimits;
 import eu.openanalytics.shinyproxy.publisher.bundle.ManifestValidator.Manifest;
 import eu.openanalytics.shinyproxy.publisher.recipe.BaseCatalog;
+import eu.openanalytics.shinyproxy.publisher.recipe.DependencyCacheKey;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator.Base;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator.Mirrors;
@@ -111,9 +112,11 @@ public final class BundleContextSource implements ContextSource {
                         + actual + ", its receipt says " + receipt.archiveSha256());
             }
             Manifest manifest = extracted.validated();
-            Base base = bases.resolve(manifest.type(), manifest.language(), manifest.runtimeVersion(), architecture)
+            BaseCatalog.Resolved resolved = bases.resolveEntry(manifest.type(), manifest.language(),
+                    manifest.runtimeVersion(), architecture)
                     .orElseThrow(() -> new IllegalStateException("no trusted base for " + manifest.type() + " "
                             + manifest.language() + " " + manifest.runtimeVersion() + " on " + architecture));
+            Base base = resolved.base();
             Path lock = extracted.root().path().resolve(manifest.dependencyPath());
             if (!Files.isRegularFile(lock, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalStateException("the manifest's lock file " + manifest.dependencyPath()
@@ -121,7 +124,7 @@ public final class BundleContextSource implements ContextSource {
             }
             Recipe recipe = RecipeGenerator.generate(base, mirrors, manifest, Files.readAllBytes(lock));
             return new Prepared(extracted.root().path(), recipe, "content/" + build.contentId(),
-                    () -> deleteQuietly(extracted));
+                    () -> deleteQuietly(extracted), DependencyCacheKey.of(resolved.entry(), base, mirrors, recipe));
         } catch (Exception e) {
             deleteQuietly(extracted);
             throw e;

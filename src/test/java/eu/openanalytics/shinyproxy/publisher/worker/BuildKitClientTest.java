@@ -73,6 +73,26 @@ public class BuildKitClientTest {
     }
 
     @Test
+    public void theDependencyCacheIsTheContentsOwnRefInBothDirections() {
+        UUID content = UUID.fromString("00000000-0000-0000-0000-0000000000cc");
+        String key = "ab".repeat(32);
+        Push push = new Push("registry", "content/abc", BUILD, CRED, new BuildKitClient.Cache(content, key));
+        String ref = "registry:5000/skald/cache/" + content + ":" + key;
+        List<String> args = BuildKitClient.buildctl(push);
+        int i = args.indexOf("--import-cache");
+        assertEquals("type=registry,ref=" + ref, args.get(i + 1));
+        int e = args.indexOf("--export-cache");
+        assertEquals("type=registry,ref=" + ref + ",mode=min,ignore-error=true", args.get(e + 1));
+        assertFalse(BuildKitClient.buildctl(new Push("registry", "content/abc", BUILD, CRED)).contains("--import-cache"),
+                "no cache, no cache arguments");
+        for (String bad : List.of("AB".repeat(32), "ab".repeat(31), "ab".repeat(32) + "a", "ab".repeat(31) + ",x",
+                "")) {
+            assertThrows(IllegalArgumentException.class, () -> new BuildKitClient.Cache(content, bad), bad);
+        }
+        assertThrows(IllegalArgumentException.class, () -> new BuildKitClient.Cache(null, key));
+    }
+
+    @Test
     public void theCredentialIsNeverPrintedAndOnlyTheClientConfigCarriesIt() {
         Push push = new Push("registry", "abc", BUILD, CRED);
         assertFalse(CRED.toString().contains("s3cret"));

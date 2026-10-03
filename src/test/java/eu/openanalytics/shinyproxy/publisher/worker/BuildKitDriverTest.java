@@ -757,6 +757,68 @@ public class BuildKitDriverTest {
         assertNothingLeft(c);
     }
 
+    /** A context with this lock and app source, under this cache key. */
+    private static ContextSource cached(Path dir, String lock, String app, String key) throws Exception {
+        Path payload = Files.createDirectories(dir.resolve("payload-" + UUID.randomUUID()));
+        Files.writeString(payload.resolve("app.py"), app);
+        Recipe recipe = new Recipe("FROM " + registry.base() + "\n"
+                + "COPY skald/test.lock /opt/skald/test.lock\n"
+                + "RUN [\"sh\", \"-c\", \"echo restoring-dependencies; cat /opt/skald/test.lock\"]\n"
+                + "COPY app/ /app/\n",
+                Map.of("skald/test.lock", lock.getBytes(StandardCharsets.UTF_8)));
+        return build -> new Prepared(payload, recipe, "content/bkd", () -> { }, key);
+    }
+
+    /** Whether the restore step was answered from the cache, read from buildctl's progress. */
+    private static boolean restoreWasCached(Claimed c) throws Exception {
+        List<String> texts = texts(c);
+        String step = null;
+        for (String t : texts) {
+            var m = java.util.regex.Pattern.compile("^(#\\d+) \\[.*\\] RUN .*echo restoring-dependencies").matcher(t);
+            if (m.find()) {
+                step = m.group(1);
+            }
+        }
+        assertNotNull(step, "the restore step is in the log: " + texts);
+        String id = step;
+        return texts.stream().anyMatch(t -> t.equals(id + " CACHED"));
+    }
+
+    private static Claimed claimedFor(UUID content) {
+        UUID id = UUID.randomUUID();
+        return new Claimed(id, content, UUID.randomUUID(), Map.of(), new Lease(id, 1, "test"));
+    }
+
+    @Test
+    public void theDependencyLayerIsReusedForASourceEditAndNeverAcrossContent(@TempDir Path dir) throws Exception {
+        // Decision 7, through the real worker and registry cache: the same content and lock
+        // with a different app source reuses the restore step; another lock does not; another
+        // content item with the SAME lock and key does not (its cache reference is its own).
+        UUID content = UUID.randomUUID();
+        String keyA = "a1".repeat(32);
+        String keyB = "b2".repeat(32);
+        Claimed first = claimedFor(content);
+        assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-A\n", "print(1)\n", keyA))
+                .run(first, () -> false));
+        assertFalse(restoreWasCached(first), "cold: nothing to reuse");
+
+        Claimed sourceEdit = claimedFor(content);
+        assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-A\n", "print(2)\n", keyA))
+                .run(sourceEdit, () -> false));
+        assertTrue(restoreWasCached(sourceEdit), "a source-only edit reuses the dependency layer");
+
+        Claimed lockChange = claimedFor(content);
+        assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-B\n", "print(2)\n", keyB))
+                .run(lockChange, () -> false));
+        assertFalse(restoreWasCached(lockChange), "a lock change misses");
+
+        Claimed otherContent = claimedFor(UUID.randomUUID());
+        assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-A\n", "print(1)\n", keyA))
+                .run(otherContent, () -> false));
+        assertFalse(restoreWasCached(otherContent), "another content item never reads this one's cache");
+        assertNothingLeft(otherContent);
+    }
+
     @Test
     public void aSuccessWhoseLogCannotBeFinishedIsALogFailure(@TempDir Path dir) throws Exception {
         // Every chunk persists, but final.json cannot be written: the image was pushed, yet

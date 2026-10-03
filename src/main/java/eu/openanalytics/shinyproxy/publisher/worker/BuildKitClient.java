@@ -97,6 +97,7 @@ public final class BuildKitClient {
     private static final Pattern REPOSITORY = Pattern.compile(
             "(?=.{1,200}$)[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*");
     private static final Pattern DIGEST = Pattern.compile("sha256:[0-9a-f]{64}");
+    private static final Pattern CACHE_KEY = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern RECIPE_FILE = Pattern.compile("skald/[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -119,7 +120,27 @@ public final class BuildKitClient {
      * Where the image goes: {@code <registry>:5000/<repository>:build-<buildId>}, the tag
      * the coordinator ledgers. {@code registry} is the host name the gateway allows.
      */
-    public record Push(String registry, String repository, UUID buildId, Credential credential) {
+    /**
+     * The dependency cache of one content item (WORKPLAN-BUNDLES.md decision 7): BuildKit's
+     * registry cache at {@code <registry>:5000/skald/cache/<content UUID>:<key>}. Scoped to the
+     * content item AND the key, both chosen by the server, so another content item's build
+     * never reads or writes it; the key is recipe.DependencyCacheKey.
+     */
+    public record Cache(UUID scope, String key) {
+
+        public Cache {
+            if (scope == null || key == null || !CACHE_KEY.matcher(key).matches()) {
+                throw new IllegalArgumentException("a cache is a content UUID and a 64-hex key");
+            }
+        }
+    }
+
+    public record Push(String registry, String repository, UUID buildId, Credential credential, Cache cache) {
+
+        /** A push without a dependency cache. */
+        public Push(String registry, String repository, UUID buildId, Credential credential) {
+            this(registry, repository, buildId, credential, null);
+        }
 
         public Push {
             if (!REGISTRY.matcher(registry).matches()) {
@@ -139,6 +160,11 @@ public final class BuildKitClient {
 
         String name() {
             return registryAddress() + "/" + repository + ":build-" + buildId;
+        }
+
+        /** The cache reference, or null when the push has no cache. */
+        String cacheRef() {
+            return cache == null ? null : registryAddress() + "/skald/cache/" + cache.scope() + ":" + cache.key();
         }
 
         /** The reference the attempt reports: by digest, never by tag. */
@@ -328,11 +354,18 @@ public final class BuildKitClient {
             "sh");
 
     static List<String> buildctl(Push push) {
-        return List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS, "build",
-                "--progress", "plain", "--frontend", "dockerfile.v0",
+        List<String> args = new java.util.ArrayList<>(List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
+                "build", "--progress", "plain", "--frontend", "dockerfile.v0",
                 "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
                 "--output", "type=image,name=" + push.name() + ",push=true",
-                "--metadata-file", METADATA);
+                "--metadata-file", METADATA));
+        if (push.cache() != null) {
+            // A missing cache is a cold build; a cache that cannot be exported is not a build
+            // failure (ignore-error). mode=min: the dependency layers are layers of the image.
+            args.addAll(List.of("--import-cache", "type=registry,ref=" + push.cacheRef(),
+                    "--export-cache", "type=registry,ref=" + push.cacheRef() + ",mode=min,ignore-error=true"));
+        }
+        return List.copyOf(args);
     }
 
     static String dockerConfig(Push push) {

@@ -517,6 +517,7 @@ public final class DockerWorkerLauncher {
         docker.createContainer(ContainerConfig.builder().image(image).cmd(cmd).env(env)
                 .labels(labels).hostConfig(HostConfig.builder().binds(binds)
                         .networkMode("none").privileged(privileged).build()).build(), container);
+        Throwable failed = null;
         try {
             docker.startContainer(container);
             ContainerExit exit = docker.waitContainer(container);
@@ -525,18 +526,30 @@ public final class DockerWorkerLauncher {
                 throw new IllegalStateException(name + " exited " + exit.statusCode() + ": " + out.strip());
             }
             return out;
+        } catch (DockerException | InterruptedException | RuntimeException e) {
+            failed = e;
+            throw e;
         } finally {
             // Through retrying(): measured, the daemon can answer "is still running" to a
             // force-remove issued right after the helper's wait returned (e4306c6 review N2).
             // After a stop, the work thread's disposal is the only pass, so a removal that
             // gives up on the first answer leaves the helper -- whose fixed name then refuses
-            // the next helper of the same attempt.
+            // the next helper of the same attempt. If the helper itself failed, that failure
+            // is what propagates, with a failed removal attached to it (650f18c review N1).
             try {
                 retrying(() -> docker.removeContainer(container, RemoveContainerParam.forceKill()));
-            } catch (DockerException | InterruptedException | RuntimeException e) {
-                throw e;
             } catch (Exception e) {
-                throw new IllegalStateException(e);
+                if (failed != null) {
+                    failed.addSuppressed(e);
+                } else if (e instanceof DockerException d) {
+                    throw d;
+                } else if (e instanceof InterruptedException i) {
+                    throw i;
+                } else if (e instanceof RuntimeException r) {
+                    throw r;
+                } else {
+                    throw new IllegalStateException(e);
+                }
             }
         }
     }

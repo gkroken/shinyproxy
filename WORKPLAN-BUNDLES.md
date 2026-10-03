@@ -1989,6 +1989,12 @@ below are marked passed by this planning document.
       `publisher.recipe.BaseCatalog` loads the shipped catalog with that file, refuses a file
       from another catalog and any reference that is not `<registry>/skald/base/<id>@sha256:`,
       and resolves a manifest to the newest recipe revision's digest-pinned `Base`.
+      **Part 4b (decision 7's cache):** `recipe.DependencyCacheKey` hashes a length-prefixed,
+      domain-separated record of the recipe revision, base digest, architecture, language and
+      version, package-manager versions, configured mirrors and the rendered lock. The build
+      imports and exports BuildKit's registry cache at `<registry>:5000/skald/cache/<content
+      UUID>:<key>` (mode=min, export errors ignored; no cache mounts). Measured: a source-only
+      edit reuses the restore step; a lock change and another content item do not.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

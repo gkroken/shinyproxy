@@ -82,8 +82,16 @@ public final class BuildKitDriver implements BuildDriver {
         Prepared prepare(Claimed build) throws Exception;
     }
 
-    /** A verified payload on disk, its recipe, the repository to push to, and its cleanup. */
-    public record Prepared(Path payload, Recipe recipe, String repository, Runnable release) { }
+    /**
+     * A verified payload on disk, its recipe, the repository to push to, its cleanup, and its
+     * dependency cache key (recipe.DependencyCacheKey), or null for no cache.
+     */
+    public record Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey) {
+
+        public Prepared(Path payload, Recipe recipe, String repository, Runnable release) {
+            this(payload, recipe, repository, release, null);
+        }
+    }
 
     /** The deployment's choices for every attempt. */
     public record Config(Settings settings, int quotaMegabytes, Egress egress, Credential credential,
@@ -256,7 +264,8 @@ public final class BuildKitDriver implements BuildDriver {
                 return new Stopped();
             }
             Push push = new Push(config.egress().registry(), prepared.repository(), build.buildId(),
-                    config.credential());
+                    config.credential(), prepared.cacheKey() == null ? null
+                            : new BuildKitClient.Cache(build.contentId(), prepared.cacheKey()));
             buildLog.line("[skald] launching the build worker", false);
             try {
                 launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(),
