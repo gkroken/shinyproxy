@@ -245,6 +245,79 @@ class HeadTailLogTest {
         assertEquals("survives", records(c, b).get(0).path("t").asText());
     }
 
+    /** A store whose first chunk put is APPLIED and then reported as "outcome unknown". */
+    private static ObjectStore landsThenThrows(ObjectStore under, Runnable afterLanding) {
+        AtomicInteger once = new AtomicInteger(1);
+        return new ForwardingObjectStore(under) {
+            @Override
+            public Optional<StoredObject> putIfAbsent(String bucket, String key, byte[] content, String type) {
+                Optional<StoredObject> r = super.putIfAbsent(bucket, key, content, type);
+                if (key.contains("/chunks/") && once.getAndDecrement() > 0) {
+                    afterLanding.run();
+                    throw new ObjectStoreException("outcome unknown: simulated timeout after the request began");
+                }
+                return r;
+            }
+        };
+    }
+
+    @Test
+    void anUnknownOutcomeThatLandedIsThisWritersOwnChunk() throws Exception {
+        // 0adc78e-F1: the put landed, then the store said "outcome unknown". The retry's
+        // create-only put answers "exists"; the bytes are this writer's, so the log goes on.
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        HeadTailLog log = new HeadTailLog(new BuildLogWriter(landsThenThrows(store, () -> { }), BUCKET), c, b, 1, SMALL);
+        log.line("written once", false);
+        LogFinal fin = log.finish("built").orElseThrow(() -> new AssertionError(log.failure()));
+        assertFalse(log.failed(), log.failure());
+        assertTrue(fin.complete());
+        assertEquals(1, chunks(c, b));
+        assertEquals("written once", records(c, b).get(0).path("t").asText());
+    }
+
+    @Test
+    void anUnknownOutcomeWithDifferentBytesThereIsNotOurs() {
+        // The attempt "landed", but by the time of the retry a different body sits at the
+        // sequence: not this writer's, so the log fails.
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        ObjectStore swapped = landsThenThrows(store, () -> {
+            client.deleteObject(r -> r.bucket(BUCKET).key(ObjectKeys.logChunk(c, b, 1)));
+            store.putIfAbsent(BUCKET, ObjectKeys.logChunk(c, b, 1),
+                    "{\"n\":1,\"t\":\"theirs\"}\n".getBytes(StandardCharsets.UTF_8), "application/x-ndjson");
+        });
+        HeadTailLog log = new HeadTailLog(new BuildLogWriter(swapped, BUCKET), c, b, 1, SMALL);
+        log.line("mine", false);
+        assertEquals(Optional.empty(), log.finish("built"));
+        assertTrue(log.failure().contains("not this writer's"), log.failure());
+    }
+
+    @Test
+    void aStoredChunkIsOursOnlyIfItIsExactlyOurBytes() {
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        BuildLogWriter writer = new BuildLogWriter(store, BUCKET);
+        byte[] ours = "{\"n\":1,\"t\":\"a\"}\n".getBytes(StandardCharsets.UTF_8);
+        byte[] longer = "{\"n\":1,\"t\":\"a\"}\n{\"n\":2,\"t\":\"b\"}\n".getBytes(StandardCharsets.UTF_8);
+        writer.appendChunk(c, b, 1, longer);
+        assertFalse(writer.chunkEquals(c, b, 1, ours), "a chunk that merely starts with our bytes is not ours");
+        assertTrue(writer.chunkEquals(c, b, 1, longer));
+    }
+
+    @Test
+    void anUnknownOutcomeThatCannotBeReadBackIsReportedAsUnknown() {
+        UUID c = UUID.randomUUID(), b = UUID.randomUUID();
+        ObjectStore unreadable = new ForwardingObjectStore(landsThenThrows(store, () -> { })) {
+            @Override
+            public InputStream open(String bucket, String key) {
+                throw new ObjectStoreException("simulated read failure");
+            }
+        };
+        HeadTailLog log = new HeadTailLog(new BuildLogWriter(unreadable, BUCKET), c, b, 1, SMALL);
+        log.line("mine", false);
+        assertEquals(Optional.empty(), log.finish("built"));
+        assertTrue(log.failure().contains("outcome unknown") && log.failure().contains("could not be read back"),
+                log.failure());
+    }
+
     @Test
     void aStoreThatStaysDownFailsTheLog() {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();

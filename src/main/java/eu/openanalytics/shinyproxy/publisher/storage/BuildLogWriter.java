@@ -46,7 +46,7 @@ import java.util.regex.Pattern;
  *
  * <p>An index advertises the end of an unbroken run from sequence 1, never the highest
  * sequence present. Chunks 1, 2 and 4 advertise 2. This is the plan's "readers may lag but
- * cannot observe a completion index pointing at absent chunks" — lagging is fine, and a
+ * cannot observe a completion index pointing at absent chunks" -- lagging is fine, and a
  * hole is not. A gap is not hypothetical: chunk writes are individual PUTs, so one can fail
  * or be in flight while a later one has landed.
  *
@@ -150,7 +150,7 @@ public class BuildLogWriter {
      *
      * <p>Losing the swap is not an error. The index is a progress hint that a running build
      * republishes as chunks land, so a writer that loses a race simply publishes on its
-     * next tick — and the writer that won wrote from its own fresh scan, so nothing is
+     * next tick -- and the writer that won wrote from its own fresh scan, so nothing is
      * lost meanwhile.
      */
     private Optional<LogIndex> swapIndex(UUID contentId, UUID buildId, long generation,
@@ -219,6 +219,23 @@ public class BuildLogWriter {
     public Optional<LogIndex> readIndex(UUID contentId, UUID buildId) {
         return read(ObjectKeys.logObject(contentId, buildId, ObjectKeys.LOG_INDEX),
                 LogIndex.class);
+    }
+
+    /**
+     * Whether the chunk stored at {@code sequence} is exactly {@code expected}: a writer
+     * replaying its own attempt after an "outcome unknown" asks this, because its retry's
+     * create-only put answers "exists" whether the first attempt landed or a different
+     * writer's chunk is there (0adc78e-F1). Reads at most one byte more than expected.
+     *
+     * @throws ObjectStoreException if the chunk cannot be read
+     */
+    public boolean chunkEquals(UUID contentId, UUID buildId, long sequence, byte[] expected) {
+        String key = ObjectKeys.logChunk(contentId, buildId, sequence);
+        try (InputStream in = store.open(bucket, key)) {
+            return java.util.Arrays.equals(in.readNBytes(expected.length + 1), expected);
+        } catch (IOException e) {
+            throw new ObjectStoreException("could not read " + bucket + "/" + key, e);
+        }
     }
 
     public Optional<LogFinal> readFinal(UUID contentId, UUID buildId) {

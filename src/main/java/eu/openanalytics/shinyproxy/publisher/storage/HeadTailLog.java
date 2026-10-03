@@ -227,12 +227,31 @@ public final class HeadTailLog {
         }
         byte[] chunk = pending.toByteArray();
         String last = null;
+        boolean unknown = false;
         for (int attempt = 1; attempt <= limits.writeAttempts(); attempt++) {
             try {
                 if (writer.appendChunk(contentId, buildId, sequence + 1, chunk).isEmpty()) {
-                    // A chunk at this sequence that this writer did not write: not ours to go on.
-                    failure = "chunk " + (sequence + 1) + " already exists";
-                    return;
+                    // "Exists". After an attempt that threw, that may be this writer's own
+                    // write: the store retries only failures that prove nothing was applied,
+                    // so what reaches here is "outcome unknown" (0adc78e-F1). Equal bytes are
+                    // ours: this writer alone numbers chunks under its generation, and every
+                    // record carries its line number. Anything else is not ours to go on.
+                    if (!unknown) {
+                        failure = "chunk " + (sequence + 1) + " already exists";
+                        return;
+                    }
+                    boolean ours;
+                    try {
+                        ours = writer.chunkEquals(contentId, buildId, sequence + 1, chunk);
+                    } catch (RuntimeException e) {
+                        failure = "chunk " + (sequence + 1) + ": outcome unknown (" + last
+                                + "), and it could not be read back: " + e.getMessage();
+                        return;
+                    }
+                    if (!ours) {
+                        failure = "chunk " + (sequence + 1) + " already exists, and is not this writer's";
+                        return;
+                    }
                 }
                 sequence++;
                 pending.reset();
@@ -246,6 +265,7 @@ public final class HeadTailLog {
                 return;
             } catch (RuntimeException e) {
                 last = e.getMessage();
+                unknown = true;
             }
             if (attempt < limits.writeAttempts()) {
                 try {
