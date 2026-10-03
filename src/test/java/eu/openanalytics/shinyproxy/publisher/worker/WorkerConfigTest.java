@@ -55,6 +55,7 @@ public class WorkerConfigTest {
         c.setWorkerImage("skald-buildkit-worker:test");
         c.setGatewayImage("skald-egress-gateway:test");
         c.setRegistry("skald-registry");
+        c.setRegistryApi("http://localhost:5000");
         c.setRegistryUsername("skald");
         c.setRegistryPassword("secret");
         c.setRepos(List.of("pypi.org"));
@@ -70,7 +71,7 @@ public class WorkerConfigTest {
     @Test
     public void everythingUnsetIsReportedAtOnce() {
         List<String> p = new WorkerConfig().problems(DEFAULTS);
-        for (String name : List.of("worker-image", "gateway-image", "registry", "registry-username",
+        for (String name : List.of("worker-image", "gateway-image", "registry", "registry-api", "registry-username",
                 "registry-password", "cran-mirror", "pypi-mirror", "published-bases", "workspace")) {
             assertTrue(p.contains("skald.builds.worker." + name + " is not set"), name + " in " + p);
         }
@@ -110,6 +111,10 @@ public class WorkerConfigTest {
         WorkerConfig noWorkspace = valid(dir);
         noWorkspace.setWorkspace(dir.resolve("absent").toString());
         assertTrue(only(noWorkspace).contains("not a writable directory"), only(noWorkspace));
+
+        WorkerConfig badApi = valid(dir);
+        badApi.setRegistryApi("http://localhost:5000/v2/");
+        assertTrue(only(badApi).contains("is not http(s)://host[:port]"), only(badApi));
 
         WorkerConfig tinyQuota = valid(dir);
         tinyQuota.setQuotaMegabytes(512);

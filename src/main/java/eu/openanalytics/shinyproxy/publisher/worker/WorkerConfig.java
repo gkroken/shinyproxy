@@ -78,6 +78,8 @@ public class WorkerConfig {
     private String workerImage;
     private String gatewayImage;
     private String registry;
+    /** The registry as ShinyProxy reaches it, http(s)://host[:port], for publication's digest check. */
+    private String registryApi;
     private String registryUsername;
     private String registryPassword;
     private List<String> outerNetworks = new ArrayList<>();
@@ -148,12 +150,15 @@ public class WorkerConfig {
         Mirrors mirrors = new Mirrors(URI.create(cranMirror), URI.create(pypiMirror));
         BundleContextSource source = new BundleContextSource(new BundleWriter(objects, bundleBucket), objects,
                 bundleBucket, limits, Path.of(workspace), catalog, mirrors, architecture);
+        BuildLogWriter logWriter = new BuildLogWriter(objects, logBucket);
         BuildKitDriver driver = new BuildKitDriver(skaldWorkerDocker, launcher, client, source,
-                new BuildLogWriter(objects, logBucket),
+                logWriter,
                 new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes,
                         new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of()),
                         new Credential(registryUsername, registryPassword), poll, settle, HeadTailLog.Limits.defaults()));
-        return new BuildLoop(new BuildRunner(coordinator.getObject(), settings), driver,
+        PublishVerifier verifier = new PublishVerifier(URI.create(registryApi),
+                new Credential(registryUsername, registryPassword), logWriter);
+        return new BuildLoop(new BuildRunner(coordinator.getObject(), settings, verifier), driver,
                 owner != null && !owner.isBlank() ? owner : java.net.InetAddress.getLocalHost().getHostName(),
                 idlePause);
     }
@@ -162,7 +167,8 @@ public class WorkerConfig {
     List<String> problems(CoordinatorSettings settings) {
         List<String> problems = new ArrayList<>();
         for (var named : List.of(new String[] {"worker-image", workerImage}, new String[] {"gateway-image", gatewayImage},
-                new String[] {"registry", registry}, new String[] {"registry-username", registryUsername},
+                new String[] {"registry", registry}, new String[] {"registry-api", registryApi},
+                new String[] {"registry-username", registryUsername},
                 new String[] {"registry-password", registryPassword}, new String[] {"cran-mirror", cranMirror},
                 new String[] {"pypi-mirror", pypiMirror}, new String[] {"published-bases", publishedBases},
                 new String[] {"workspace", workspace})) {
@@ -209,6 +215,10 @@ public class WorkerConfig {
                 problems.add("mirror " + mirror + ": " + e.getMessage());
             }
         }
+        if (registryApi != null && !registryApi.isBlank()
+                && !registryApi.matches("https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?")) {
+            problems.add("registry-api " + registryApi + " is not http(s)://host[:port]");
+        }
         if (quotaMegabytes < 1024) {
             problems.add("quota-megabytes " + quotaMegabytes + " is below 1024: no base fits");
         }
@@ -236,6 +246,10 @@ public class WorkerConfig {
 
     public void setRegistry(String registry) {
         this.registry = registry;
+    }
+
+    public void setRegistryApi(String registryApi) {
+        this.registryApi = registryApi;
     }
 
     public void setRegistryUsername(String registryUsername) {

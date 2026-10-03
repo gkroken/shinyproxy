@@ -2011,6 +2011,13 @@ below are marked passed by this planning document.
       with that contract. T7 verifies the pushed digest and finishes the log; a PUBLISHING
       attempt whose lease expires is reaped INTERRUPTED until T9. **Approved by the user
       2026-10-03** (raised by the reviewer as 4b8c6f8 N1).
+      **Part 4d-1 (publication verified):** inside the lease, after PUBLISHING, the runner's
+      publishing hook (`worker.PublishVerifier`) HEADs the manifest by digest through the
+      registry's API (`skald.builds.worker.registry-api`, basic authentication; a bearer
+      registry is refused by name) and requires 200 with that exact Docker-Content-Digest,
+      and requires final.json complete, BUILT and of this lease generation. Its last sequence
+      becomes the committed log cursor (`markLogComplete`). Anything else is PUBLISHING ->
+      FAILED `PUBLISH_VERIFY`. The version transaction stays T9's.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

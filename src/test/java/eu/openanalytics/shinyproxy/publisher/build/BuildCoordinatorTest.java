@@ -323,6 +323,44 @@ public class BuildCoordinatorTest {
     }
 
     @Test
+    public void publicationIsVerifiedInsideTheLeaseAndAFailedCheckFailsTheAttempt() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        BuildDriver built = (b, stop) -> new BuildDriver.Built(DIGEST);
+
+        UUID verified = queued("alice");
+        assertEquals(BuildRunner.Result.PUBLISHING, new BuildRunner(coordinator, ONE, (b, image) -> {
+            assertEquals(DIGEST, image);
+            return 7;
+        }).runOnce("n1", built));
+        assertEquals("PUBLISHING", state(verified));
+        assertEquals(Boolean.TRUE, jdbc.queryForObject("SELECT log_complete FROM skald.build WHERE id = ?", Boolean.class, verified));
+        assertEquals(7L, jdbc.queryForObject("SELECT log_cursor FROM skald.build WHERE id = ?", Long.class, verified));
+        coordinator.fail(new Lease(verified, 1, "n1"), "TEST_DONE", "free the slot");
+
+        UUID refused = queued("alice");
+        assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE, (b, image) -> {
+            throw new IllegalStateException("the registry answered 404\nfor content/x");
+        }).runOnce("n1", built));
+        assertEquals("FAILED", state(refused));
+        assertEquals("PUBLISH_VERIFY", jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?", String.class, refused));
+        assertEquals("the registry answered 404?for content/x",
+                jdbc.queryForObject("SELECT error_detail FROM skald.build WHERE id = ?", String.class, refused));
+        assertEquals(Boolean.FALSE, jdbc.queryForObject("SELECT log_complete FROM skald.build WHERE id = ?", Boolean.class, refused));
+
+        UUID interrupted = queued("alice");
+        try {
+            assertEquals(BuildRunner.Result.INTERRUPTED, new BuildRunner(coordinator, ONE, (b, image) -> {
+                throw new InterruptedException("stopping");
+            }).runOnce("n1", built));
+        } finally {
+            Thread.interrupted();
+        }
+        assertEquals("PUBLISHING", state(interrupted), "left for the reaper");
+        assertEquals(Boolean.FALSE, jdbc.queryForObject("SELECT log_complete FROM skald.build WHERE id = ?", Boolean.class, interrupted));
+        coordinator.fail(new Lease(interrupted, 1, "n1"), "TEST_DONE", "free the slot");
+    }
+
+    @Test
     public void anInterruptedDriverWritesNothingAndTheInterruptStays() {
         // The process is stopping (BuildLoop.stop interrupts the loop's thread). The driver has
         // stopped its worker and rethrown; that is not a failure of the attempt, so nothing is

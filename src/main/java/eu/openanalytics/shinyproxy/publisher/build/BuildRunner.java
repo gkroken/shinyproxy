@@ -76,9 +76,44 @@ public final class BuildRunner {
     private final BuildCoordinator coordinator;
     private final CoordinatorSettings settings;
 
+    /**
+     * What happens after the driver built an image and the attempt is PUBLISHING, while this
+     * runner still holds the lease (step 5's first half): verify the pushed digest and the
+     * persisted log. Returns the log's last sequence, which becomes the attempt's committed
+     * log cursor. Anything it throws fails the attempt (PUBLISHING -> FAILED: "push,
+     * verification or the version transaction failed"). The version transaction itself is
+     * T9's (succeed(), with its spec_json; user decision 2026-10-03).
+     */
+    public interface Publishing {
+        long publish(BuildDriver.Claimed build, String image) throws Exception;
+    }
+
+    /** The longest error detail written for a failed publication. */
+    static final int DETAIL_MAX = 200;
+
+    private final Publishing publishing;
+
     public BuildRunner(BuildCoordinator coordinator, CoordinatorSettings settings) {
+        this(coordinator, settings, null);
+    }
+
+    public BuildRunner(BuildCoordinator coordinator, CoordinatorSettings settings, Publishing publishing) {
         this.coordinator = coordinator;
         this.settings = settings;
+        this.publishing = publishing;
+    }
+
+    /** Printable ASCII, at most {@link #DETAIL_MAX} characters. */
+    static String detail(String text) {
+        if (text == null) {
+            return "";
+        }
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < text.length() && b.length() < DETAIL_MAX; i++) {
+            char c = text.charAt(i);
+            b.append(c >= 0x20 && c < 0x7f ? c : '?');
+        }
+        return b.toString();
     }
 
     public Result runOnce(String owner, BuildDriver driver) {
@@ -160,6 +195,20 @@ public final class BuildRunner {
                     coordinator.fail(lease, "DRIVER_ERROR", notADigest.getMessage());
                     return Result.FAILED;
                 }
+                if (publishing == null) {
+                    return Result.PUBLISHING;
+                }
+                long cursor;
+                try {
+                    cursor = publishing.publish(build, built.image());
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return Result.INTERRUPTED;
+                } catch (Exception unverified) {
+                    coordinator.fail(lease, "PUBLISH_VERIFY", detail(unverified.getMessage()));
+                    return Result.FAILED;
+                }
+                coordinator.markLogComplete(lease, cursor);
                 return Result.PUBLISHING;
             }
             if (outcome instanceof BuildDriver.Stopped) {
