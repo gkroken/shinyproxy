@@ -130,6 +130,11 @@ public final class BuildKitDriver implements BuildDriver {
                     // The last thing this thread does: its calls are synchronous (a Jersey
                     // request ignores an interrupt), so anything a late call made exists by
                     // now, and nothing of the attempt is made after this (0c71146-F1).
+                    // The stop's interrupt only served to wake this thread; left pending, it
+                    // makes the first retry's sleep throw and the whole disposal give up on
+                    // one transient daemon error (904eb75-F1). Cleared, the disposal runs to
+                    // the end.
+                    Thread.interrupted();
                     disposeQuietly(h, "work thread, after a stop");
                 }
             }

@@ -107,8 +107,11 @@ public class BuildKitDriverTest {
         }
     }
 
+    /** The driver the current case made last; assertNothingLeft waits for its work thread. */
+    private static volatile BuildKitDriver lastDriver;
+
     private static BuildKitDriver driver(Settings settings, ContextSource source) {
-        return new BuildKitDriver(docker, launcher, client, source, new Config(settings, 256,
+        return lastDriver = new BuildKitDriver(docker, launcher, client, source, new Config(settings, 256,
                 new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of()),
                 TestRegistry.CRED, POLL, Duration.ofSeconds(30)));
     }
@@ -156,6 +159,14 @@ public class BuildKitDriverTest {
     }
 
     private static void assertNothingLeft(Claimed c) throws Exception {
+        // After a stop the disposal is the work thread's last act, and run() may return
+        // before it ends (a slow daemon: the kill alone took 18 s once, and the settle ran
+        // out). What is checked is what is left once that thread is done.
+        Thread work = lastDriver == null ? null : lastDriver.lastWork;
+        if (work != null) {
+            work.join(180_000);
+            assertFalse(work.isAlive(), "the work thread ended");
+        }
         Handle h = handle(c);
         assertEquals(List.of(), launcher.leftovers(h), "nothing of the attempt is left");
         // By NAME too: a volume Docker re-created for a bind carries no label, and the
@@ -265,6 +276,8 @@ public class BuildKitDriverTest {
         final AtomicBoolean armed = new AtomicBoolean();
         /** When the driver called killContainer, and when that call returned (nanoTime). */
         final long[] kill = new long[2];
+        /** When set: the work thread's first removeContainer of this name fails, as a daemon 500 would. */
+        volatile String failRemoveOnce;
         /** Every method the work thread called, in order. */
         final List<String> workCalls = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
         /** The first inspectContainer from outside the work thread: the stop path's kill. */
@@ -293,6 +306,12 @@ public class BuildKitDriverTest {
                         }
                         if (Thread.currentThread().getName().startsWith("skald-build-")) {
                             workCalls.add(m.getName());
+                            String fail = failRemoveOnce;
+                            if (fail != null && m.getName().equals("removeContainer") && fail.equals(args[0])) {
+                                failRemoveOnce = null;
+                                throw new org.mandas.docker.client.exceptions.DockerException(
+                                        "simulated transient failure of removeContainer " + fail);
+                            }
                         }
                         boolean killing = m.getName().equals("killContainer") && kill[0] == 0;
                         if (killing) {
@@ -317,7 +336,7 @@ public class BuildKitDriverTest {
     private static BuildKitDriver driverOn(DockerClient d, ContextSource source) {
         Images images = Images.of(WORKER, GATEWAY);
         DockerWorkerLauncher l = new DockerWorkerLauncher(d, WorkerProfile.load("runc-rootless"), images);
-        return new BuildKitDriver(d, l, new BuildKitClient(d, l, images), source, new Config(Settings.defaults(), 256,
+        return lastDriver = new BuildKitDriver(d, l, new BuildKitClient(d, l, images), source, new Config(Settings.defaults(), 256,
                 new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of()),
                 TestRegistry.CRED, POLL, Duration.ofSeconds(30)));
     }
@@ -419,6 +438,10 @@ public class BuildKitDriverTest {
             Handle h = handle(c);
             Hold hold = new Hold();
             hold.armed.set(true);
+            // 904eb75-F1: the work thread's own disposal meets one transient removal failure
+            // of the late client (a daemon 500 during a kill). Its retry sleeps, which threw at
+            // once while the stop's interrupt was still pending, and the disposal gave up.
+            hold.failRemoveOnce = h.client();
             AtomicBoolean stop = new AtomicBoolean();
             Thread side = new Thread(() -> {
                 try {
@@ -443,6 +466,9 @@ public class BuildKitDriverTest {
             assertInstanceOf(Stopped.class, outcome, outcome.toString());
             d.lastWork.join(180_000);
             assertFalse(d.lastWork.isAlive(), held[0] + ": the work thread ended");
+            if (held[1].equals("client")) {
+                assertTrue(hold.failRemoveOnce == null, "the late client's removal failed once, and was retried");
+            }
             assertNothingLeft(c);
         }
     }
