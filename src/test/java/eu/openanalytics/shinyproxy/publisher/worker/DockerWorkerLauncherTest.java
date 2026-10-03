@@ -187,6 +187,39 @@ public class DockerWorkerLauncherTest {
     }
 
     @Test
+    public void aHelperRemovalTheDaemonFailsOnceIsRetried() throws Exception {
+        // e4306c6 review N2: a force-remove right after a helper's wait returned can be
+        // answered "is still running". The launch's first helper (conf) meets that once; the
+        // removal is retried, so the launch goes on, and nothing is left.
+        String id = attempt();
+        java.util.concurrent.atomic.AtomicInteger failures = new java.util.concurrent.atomic.AtomicInteger(1);
+        DockerClient flaky = (DockerClient) java.lang.reflect.Proxy.newProxyInstance(DockerClient.class.getClassLoader(),
+                new Class<?>[] {DockerClient.class}, (proxy, m, args) -> {
+                    if (m.getName().equals("removeContainer") && ("skald-helper-conf-" + id).equals(args[0])
+                            && failures.getAndDecrement() > 0) {
+                        throw new org.mandas.docker.client.exceptions.DockerException(
+                                "simulated: container skald-helper-conf-" + id + " is still running");
+                    }
+                    try {
+                        return m.invoke(docker, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        DockerWorkerLauncher onFlaky = new DockerWorkerLauncher(flaky, WorkerProfile.load("runc-rootless"),
+                Images.of(WORKER, GATEWAY));
+        Handle h = onFlaky.launch(request(id));
+        try {
+            // Decremented on every removal of the conf helper: -1 is exactly two calls, the
+            // one that failed and its retry.
+            assertEquals(-1, failures.get(), "the removal failed once and was retried once");
+            assertTrue(docker.inspectContainer(h.worker()).state().running());
+        } finally {
+            assertEquals(List.of(), onFlaky.dispose(h));
+        }
+    }
+
+    @Test
     public void aHelperLeftByAKilledDisposalDoesNotBlockTheNextOne() throws Exception {
         // A process killed while dispose() ran its own helper leaves that container; the next
         // dispose() must remove it rather than fail to start its helper by the same name.

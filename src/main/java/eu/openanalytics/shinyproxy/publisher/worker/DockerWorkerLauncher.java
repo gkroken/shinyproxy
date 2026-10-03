@@ -526,7 +526,18 @@ public final class DockerWorkerLauncher {
             }
             return out;
         } finally {
-            docker.removeContainer(container, RemoveContainerParam.forceKill());
+            // Through retrying(): measured, the daemon can answer "is still running" to a
+            // force-remove issued right after the helper's wait returned (e4306c6 review N2).
+            // After a stop, the work thread's disposal is the only pass, so a removal that
+            // gives up on the first answer leaves the helper -- whose fixed name then refuses
+            // the next helper of the same attempt.
+            try {
+                retrying(() -> docker.removeContainer(container, RemoveContainerParam.forceKill()));
+            } catch (DockerException | InterruptedException | RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
         }
     }
 
