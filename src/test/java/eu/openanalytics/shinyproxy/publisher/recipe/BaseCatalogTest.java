@@ -213,10 +213,14 @@ public class BaseCatalogTest {
 
     @Test
     public void aCatalogWithARootUserOrADuplicateIdIsRefused() throws Exception {
-        ObjectNode root = (ObjectNode) JSON.readTree(catalog());
-        ((ObjectNode) root.get("bases").get(0)).put("user", "0:0");
-        byte[] c1 = bytes(root);
-        assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c1, bytes(published(c1))));
+        // 1ffdb20-F1: root by any spelling Docker reads as 0, and root's group.
+        for (String user : List.of("0:0", "00:00", "000000000:0", "10001:0", "10001:00", "010001:10001",
+                "0:10001", "root:root", "10001", "-1:10001")) {
+            ObjectNode root = (ObjectNode) JSON.readTree(catalog());
+            ((ObjectNode) root.get("bases").get(0)).put("user", user);
+            byte[] c1 = bytes(root);
+            assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c1, bytes(published(c1))), user);
+        }
         ObjectNode dup = (ObjectNode) JSON.readTree(catalog());
         ((ObjectNode) dup.get("bases").get(1)).put("id", R);
         byte[] c2 = bytes(dup);

@@ -152,6 +152,12 @@ public class RecipeGeneratorTest {
         List<String> accepted = new ArrayList<>();
         refuse(accepted, "a base by tag", () -> new Base("rocker/r-ver:4.6.1", "r", "4.6.1", "10001", "10001"));
         refuse(accepted, "a root base user", () -> new Base(R_BASE.reference(), "r", "4.6.1", "0", "0"));
+        // 1ffdb20-F1: root by another spelling, and root's group.
+        for (String[] ids : new String[][] {{"00", "00"}, {"000000000", "10001"}, {"010001", "10001"},
+                {"10001", "0"}, {"10001", "00"}, {"0", "10001"}}) {
+            refuse(accepted, "base user " + ids[0] + ":" + ids[1],
+                    () -> new Base(R_BASE.reference(), "r", "4.6.1", ids[0], ids[1]));
+        }
         refuse(accepted, "a named base user", () -> new Base(R_BASE.reference(), "r", "4.6.1", "skald", "skald"));
         // Each a valid URI, so the refusal is the generator's rule and not URI parsing: a
         // mirror is interpolated into an R string and a pip argument, so it gets no '%', '@',

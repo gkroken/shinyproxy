@@ -72,7 +72,13 @@ public final class RecipeGenerator {
      */
     private static final Pattern PY_ENTRY =
             Pattern.compile("(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)*[A-Za-z0-9_][A-Za-z0-9_.-]*\\.py");
-    private static final Pattern ID = Pattern.compile("[0-9]{1,9}");
+    /**
+     * A non-root numeric id, by its spelling: no zero and no leading zero. Docker reads
+     * "USER 00:00" as uid 0, so "not equal to the string 0" is not "not root" (1ffdb20-F1).
+     * Group 0 is refused as well: nothing here needs root's group, and it gains write on
+     * root-group-writable paths.
+     */
+    private static final Pattern ID = Pattern.compile("[1-9][0-9]{0,8}");
 
     private RecipeGenerator() {
     }
@@ -87,7 +93,7 @@ public final class RecipeGenerator {
             if (!DIGEST_REFERENCE.matcher(reference).matches()) {
                 throw new IllegalArgumentException("a base must be referenced by digest: " + reference);
             }
-            if (!ID.matcher(uid).matches() || !ID.matcher(gid).matches() || uid.equals("0")) {
+            if (!ID.matcher(uid).matches() || !ID.matcher(gid).matches()) {
                 throw new IllegalArgumentException("a base's user must be a non-root numeric id");
             }
         }

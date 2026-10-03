@@ -78,7 +78,11 @@ public final class BaseCatalog {
     private static final Pattern REGISTRY = Pattern.compile(
             "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[0-9]{1,5})?");
     private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
-    private static final Pattern USER = Pattern.compile("([0-9]{1,9}):([0-9]{1,9})");
+    /**
+     * uid:gid, both non-zero with no leading zero: "00" is root to Docker (1ffdb20-F1).
+     * RecipeGenerator.Base checks the same again, as the last gate before the Dockerfile.
+     */
+    private static final Pattern USER = Pattern.compile("([1-9][0-9]{0,8}):([1-9][0-9]{0,8})");
 
     private final List<Entry> entries;
     private final Map<String, String> published;
@@ -106,7 +110,7 @@ public final class BaseCatalog {
         }
         for (JsonNode b : catalog.path("bases")) {
             var user = USER.matcher(b.path("user").asText(""));
-            if (!user.matches() || user.group(1).equals("0")) {
+            if (!user.matches()) {
                 throw new IllegalArgumentException("catalog: base " + b.path("id").asText() + " has no non-root user");
             }
             entries.add(new Entry(text(b, "id"), text(b, "type"), text(b, "language"), text(b, "version"),
