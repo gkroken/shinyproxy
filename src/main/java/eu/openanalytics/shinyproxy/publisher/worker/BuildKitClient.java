@@ -193,33 +193,61 @@ public final class BuildKitClient {
         }
     }
 
-    private interface TarBody {
+    interface TarBody {
         void write(OutputStream out) throws IOException;
+    }
+
+    interface TarSink {
+        void accept(java.io.InputStream in) throws DockerException, InterruptedException, IOException;
     }
 
     /** Streams a tar into a stopped container's {@link #CONTEXT_MOUNT}, without a file on disk. */
     private void copyTar(String container, TarBody body) throws DockerException, InterruptedException, IOException {
+        streamTar(body, in -> docker.copyToContainer(in, container, CONTEXT_MOUNT), "skald-stage-" + container);
+    }
+
+    /**
+     * Runs {@code body} on a writer thread into {@code sink}, and succeeds only if the body
+     * RETURNED -- writeContext's last act is tar.finish(). A writer that dies of anything
+     * still closes the pipe, and Docker accepts a tar cut at an entry boundary with no
+     * end-of-archive blocks as complete (measured by the reviewer: rc 0, the directories
+     * created). So the sink's success says nothing, and every Throwable of the writer is the
+     * stage's failure (94b4dae-F1: an unreadable directory surfaced from Files.walk as an
+     * UncheckedIOException, which the old IOException-only catch let through).
+     */
+    static void streamTar(TarBody body, TarSink sink, String threadName)
+            throws DockerException, InterruptedException, IOException {
         PipedInputStream in = new PipedInputStream(1 << 16);
         PipedOutputStream pipe = new PipedOutputStream(in);
-        AtomicReference<IOException> failed = new AtomicReference<>();
+        AtomicReference<Throwable> failed = new AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean finished = new java.util.concurrent.atomic.AtomicBoolean();
         Thread writer = new Thread(() -> {
-            try (pipe) {
+            try {
                 body.write(pipe);
-            } catch (IOException e) {
+                pipe.close();
+                // Only here: the body returned AND the end of the stream was delivered.
+                finished.set(true);
+            } catch (Throwable e) {
                 failed.set(e);
+            } finally {
+                try {
+                    pipe.close();
+                } catch (IOException e) {
+                    // the failure that matters is already recorded, or finished is false
+                }
             }
-        }, "skald-stage-" + container);
+        }, threadName);
         writer.setDaemon(true);
         writer.start();
         try {
-            docker.copyToContainer(in, container, CONTEXT_MOUNT);
+            sink.accept(in);
         } finally {
-            // Unblocks a writer the copy stopped reading from.
+            // Unblocks a writer the sink stopped reading from.
             in.close();
             writer.join();
         }
-        if (failed.get() != null) {
-            throw failed.get();
+        if (!finished.get()) {
+            throw new IOException("the build context was not written in full: " + failed.get(), failed.get());
         }
     }
 

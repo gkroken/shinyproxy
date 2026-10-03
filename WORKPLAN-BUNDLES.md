@@ -2017,6 +2017,12 @@ below are marked passed by this planning document.
       Owed here: memory-swap equal to the limit, or a documented host-level swap policy. It
       is an engine (upstream-class) change, so it goes through `docs/UPSTREAM_CHANGES.md`
       and asks first.
+      **Carried from T7 (94b4dae review N3):** the build client pushes with ONE registry
+      credential that can write every repository, and buildkitd holds it in memory for the
+      pulls and the push (buildctl's session answers its credential requests). An escape
+      into the daemon could therefore push under any repository's tag. Deployment by digest
+      limits the damage; per-repository push scope (a token scoped to the attempt's
+      repository) belongs with the registry choice made here.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and

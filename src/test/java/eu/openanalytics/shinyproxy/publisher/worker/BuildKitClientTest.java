@@ -151,6 +151,40 @@ public class BuildKitClientTest {
     }
 
     @Test
+    public void aContextWriterThatDiesOfAnythingFailsTheStage(@TempDir Path dir) throws Exception {
+        // 94b4dae-F1's case: an unreadable directory in the payload. Files.walk reports it as
+        // an UncheckedIOException; the sink (Docker, in production) took the cut tar as whole.
+        Path payload = Files.createDirectories(dir.resolve("p"));
+        Files.writeString(payload.resolve("app.py"), "x");
+        Path locked = Files.createDirectories(payload.resolve("zzz"));
+        Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("---------"));
+        Recipe recipe = new Recipe("FROM x\n", Map.of());
+        List<BuildKitClient.TarBody> bodies = List.of(
+                out -> BuildKitClient.writeContext(out, payload, recipe),
+                out -> {
+                    out.write(new byte[512]);
+                    throw new IllegalStateException("a bug");
+                },
+                out -> {
+                    throw new AssertionError("an error");
+                });
+        try {
+            for (BuildKitClient.TarBody body : bodies) {
+                ByteArrayOutputStream read = new ByteArrayOutputStream();
+                IOException e = assertThrows(IOException.class,
+                        () -> BuildKitClient.streamTar(body, in -> in.transferTo(read), "t"));
+                assertTrue(e.getMessage().contains("not written in full"), e.getMessage());
+            }
+        } finally {
+            Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rwx------"));
+        }
+        // And a body that returns is a success, with every byte delivered.
+        ByteArrayOutputStream read = new ByteArrayOutputStream();
+        BuildKitClient.streamTar(out -> out.write(new byte[200_000]), in -> in.transferTo(read), "t");
+        assertEquals(200_000, read.size());
+    }
+
+    @Test
     public void aRecipeFileOutsideSkaldIsRefusedBeforeDockerIsAsked(@TempDir Path dir) {
         BuildKitClient client = new BuildKitClient(null, null, null);
         for (String key : List.of("app/x", "skald/../x", "skald/a/b", "../x", "Dockerfile", "skald/", "skald/.x")) {

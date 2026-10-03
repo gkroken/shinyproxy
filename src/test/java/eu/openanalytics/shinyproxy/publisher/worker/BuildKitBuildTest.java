@@ -146,12 +146,19 @@ public class BuildKitBuildTest {
         Files.createDirectories(payload.resolve("www"));
         Files.writeString(payload.resolve("www/a.txt"), "a\n");
         // Build code's view: its own environment, every process it can see, and every file
-        // on its root. Each count has a planted control (a process and a file that DO hold
-        // the secret), so a probe that cannot see reads 0 and fails: the answer is 0, 1, 1.
+        // on its root, for the password AND for config.json's base64 "auth" form (94b4dae
+        // N2: a leak of the config file itself). Each count has a planted control (a process
+        // and a file that DO hold both), so a probe that cannot see reads 0 and fails: the
+        // answer is 0, 1, 1 for each form.
+        String authField = java.util.Base64.getEncoder().encodeToString(
+                (CRED.username() + ":" + CRED.password()).getBytes(StandardCharsets.UTF_8));
+        int half = authField.length() / 2;
         String probe = "P1=" + SECRET_A + "; P2=" + SECRET_B + "; S=\"$P1$P2\"; "
-                + "env SKALD_CTL=\"$S\" sleep 120 & CTL=$!; echo \"$S\" > /ctl; sleep 2; "
-                + "{ env | grep -c \"$S\"; cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c \"$S\";"
-                + " find / -xdev -type f -exec grep -l \"$S\" {} + 2>/dev/null | grep -c .;"
+                + "A1=" + authField.substring(0, half) + "; A2=" + authField.substring(half) + "; B=\"$A1$A2\"; "
+                + "env SKALD_CTL=\"$S $B\" sleep 120 & CTL=$!; echo \"$S $B\" > /ctl; sleep 2; "
+                + "{ for X in \"$S\" \"$B\"; do env | grep -c \"$X\";"
+                + " cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c \"$X\";"
+                + " find / -xdev -type f -exec grep -l \"$X\" {} + 2>/dev/null | grep -c .; done;"
                 + " ls -A /app; } > /report 2>&1; kill $CTL; rm -f /ctl; true";
         Recipe recipe = new Recipe("FROM " + REGISTRY + ":5000/base/busybox:1\n"
                 + "COPY skald/test.lock /opt/skald/test.lock\n"
@@ -206,7 +213,7 @@ public class BuildKitBuildTest {
             assertEquals(id, docker.inspectImage(local + ":build-" + buildId).id(),
                     "the tag resolves to the reported digest");
             String report = run(local + "@" + digest, "cat", "/report");
-            assertEquals(List.of("0", "1", "1", "app.py", "www"), report.strip().lines().toList(),
+            assertEquals(List.of("0", "1", "1", "0", "1", "1", "app.py", "www"), report.strip().lines().toList(),
                     "build code saw no credential but its own controls, and /app is the payload alone: "
                             + report);
             assertEquals("lock\n", run(local + "@" + digest, "cat", "/opt/skald/test.lock"));
