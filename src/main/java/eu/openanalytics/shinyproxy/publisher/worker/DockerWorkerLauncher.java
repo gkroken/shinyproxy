@@ -379,8 +379,14 @@ public final class DockerWorkerLauncher {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
         List<String> errors = new ArrayList<>();
-        // The client first: it holds the socket and context volumes (BuildKitClient).
-        for (String c : List.of(h.client(), BuildKitClient.stageHelper(h), h.worker(), h.gateway(),
+        // The worker first: it runs the untrusted code. Volumes go only after every container,
+        // so the client holding the socket and context volumes may go after it. Every
+        // helper name too, this method's own cleanup and check helpers included: a process
+        // killed while one ran leaves it behind, and its fixed name would then refuse every
+        // later disposal's helper ("already exists"), so the loop device could never be
+        // detached (found in 3d-2a, after a JUnit timeout killed the JVM mid-disposal).
+        for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), h.gateway(),
+                "skald-helper-cleanup-" + h.attemptId(), "skald-helper-check-" + h.attemptId(),
                 "skald-helper-conf-" + h.attemptId(),
                 "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
             quietly(errors, () -> {
@@ -419,6 +425,23 @@ public final class DockerWorkerLauncher {
         left.addAll(errors.stream().filter(e -> !e.contains("No such") && !e.contains("not found"))
                 .map(e -> "error: " + e).toList());
         return left;
+    }
+
+    /**
+     * SIGKILLs the attempt's worker if it is ours: one call, so a stop ends the untrusted
+     * code before {@link #dispose} walks everything else (measured under load: a full
+     * removal pass reached the worker 15 s after a stop, against a 10 s bound). Returns
+     * what went wrong, if anything; a worker that is gone or not running is not an error.
+     */
+    public List<String> killWorker(Handle h) throws InterruptedException {
+        List<String> errors = new ArrayList<>();
+        quietly(errors, () -> {
+            var info = docker.inspectContainer(h.worker());
+            if (ours(info.config().labels(), h) && info.state().running()) {
+                docker.killContainer(h.worker());
+            }
+        });
+        return errors.stream().filter(e -> !e.contains("is not running")).toList();
     }
 
     /**

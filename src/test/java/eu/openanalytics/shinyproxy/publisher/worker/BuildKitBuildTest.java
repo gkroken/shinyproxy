@@ -30,8 +30,6 @@ import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Handle;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Images;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Request;
 import eu.openanalytics.shinyproxy.publisher.worker.WorkerProfile.Settings;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -40,16 +38,10 @@ import org.mandas.docker.client.DockerClient;
 import org.mandas.docker.client.DockerClient.LogsParam;
 import org.mandas.docker.client.DockerClient.RemoveContainerParam;
 import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
-import org.mandas.docker.client.exceptions.DockerException;
 import org.mandas.docker.client.messages.ContainerConfig;
 import org.mandas.docker.client.messages.HostConfig;
-import org.mandas.docker.client.messages.NetworkConfig;
-import org.mandas.docker.client.messages.PortBinding;
 import org.mandas.docker.client.messages.RegistryAuth;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -72,17 +64,11 @@ public class BuildKitBuildTest {
 
     private static final String WORKER = "skald-buildkit-worker:test";
     private static final String GATEWAY = "skald-egress-gateway:test";
-    /** registry:2, pinned. */
-    private static final String REGISTRY_IMAGE = "registry@sha256:"
-            + "a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373";
     private static final int REGISTRY_PORT = 15031;
-    private static final String RUN_ID = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-    private static final String OUTER = "skald-bkt-outer-" + RUN_ID;
-    private static final String REGISTRY = "skald-bkt-registry-" + RUN_ID;
-    // Split in the Dockerfile so the RUN's own command line never holds it whole.
-    private static final String SECRET_A = "skaldbktsecret";
-    private static final String SECRET_B = "x7q2";
-    private static final Credential CRED = new Credential("skald-launcher", SECRET_A + SECRET_B);
+    private static final String SECRET_A = TestRegistry.SECRET_A;
+    private static final String SECRET_B = TestRegistry.SECRET_B;
+    private static final Credential CRED = TestRegistry.CRED;
+    private static TestRegistry registry;
     private static DockerClient docker;
     private static DockerWorkerLauncher launcher;
     private static BuildKitClient client;
@@ -90,50 +76,23 @@ public class BuildKitBuildTest {
     @BeforeAll
     public static void start() throws Exception {
         docker = new JerseyDockerClientBuilder().fromEnv().build();
-        for (String image : List.of(WORKER, GATEWAY, Images.HELPER, Images.SETUP, REGISTRY_IMAGE)) {
+        for (String image : List.of(WORKER, GATEWAY, Images.HELPER, Images.SETUP, TestRegistry.IMAGE)) {
             assertNotNull(docker.inspectImage(image), image + " is missing; run `make test`");
         }
         Images images = Images.of(WORKER, GATEWAY);
         launcher = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"), images);
         client = new BuildKitClient(docker, launcher, images);
-        // The operator's side: a registry that requires the credential to read or write,
-        // on a network the gateway joins, and published on the host to seed and check it.
-        docker.createNetwork(NetworkConfig.builder().name(OUTER).build());
-        String htpasswd = CRED.username() + ":" + new BCryptPasswordEncoder().encode(CRED.password()) + "\n";
-        docker.createContainer(ContainerConfig.builder().image(REGISTRY_IMAGE)
-                .env("REGISTRY_AUTH=htpasswd", "REGISTRY_AUTH_HTPASSWD_REALM=skald",
-                        "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd")
-                .exposedPorts("5000/tcp")
-                .hostConfig(HostConfig.builder().networkMode(OUTER)
-                        .portBindings(Map.of("5000/tcp", List.of(PortBinding.of("127.0.0.1", REGISTRY_PORT))))
-                        .build()).build(), REGISTRY);
-        docker.copyToContainer(tar("auth/htpasswd", htpasswd), REGISTRY, "/");
-        docker.startContainer(REGISTRY);
-        RegistryAuth auth = RegistryAuth.builder().username(CRED.username()).password(CRED.password())
-                .serverAddress("localhost:" + REGISTRY_PORT).build();
-        String base = "localhost:" + REGISTRY_PORT + "/base/busybox:1";
-        docker.tag(Images.HELPER, base);
-        for (int i = 0; ; i++) {
-            try {
-                docker.push(base, auth);
-                break;
-            } catch (DockerException e) {
-                if (i >= 20) {
-                    throw e;
-                }
-                Thread.sleep(500);
-            }
-        }
-        docker.removeImage(base);
+        registry = new TestRegistry(docker, "skald-bkt", REGISTRY_PORT);
     }
 
     @AfterAll
     public static void stop() throws Exception {
         if (docker != null) {
             try {
-                docker.removeContainer(REGISTRY, RemoveContainerParam.forceKill(), RemoveContainerParam.removeVolumes());
+                if (registry != null) {
+                    registry.close();
+                }
             } finally {
-                docker.removeNetwork(OUTER);
                 docker.close();
             }
         }
@@ -160,16 +119,16 @@ public class BuildKitBuildTest {
                 + " cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c \"$X\";"
                 + " find / -xdev -type f -exec grep -l \"$X\" {} + 2>/dev/null | grep -c .; done;"
                 + " ls -A /app; } > /report 2>&1; kill $CTL; rm -f /ctl; true";
-        Recipe recipe = new Recipe("FROM " + REGISTRY + ":5000/base/busybox:1\n"
+        Recipe recipe = new Recipe("FROM " + registry.base() + "\n"
                 + "COPY skald/test.lock /opt/skald/test.lock\n"
                 + "COPY app/ /app/\n"
                 + "RUN [\"sh\", \"-c\", " + quote(probe) + "]\n",
                 Map.of("skald/test.lock", "lock\n".getBytes(StandardCharsets.UTF_8)));
         String attempt = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         UUID buildId = UUID.randomUUID();
-        Push push = new Push(REGISTRY, "content/bkt", buildId, CRED);
+        Push push = new Push(registry.name, "content/bkt", buildId, CRED);
         Handle h = launcher.launch(new Request(attempt, Settings.defaults(), 256,
-                new Egress(List.of(OUTER), REGISTRY, List.of("pypi.org"), List.of(), List.of(), List.of())));
+                new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of())));
         String pushed;
         try {
             client.stage(h, payload, recipe);
@@ -181,7 +140,7 @@ public class BuildKitBuildTest {
             }
             assertEquals(0L, client.exitCode(h).orElseThrow(), client.log(h));
             pushed = client.pushed(h, push);
-            assertTrue(pushed.matches(REGISTRY + ":5000/content/bkt@sha256:[0-9a-f]{64}"), pushed);
+            assertTrue(pushed.matches(registry.name + ":5000/content/bkt@sha256:[0-9a-f]{64}"), pushed);
             assertTrue(client.log(h).contains("pushing manifest"), "the log is buildctl's progress");
 
             // The client: no host path, no network, its own unprivileged identity.
@@ -202,9 +161,8 @@ public class BuildKitBuildTest {
         assertEquals(List.of(), launcher.leftovers(h));
 
         // The registry holds what the client reported, under the ledgered tag too.
-        RegistryAuth auth = RegistryAuth.builder().username(CRED.username()).password(CRED.password())
-                .serverAddress("localhost:" + REGISTRY_PORT).build();
-        String local = "localhost:" + REGISTRY_PORT + "/content/bkt";
+        RegistryAuth auth = registry.auth();
+        String local = registry.local("content/bkt");
         String digest = pushed.substring(pushed.indexOf('@') + 1);
         docker.pull(local + ":build-" + buildId, auth);
         docker.pull(local + "@" + digest, auth);
@@ -258,19 +216,5 @@ public class BuildKitBuildTest {
 
     private static String quote(String s) {
         return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
-    }
-
-    private static ByteArrayInputStream tar(String name, String body) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream t = new TarArchiveOutputStream(out)) {
-            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            TarArchiveEntry e = new TarArchiveEntry(name);
-            e.setSize(bytes.length);
-            e.setMode(0644);
-            t.putArchiveEntry(e);
-            t.write(bytes);
-            t.closeArchiveEntry();
-        }
-        return new ByteArrayInputStream(out.toByteArray());
     }
 }

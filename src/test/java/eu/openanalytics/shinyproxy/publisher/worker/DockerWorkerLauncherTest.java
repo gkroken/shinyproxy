@@ -187,6 +187,25 @@ public class DockerWorkerLauncherTest {
     }
 
     @Test
+    public void aHelperLeftByAKilledDisposalDoesNotBlockTheNextOne() throws Exception {
+        // A process killed while dispose() ran its own helper leaves that container; the next
+        // dispose() must remove it rather than fail to start its helper by the same name.
+        String id = attempt();
+        Handle h = launcher.launch(request(id));
+        try {
+            for (String role : List.of("cleanup", "check")) {
+                docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
+                        .image(Images.HELPER).cmd("true")
+                        .labels(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, id)).build(),
+                        "skald-helper-" + role + "-" + id);
+            }
+        } finally {
+            assertEquals(List.of(), launcher.dispose(h), "disposal removed the stale helpers and finished");
+        }
+        assertEquals(List.of(), launcher.leftovers(h));
+    }
+
+    @Test
     public void aRefusedRelaunchLeavesTheLiveLaunchRunning() throws Exception {
         // 67b7c17-F1: the same attempt launched twice. The second launch refuses, and its
         // refusal must not dispose of the first, whose objects carry the same label.

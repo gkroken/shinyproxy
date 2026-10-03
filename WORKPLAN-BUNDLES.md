@@ -1971,6 +1971,14 @@ below are marked passed by this planning document.
       production values, are this track's. (3) The workspace is the loop-backed quota volume
       `dev/quota_volume.py` makes, mounted `nosuid,nodev`; its attach step is the launcher's
       privilege, and the production size is this track's.
+      **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
+      The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
+      s). The daemon then needs time to end the container (measured 2.9-3.7 s, 9.3 s during
+      make test, once 14.2 s while the shared host was busy). At the defaults the runner flips the stop 10 s
+      (renew_every / 2) before the database could expire the lease, so on a slow daemon a
+      next claim can start while the old worker is still dying. The margin is the
+      operator's (lease and renew_every are configurable); T10 measures it on the target
+      host.
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
