@@ -287,9 +287,12 @@ public class BuildKitDriverTest {
         assertInstanceOf(Stopped.class, outcome, outcome.toString());
         assertTrue(flipped[0] > 0, "the stop flipped while the client ran");
         // The signal is read within POLL; what follows is disposal itself, which the
-        // daemon times (force-removing the worker kills the sleeping RUN with it).
-        assertTrue(took < Duration.ofSeconds(90).toNanos(), "returned " + took / 1_000_000 + " ms after the stop");
+        // daemon times (the kill alone took 52 s once under make test). What this bound
+        // guards is that run() did not wait out the RUN's 600 s sleep.
+        assertTrue(took < Duration.ofMinutes(5).toNanos(), "returned " + took / 1_000_000 + " ms after the stop");
         assertNothingLeft(c);
+        // 2431b71 N1: the stop path's log says so, end to end.
+        assertEquals("STOPPED", logWriter.readFinal(c.contentId(), c.buildId()).orElseThrow().outcome());
     }
 
     /**

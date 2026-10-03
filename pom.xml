@@ -299,6 +299,15 @@
                     <include>build-worker-seccomp-v1.json</include>
                 </includes>
             </resource>
+            <!-- Skald: the trusted-base catalog, read by publisher.recipe.BaseCatalog and held
+                 by SHA-256 against the operator's published bases file, so it ships as is. -->
+            <resource>
+                <directory>images</directory>
+                <targetPath>skald/images</targetPath>
+                <includes>
+                    <include>catalog.json</include>
+                </includes>
+            </resource>
             <!-- Skald: the manifest schema and the version index that selects it, shipped
                  so ManifestSchema validates against the published documents themselves
                  rather than a copy. schemas/manifest.schema.json is the same bytes as

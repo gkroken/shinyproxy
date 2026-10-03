@@ -1981,6 +1981,14 @@ below are marked passed by this planning document.
       is a `LOG_STORAGE` failure, never a silent success. While the tail is in use a reader
       sees nothing new until the end (T8), and a crash loses the in-memory tail: part 4's
       reconciliation must finish such a log as interrupted (0adc78e N2).
+      **Part 3e (base digests, 4dd3f76 N1):** a built base is not byte-reproducible, so its
+      digest is the operator's, not the repository's. `dev/publish-bases.py` builds each
+      catalog base through the mirror, runs bases-probe's static and live checks, pushes it to
+      `<registry>/skald/base/<id>`, and writes a published-bases file naming the catalog it was
+      built from by SHA-256; nothing is written if any check or push fails.
+      `publisher.recipe.BaseCatalog` loads the shipped catalog with that file, refuses a file
+      from another catalog and any reference that is not `<registry>/skald/base/<id>@sha256:`,
+      and resolves a manifest to the newest recipe revision's digest-pinned `Base`.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
