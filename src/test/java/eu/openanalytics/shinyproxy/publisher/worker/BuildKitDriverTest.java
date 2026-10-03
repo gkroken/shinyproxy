@@ -61,6 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -155,7 +156,20 @@ public class BuildKitDriverTest {
     }
 
     private static void assertNothingLeft(Claimed c) throws Exception {
-        assertEquals(List.of(), launcher.leftovers(handle(c)), "nothing of the attempt is left");
+        Handle h = handle(c);
+        assertEquals(List.of(), launcher.leftovers(h), "nothing of the attempt is left");
+        // By NAME too: a volume Docker re-created for a bind carries no label, and the
+        // label-based leftovers() cannot see it (0c71146-F1).
+        String id = h.attemptId();
+        List<String> named = new java.util.ArrayList<>();
+        docker.listContainers(DockerClient.ListContainersParam.allContainers()).forEach(ct -> ct.names().stream()
+                .filter(n -> n.contains(id)).forEach(n -> named.add("container " + n)));
+        var volumes = docker.listVolumes().volumes();
+        if (volumes != null) {
+            volumes.stream().filter(v -> v.name().contains(id)).forEach(v -> named.add("volume " + v.name()));
+        }
+        docker.listNetworks().stream().filter(n -> n.name().contains(id)).forEach(n -> named.add("network " + n.name()));
+        assertEquals(List.of(), named, "nothing named for the attempt is left");
     }
 
     @Test
@@ -251,6 +265,8 @@ public class BuildKitDriverTest {
         final AtomicBoolean armed = new AtomicBoolean();
         /** When the driver called killContainer, and when that call returned (nanoTime). */
         final long[] kill = new long[2];
+        /** Every method the work thread called, in order. */
+        final List<String> workCalls = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
         /** The first inspectContainer from outside the work thread: the stop path's kill. */
         final long[] firstStopCall = new long[1];
 
@@ -258,8 +274,8 @@ public class BuildKitDriverTest {
             return (DockerClient) Proxy.newProxyInstance(DockerClient.class.getClassLoader(),
                     new Class<?>[] {DockerClient.class}, (proxy, m, args) -> {
                         boolean interrupted = false;
-                        if (m.getName().equals(method) && args != null && args.length > 0
-                                && target.equals(args[0] instanceof Volume v ? v.name() : args[0])
+                        if (m.getName().equals(method) && args != null
+                                && java.util.Arrays.stream(args).anyMatch(a -> target.equals(a instanceof Volume v ? v.name() : a))
                                 && armed.compareAndSet(true, false)) {
                             entered.countDown();
                             while (true) {
@@ -274,6 +290,9 @@ public class BuildKitDriverTest {
                         if (firstStopCall[0] == 0 && m.getName().equals("inspectContainer")
                                 && !Thread.currentThread().getName().startsWith("skald-build-")) {
                             firstStopCall[0] = System.nanoTime();
+                        }
+                        if (Thread.currentThread().getName().startsWith("skald-build-")) {
+                            workCalls.add(m.getName());
                         }
                         boolean killing = m.getName().equals("killContainer") && kill[0] == 0;
                         if (killing) {
@@ -368,13 +387,18 @@ public class BuildKitDriverTest {
             }
         });
         Outcome outcome;
+        BuildKitDriver d = driverOn(hold.wrap("inspectContainer", h.client()),
+                source(dir, "RUN [\"sleep\", \"600\"]\n", new AtomicInteger()));
         try {
-            outcome = driverOn(hold.wrap("inspectContainer", h.client()),
-                    source(dir, "RUN [\"sleep\", \"600\"]\n", new AtomicInteger())).run(c, stop::get);
+            outcome = d.run(c, stop::get);
         } finally {
             hold.release.countDown();
         }
         side.join(10_000);
+        // The work thread was still in its held call when run() returned; it disposes of the
+        // attempt as its last act once the call returns.
+        d.lastWork.join(180_000);
+        assertFalse(d.lastWork.isAlive(), "the work thread ended");
         assertInstanceOf(Stopped.class, outcome, outcome.toString());
         assertTrue(times[0] > 0, "the poll hung and the stop flipped");
         assertStoppedInTime("hung work thread", times[0], hold.kill, times[1]);
@@ -382,44 +406,45 @@ public class BuildKitDriverTest {
     }
 
     @Test
-    @Timeout(value = 15, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
-    public void anObjectMadeAfterTheFirstDisposalIsRemovedByTheSecond(@TempDir Path dir) throws Exception {
-        // The context volume's create is in flight at the daemon when the stop comes; it lands
-        // after the first disposal has looked for it. Only the disposal after the work thread
-        // is joined can find it.
-        Claimed c = claimed();
-        Handle h = handle(c);
-        Hold hold = new Hold();
-        hold.armed.set(true);
-        AtomicBoolean stop = new AtomicBoolean();
-        Thread side = new Thread(() -> {
-            try {
-                if (!hold.entered.await(10, TimeUnit.MINUTES)) {
-                    return;
-                }
-                stop.set(true);
-                // The first pass is over once the attempt's network is gone: it is removed last.
-                while (true) {
-                    try {
-                        docker.inspectNetwork(h.network());
-                    } catch (NotFoundException e) {
-                        break;
+    @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aCreateThatOutlastsTheSettleLeavesNothingOnceItReturns(@TempDir Path dir) throws Exception {
+        // 0c71146-F1: a create is in flight at the daemon when the stop comes, and returns
+        // only after run() has: the context volume's create (in staging) and the client's
+        // create (holding the credential in its configuration). The stop path removes only
+        // containers, so no volume is removed under the late create (Docker would re-create
+        // it unlabelled for the client's binds); the work thread disposes of everything as
+        // its last act. Checked by label AND by name once the work thread has ended.
+        for (String[] held : List.of(new String[] {"createVolume", "ctx"}, new String[] {"createContainer", "client"})) {
+            Claimed c = claimed();
+            Handle h = handle(c);
+            Hold hold = new Hold();
+            hold.armed.set(true);
+            AtomicBoolean stop = new AtomicBoolean();
+            Thread side = new Thread(() -> {
+                try {
+                    if (hold.entered.await(10, TimeUnit.MINUTES)) {
+                        stop.set(true);
                     }
-                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    // test over
                 }
-            } catch (Exception e) {
-                // reported by the assertions
+            });
+            side.setDaemon(true);
+            side.start();
+            BuildKitDriver d = driverOn(hold.wrap(held[0], held[1].equals("ctx") ? h.contextVolume() : h.client()),
+                    source(dir.resolve(held[1]), "RUN [\"true\"]\n", new AtomicInteger()));
+            Outcome outcome;
+            try {
+                outcome = d.run(c, stop::get);
+                assertTrue(d.lastWork.isAlive(), held[0] + ": the held call outlasted the settle");
             } finally {
                 hold.release.countDown();
             }
-        });
-        side.setDaemon(true);
-        side.start();
-        Outcome outcome = driverOn(hold.wrap("createVolume", h.contextVolume()),
-                source(dir, "RUN [\"true\"]\n", new AtomicInteger())).run(c, stop::get);
-        assertInstanceOf(Stopped.class, outcome, outcome.toString());
-        assertTrue(stop.get(), "the stop flipped while the create was held");
-        assertNothingLeft(c);
+            assertInstanceOf(Stopped.class, outcome, outcome.toString());
+            d.lastWork.join(180_000);
+            assertFalse(d.lastWork.isAlive(), held[0] + ": the work thread ended");
+            assertNothingLeft(c);
+        }
     }
 
     @Test
@@ -479,6 +504,46 @@ public class BuildKitDriverTest {
         assertInstanceOf(Failed.class, outcome, outcome.toString());
         assertEquals("WORKER_DIED", ((Failed) outcome).code(), outcome.toString());
         assertEquals(1, released.get());
+        assertNothingLeft(c);
+    }
+
+    @Test
+    @Timeout(value = 3, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aContextThatArrivesAfterTheStopLaunchesNothing(@TempDir Path dir) throws Exception {
+        // The source ignores the interrupt and returns normally once the stop has come: the
+        // work thread must not go on to launch a worker for a stopped attempt.
+        Claimed c = claimed();
+        AtomicBoolean stop = new AtomicBoolean();
+        ContextSource ready = source(dir, "RUN [\"true\"]\n", new AtomicInteger());
+        ContextSource late = build -> {
+            while (!stop.get()) {
+                Thread.onSpinWait();
+            }
+            long until = System.nanoTime() + 2_000_000_000L;
+            while (System.nanoTime() < until) {
+                Thread.onSpinWait();
+            }
+            return ready.prepare(build);
+        };
+        Thread flip = new Thread(() -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                return;
+            }
+            stop.set(true);
+        });
+        flip.start();
+        Hold record = new Hold();
+        BuildKitDriver d = driverOn(record.wrap("none", "none"), late);
+        Outcome outcome = d.run(c, stop::get);
+        d.lastWork.join(60_000);
+        assertInstanceOf(Stopped.class, outcome, outcome.toString());
+        // No launch began: a launch's first act is createNetwork, and staging's is
+        // createVolume. (The work thread's own disposal after the stop runs helper
+        // containers, so createContainer alone would not tell.)
+        assertTrue(record.workCalls.stream().noneMatch(m -> m.equals("createNetwork") || m.equals("createVolume")),
+                "the work thread launched nothing: " + record.workCalls);
         assertNothingLeft(c);
     }
 

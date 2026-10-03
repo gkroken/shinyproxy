@@ -52,10 +52,13 @@ import java.util.function.BooleanSupplier;
  * but wait on it in slices of {@code poll} and ask the stop signal between them, so it
  * answers the signal within {@code poll} however long any call blocks: a launch waiting
  * for its daemon, a hung daemon request, a RUN step that sleeps. On a true signal it
- * disposes of the WHOLE attempt at once (the worker, its descendants, the gateway, the
- * client and every volume), then interrupts the work thread, waits for it at most
- * {@code settle}, and disposes again: a launch still in flight may have made an object
- * after the first pass. {@code poll} must be at most renew_every / 2.
+ * SIGKILLs the worker and removes every container of the attempt, so all of its code
+ * stops, then interrupts the work thread and waits for it at most {@code settle}. The
+ * volumes, network and loop device are disposed of by the work thread itself as its last
+ * act after a stop, and by this thread only if the work thread has ended: a Docker call
+ * ignores the interrupt, so a create may land late, and removing a volume under it would
+ * make Docker re-create that volume unlabelled (0c71146-F1). {@code poll} must be at most
+ * renew_every / 2.
  *
  * <p><b>Worker death is State.Running, never State.OOMKilled (T5 gate F6 carry (1)).</b>
  * A RUN step that is OOM-killed inside the worker sets the WORKER's OOMKilled flag while
@@ -94,6 +97,8 @@ public final class BuildKitDriver implements BuildDriver {
     private final BuildKitClient client;
     private final ContextSource source;
     private final Config config;
+    /** The last attempt's work thread, so a test can wait for its own disposal. */
+    volatile Thread lastWork;
 
     public BuildKitDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
                           ContextSource source, Config config) {
@@ -120,8 +125,16 @@ public final class BuildKitDriver implements BuildDriver {
                 result.set(attempt(build, h, aborted));
             } catch (Throwable t) {
                 crashed.set(t);
+            } finally {
+                if (aborted.get()) {
+                    // The last thing this thread does: its calls are synchronous (a Jersey
+                    // request ignores an interrupt), so anything a late call made exists by
+                    // now, and nothing of the attempt is made after this (0c71146-F1).
+                    disposeQuietly(h, "work thread, after a stop");
+                }
             }
         }, "skald-build-" + h.attemptId());
+        lastWork = work;
         work.setDaemon(true);
         work.start();
         long poll = config.poll().toMillis();
@@ -153,17 +166,37 @@ public final class BuildKitDriver implements BuildDriver {
         return result.get();
     }
 
+    /**
+     * The stop path. Every process of the attempt ends at once: the worker by one SIGKILL,
+     * then every container of the attempt. Volumes, the network and the loop device are NOT
+     * touched while the work thread may still be in a daemon call: a create that lands
+     * after a volume was removed makes Docker re-create that volume for its bind, unlabelled
+     * and beyond any disposal (0c71146-F1). The full disposal is the work thread's own last
+     * act after a stop; this thread does it too only if the work thread has ended within
+     * {@code settle}.
+     */
     private void stopEverything(Handle h, Thread work) throws InterruptedException {
-        // The worker first, by one SIGKILL: untrusted code stops here, whatever the work
-        // thread is doing. Then everything else.
         List<String> killed = launcher.killWorker(h);
-        List<String> first = launcher.dispose(h);
+        List<String> removed = launcher.removeContainers(h);
         work.interrupt();
         work.join(Math.max(1, config.settle().toMillis()));
-        List<String> left = launcher.dispose(h);
-        if (work.isAlive() || !left.isEmpty()) {
-            log.warn("attempt {}: stopped; kill {}, first pass left {}, second left {}, work thread {}",
-                    h.attemptId(), killed, first, left, work.isAlive() ? "still running" : "done");
+        if (work.isAlive()) {
+            log.warn("attempt {}: stopped; kill {}, containers {}; the work thread is still in a daemon"
+                    + " call and disposes of the attempt when it returns", h.attemptId(), killed, removed);
+            return;
+        }
+        disposeQuietly(h, "after a stop");
+    }
+
+    private void disposeQuietly(Handle h, String when) {
+        try {
+            List<String> left = launcher.dispose(h);
+            if (!left.isEmpty()) {
+                log.warn("attempt {}: disposal {} left {}", h.attemptId(), when, left);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("attempt {}: disposal {} interrupted", h.attemptId(), when);
         }
     }
 
@@ -178,6 +211,9 @@ public final class BuildKitDriver implements BuildDriver {
             return new Failed("CONTEXT", detail(e.getMessage()));
         }
         try {
+            if (aborted.get()) {
+                return new Stopped();
+            }
             Push push = new Push(config.egress().registry(), prepared.repository(), build.buildId(),
                     config.credential());
             try {

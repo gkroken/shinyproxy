@@ -378,24 +378,7 @@ public final class DockerWorkerLauncher {
     public List<String> dispose(Handle h) throws InterruptedException {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
-        List<String> errors = new ArrayList<>();
-        // The worker first: it runs the untrusted code. Volumes go only after every container,
-        // so the client holding the socket and context volumes may go after it. Every
-        // helper name too, this method's own cleanup and check helpers included: a process
-        // killed while one ran leaves it behind, and its fixed name would then refuse every
-        // later disposal's helper ("already exists"), so the loop device could never be
-        // detached (found in 3d-2a, after a JUnit timeout killed the JVM mid-disposal).
-        for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), h.gateway(),
-                "skald-helper-cleanup-" + h.attemptId(), "skald-helper-check-" + h.attemptId(),
-                "skald-helper-conf-" + h.attemptId(),
-                "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
-            quietly(errors, () -> {
-                if (ours(docker.inspectContainer(c).config().labels(), h)) {
-                    retrying(() -> docker.removeContainer(c, RemoveContainerParam.forceKill(),
-                            RemoveContainerParam.removeVolumes()));
-                }
-            });
-        }
+        List<String> errors = new ArrayList<>(removeContainers(h));
         for (String v : List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(),
                 h.configVolume())) {
             quietly(errors, () -> {
@@ -425,6 +408,36 @@ public final class DockerWorkerLauncher {
         left.addAll(errors.stream().filter(e -> !e.contains("No such") && !e.contains("not found"))
                 .map(e -> "error: " + e).toList());
         return left;
+    }
+
+    /**
+     * Removes every container of the attempt (label-checked) and nothing else: every process
+     * of the attempt, untrusted code included, ends here. Volumes, the network and the loop
+     * device are left in place, so a caller that may race the attempt's own work thread can
+     * stop all code without removing a volume that thread might still bind (Docker would
+     * re-create a missing named volume for a bind, UNLABELLED, and no disposal would ever
+     * find it: 0c71146-F1). Returns the errors met.
+     */
+    public List<String> removeContainers(Handle h) throws InterruptedException {
+        List<String> errors = new ArrayList<>();
+        // The worker first: it runs the untrusted code. In dispose() volumes go only after
+        // every container, so the client holding the socket and context volumes may go after
+        // it. Every helper name too, dispose()'s own cleanup and check helpers included: a process
+        // killed while one ran leaves it behind, and its fixed name would then refuse every
+        // later disposal's helper ("already exists"), so the loop device could never be
+        // detached (found in 3d-2a, after a JUnit timeout killed the JVM mid-disposal).
+        for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), h.gateway(),
+                "skald-helper-cleanup-" + h.attemptId(), "skald-helper-check-" + h.attemptId(),
+                "skald-helper-conf-" + h.attemptId(),
+                "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
+            quietly(errors, () -> {
+                if (ours(docker.inspectContainer(c).config().labels(), h)) {
+                    retrying(() -> docker.removeContainer(c, RemoveContainerParam.forceKill(),
+                            RemoveContainerParam.removeVolumes()));
+                }
+            });
+        }
+        return errors;
     }
 
     /**
