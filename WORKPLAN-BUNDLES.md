@@ -1995,6 +1995,21 @@ below are marked passed by this planning document.
       imports and exports BuildKit's registry cache at `<registry>:5000/skald/cache/<content
       UUID>:<key>` (mode=min, export errors ignored; no cache mounts). Measured: a source-only
       edit reuses the restore step; a lock change and another content item do not.
+      **Part 4c (wiring):** `skald.builds.worker.enabled=true` starts a `BuildLoop` (logs and
+      continues on anything `runOnce` throws, T6 carry (c)) around the real driver. It refuses
+      to start, listing every problem at once, unless a database, object storage, the
+      registry and its credential, the images, a writable workspace and both mirrors are
+      configured; the published bases load and name `<registry>:5000`; each mirror's host
+      is allowed by the gateway; and the poll is at most renew_every / 2. The workspace quota
+      defaults to 8 GiB (F6 carry (3)). An interrupted runner (shutdown) writes nothing: the
+      lease expires into INTERRUPTED.
+      **Decided in 4c (coder, recorded for the reviewer and the user):** T6 carry (b) said
+      T7's reconciliation finishes a verified PUBLISHING attempt "exactly once through
+      `succeed()`". `succeed()` takes the version's `spec_json`, the server-generated runtime
+      contract that T9 defines ("Consume only the server-generated `spec_json` contract"), and
+      step 5's version transaction is T6/T9 evidence. So the `succeed()` call moves to T9
+      with that contract. T7 verifies the pushed digest and finishes the log; a PUBLISHING
+      attempt whose lease expires is reaped INTERRUPTED until T9.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
@@ -2058,7 +2073,10 @@ below are marked passed by this planning document.
       repository) belongs with the registry choice made here.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
-      Depends all above. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and
+      Depends all above. **Carried from T7 (c939203 review N1):** every (content, key) pair
+      leaves a BuildKit cache ref at `skald/cache/<content UUID>:<key>`; the GC (artifact
+      ledger, mark/recheck/delete) owns those refs too and deletes them with the content
+      item. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and
       asserted cleanup, described in Done when. Include restart during build, failed build
       retry, log retention, orphan/multipart cleanup and real registry GC with a referenced
       old image protected. **Retention is asserted per row of the policy table above, on both

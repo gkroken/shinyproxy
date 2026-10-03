@@ -221,6 +221,16 @@ public class BaseCatalogTest {
             byte[] c1 = bytes(root);
             assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c1, bytes(published(c1))), user);
         }
+        // c939203 review N2: a package-manager version that is not text would feed the cache
+        // key as "".
+        for (var badVersion : List.<java.util.function.Consumer<ObjectNode>>of(
+                pm -> pm.put("renv", 1), pm -> pm.putNull("renv"), pm -> pm.put("renv", ""),
+                pm -> pm.putObject("renv"))) {
+            ObjectNode cat = (ObjectNode) JSON.readTree(catalog());
+            badVersion.accept((ObjectNode) cat.get("bases").get(0).get("package_manager"));
+            byte[] c3 = bytes(cat);
+            assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c3, bytes(published(c3))));
+        }
         ObjectNode dup = (ObjectNode) JSON.readTree(catalog());
         ((ObjectNode) dup.get("bases").get(1)).put("id", R);
         byte[] c2 = bytes(dup);

@@ -323,6 +323,27 @@ public class BuildCoordinatorTest {
     }
 
     @Test
+    public void anInterruptedDriverWritesNothingAndTheInterruptStays() {
+        // The process is stopping (BuildLoop.stop interrupts the loop's thread). The driver has
+        // stopped its worker and rethrown; that is not a failure of the attempt, so nothing is
+        // written, and the lease expires into INTERRUPTED through the reaper.
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        BuildRunner runner = new BuildRunner(coordinator, ONE);
+        UUID build = queued("alice");
+        try {
+            assertEquals(BuildRunner.Result.INTERRUPTED, runner.runOnce("n1", (b, stop) -> {
+                throw new InterruptedException("stopping");
+            }));
+            assertTrue(Thread.currentThread().isInterrupted(), "the interrupt is kept for the caller");
+        } finally {
+            Thread.interrupted();
+        }
+        assertEquals("RUNNING", state(build), "nothing written: no FAILED, no DRIVER_ERROR");
+        assertEquals(null, jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?", String.class, build));
+        coordinator.fail(new Lease(build, 1, "n1"), "TEST_DONE", "free the slot");
+    }
+
+    @Test
     public void aCancelDuringTheRunStopsTheWorkerThenCancels() throws Exception {
         // The cancel flag reaches the driver through the heartbeat's renewal (at most one
         // renew_every later), so a short renewal interval keeps this test short.

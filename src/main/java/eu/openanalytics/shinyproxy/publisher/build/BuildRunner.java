@@ -64,7 +64,13 @@ public final class BuildRunner {
         /** A requested cancellation was confirmed by the driver's stop. */
         CANCELLED,
         /** The lease was lost while the driver ran; nothing the driver said was written. */
-        FENCED
+        FENCED,
+        /**
+         * This thread was interrupted (the process is stopping): the driver stopped the worker
+         * and nothing was written. The lease expires and the reaper makes the attempt
+         * INTERRUPTED, which is what it was; it did not fail.
+         */
+        INTERRUPTED
     }
 
     private final BuildCoordinator coordinator;
@@ -135,6 +141,9 @@ public final class BuildRunner {
             BuildDriver.Outcome outcome;
             try {
                 outcome = driver.run(build, stop);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return Result.INTERRUPTED;
             } catch (Exception ex) {
                 outcome = new BuildDriver.Failed("DRIVER_ERROR", ex.getClass().getSimpleName());
             }

@@ -94,10 +94,17 @@ public final class BaseCatalog {
 
     private final List<Entry> entries;
     private final Map<String, String> published;
+    private final String registry;
 
-    private BaseCatalog(List<Entry> entries, Map<String, String> published) {
+    private BaseCatalog(List<Entry> entries, Map<String, String> published, String registry) {
         this.entries = List.copyOf(entries);
         this.published = Map.copyOf(published);
+        this.registry = registry;
+    }
+
+    /** The registry the published bases name, host[:port] as the build worker reaches it. */
+    public String registry() {
+        return registry;
     }
 
     /** The shipped catalog with the deployment's published bases. */
@@ -122,7 +129,15 @@ public final class BaseCatalog {
                 throw new IllegalArgumentException("catalog: base " + b.path("id").asText() + " has no non-root user");
             }
             Map<String, String> packageManager = new java.util.TreeMap<>();
-            b.path("package_manager").fields().forEachRemaining(f -> packageManager.put(f.getKey(), f.getValue().asText()));
+            b.path("package_manager").fields().forEachRemaining(f -> {
+                // Strict like the rest of load(): a non-text version would feed the cache key
+                // as "" (c939203 review N2).
+                if (!f.getValue().isTextual() || f.getValue().asText().isEmpty()) {
+                    throw new IllegalArgumentException("catalog: base " + b.path("id").asText() + "'s "
+                            + f.getKey() + " version is not text");
+                }
+                packageManager.put(f.getKey(), f.getValue().asText());
+            });
             entries.add(new Entry(text(b, "id"), text(b, "type"), text(b, "language"), text(b, "version"),
                     text(b, "architecture"), b.path("recipe_revision").asInt(0), user.group(1), user.group(2),
                     packageManager));
@@ -174,7 +189,7 @@ public final class BaseCatalog {
             }
             published.put(f.getKey(), ref);
         }
-        return new BaseCatalog(entries, published);
+        return new BaseCatalog(entries, published, registry);
     }
 
     /**
